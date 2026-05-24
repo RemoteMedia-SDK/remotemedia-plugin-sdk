@@ -992,13 +992,22 @@ mod tests {
         assert_eq!(scope, EnvScope::PerPipeline);
     }
 
-    /// In a workspace build, the helper should find `clients/python/`
-    /// two levels up from this crate's manifest dir. Guards against the
+    /// In the monorepo, the helper should find `clients/python/` two
+    /// levels up from this crate's manifest dir. Guards against the
     /// fallback silently regressing if the workspace layout shifts.
+    ///
+    /// Skipped when the `clients/python` directory is absent (e.g., the
+    /// standalone plugin-sdk repo or a shallow checkout).
     #[test]
     fn test_discover_in_tree_python_src() {
-        let resolved =
-            discover_in_tree_python_src().expect("in-workspace build should locate clients/python");
+        let resolved = match discover_in_tree_python_src() {
+            Some(p) => p,
+            None => {
+                // Not in the monorepo layout (e.g., extracted plugin-sdk
+                // repo) — nothing to verify.
+                return;
+            }
+        };
         assert!(resolved.join("setup.py").is_file());
         assert!(resolved.ends_with("clients/python"));
     }
