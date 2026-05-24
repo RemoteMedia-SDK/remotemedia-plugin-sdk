@@ -1,0 +1,87 @@
+[package]
+name = "remotemedia-plugin-sdk"
+description = "Author-facing umbrella for RemoteMedia SDK loadable plugins — re-exports the FFI surface (loadable-node-abi), wire types (remotemedia-types), traits (remotemedia-traits), and the plugin_export! macro that wires a cdylib to abi_stable's root module."
+# Versioned independently of the workspace because this crate re-exports
+# the abi_stable FFI surface (`FfiNode`, `FfiNodeFactory`, …) and any
+# break in `loadable-node-abi` is *also* a break for plugin-sdk
+# consumers. Bumping the workspace's 0.4.x line for every ABI revision
+# would force a churn across every in-tree crate's version metadata;
+# pinning here keeps the SemVer signal where it matters.
+#
+# History:
+#   ≤0.4.0  shared workspace version (deprecated for this crate)
+#   0.5.0   re-exports loadable-node-abi 0.3.0 (FfiNode gained
+#           `process_streaming` + `OutputSink`). Pre-built cdylibs
+#           that linked plugin-sdk ≤ 0.4 fail abi_stable's load-time
+#           layout check; plugin authors must bump their dep to
+#           `remotemedia-plugin-sdk = "0.5"` and rebuild.
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.87"
+authors = ["RemoteMedia SDK Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk"
+
+[features]
+default = []
+# Enables `python_plugin_export!` and `PythonSubprocessFactory`. Off by
+# default so Rust-only plugins don't pay for the include_dir / py-env /
+# dirs dep weight. Python plugin crates opt in via
+# `remotemedia-plugin-sdk = { features = ["python-plugin"] }`.
+python-plugin = ["dep:include_dir", "dep:remotemedia-py-env", "dep:dirs", "dep:sha2", "dep:hex", "dep:iceoryx2", "dep:libc"]
+# Forward bundled-uv feature flags to `remotemedia-py-env` so plugins
+# that ship with a Python runtime can opt into the uv backend. Without
+# either of these, `PYTHON_ENV_MODE=managed` silently falls back to
+# `python -m venv + pip`, which one-at-a-time-resolves and routinely
+# leaves partially-installed venvs (transformers + huggingface-hub
+# version skew is the canonical failure). Plugin authors who don't
+# care about size should enable `bundled-uv-embedded`.
+bundled-uv = ["python-plugin", "remotemedia-py-env/bundled-uv"]
+bundled-uv-embedded = ["bundled-uv", "remotemedia-py-env/bundled-uv-embedded"]
+
+[dependencies]
+remotemedia-types = { path = "../types", version = "0.4.0" }
+remotemedia-traits = { path = "../traits", version = "0.4.0" }
+loadable-node-abi = { path = "../loadable-node-abi", version = "0.3.0" }
+abi_stable = "0.11"
+async-ffi = { version = "0.5", features = ["abi_stable"] }
+rmp-serde = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+inventory = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
+# python-plugin feature deps (opt-in).
+include_dir = { version = "0.7", optional = true }
+remotemedia-py-env = { path = "../py-env-manager", version = "0.4.0", optional = true }
+dirs = { version = "5", optional = true }
+sha2 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+# iceoryx2 for shared-memory IPC with the spawned Python runner.
+# Cargo path-dep cycle prevents reusing remotemedia-core's multiprocess
+# module directly (core depends on plugin-sdk via loadable-export, even
+# though that feature isn't selected here). We re-implement just the
+# wire-format helpers we need; the binary format is the IPC contract
+# with the Python runner so it's effectively frozen.
+iceoryx2 = { workspace = true, optional = true }
+
+# libc is needed only on Linux for prctl(PR_SET_PDEATHSIG) — gives the
+# kernel a hook to SIGKILL the runner subprocess if the host process
+# dies before Drop has a chance to clean it up. The cdylib's `Drop`
+# already kills the child on normal teardown; this is the "host got
+# SIGKILL'd / segfaulted" safety net.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true, optional = true }
+
+[dev-dependencies]
+# `macros` is needed for #[tokio::test]; `rt` for current_thread flavor in
+# tests. The runtime dep above (`rt-multi-thread`) is what powers the
+# plugin-side runtime spawned from the adapter at production runtime.
+tokio = { version = "1", features = ["macros", "rt", "time", "sync"] }
+# `futures::executor::block_on` lets us drive the FfiFuture from a
+# thread that has zero Tokio runtime in TLS — the actual condition the
+# fix addresses. `#[tokio::test]` always installs a runtime in TLS, so
+# we cannot rely on it to reproduce the "no reactor running" panic.
+futures = { workspace = true }
+async-trait = { workspace = true }

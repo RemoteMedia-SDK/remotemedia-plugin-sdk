@@ -1,0 +1,38 @@
+[package]
+name = "remotemedia-py-env"
+description = "Python virtual environment manager for RemoteMedia — provisions venvs via uv or system Python, with marker-aware dep dedup."
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.87"
+authors = ["RemoteMedia SDK Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk"
+
+# Extracted from `crates/core/src/python/env_manager/` so loadable-node
+# plugins can call `ensure_env(&deps)` from inside a dlopen'd cdylib
+# without dragging `remotemedia-core` through the ABI boundary. The host
+# and plugins both depend on this crate directly.
+#
+# Only foreign type is `remotemedia_types::{Error, Result}` — the same
+# error type the existing `loadable-node-abi` surface already uses, so
+# pulling this crate into a plugin adds no new ABI surface beyond what
+# is already there.
+
+[features]
+default = []
+# Use `uv` for venv provisioning instead of system `python -m venv` + `pip`.
+bundled-uv = []
+# Embed a uv binary at build time (used when no system uv is available).
+bundled-uv-embedded = ["bundled-uv"]
+# Allow embedding python via uv as well (managed-with-python mode).
+embedded-python = ["bundled-uv"]
+
+[dependencies]
+remotemedia-types = { path = "../types", version = "0.4.0" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }

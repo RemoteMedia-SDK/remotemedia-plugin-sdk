@@ -1,0 +1,9 @@
+/tmp/remotemedia-plugin-sdk/target/debug/deps/tstr_proc_macros-b8b2e959f2da5ead.d: /home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/lib.rs /home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/non_syn_parsing.rs /home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/nested_tuple_compute.rs /home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/utils.rs /home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/no_const_generics.rs
+
+/tmp/remotemedia-plugin-sdk/target/debug/deps/libtstr_proc_macros-b8b2e959f2da5ead.so: /home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/lib.rs /home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/non_syn_parsing.rs /home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/nested_tuple_compute.rs /home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/utils.rs /home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/no_const_generics.rs
+
+/home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/lib.rs:
+/home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/non_syn_parsing.rs:
+/home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/nested_tuple_compute.rs:
+/home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/utils.rs:
+/home/acidhax/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tstr_proc_macros-0.2.2/src/no_const_generics.rs:

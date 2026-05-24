@@ -1,0 +1,36 @@
+[package]
+name = "loadable-node-abi"
+description = "abi_stable FFI surface for RemoteMedia SDK loadable plugins (NodePlugin, FfiNode, FfiNodeFactory). Pinned independently of the rest of the SDK so plugins can lock to a single ABI version."
+# Semver discipline: bump the MINOR (0.x → 0.x+1) whenever the public
+# abi_stable surface changes shape — adding/removing prefix-type
+# methods, changing FFI signatures, altering RBoxError variants, etc.
+# That gives external plugin authors a cargo-level signal at build
+# time instead of relying on abi_stable's load-time AbiInstability
+# check (which only fires once the .so is dlopen'd into a host).
+#
+# History:
+#   0.1.0  initial release
+#   0.2.0  + FfiNode::process_multi (commit f4ba6b4e)
+#         + FfiNode::initialize (commit 3bc76021)
+#         (version-string bump landed retroactively in commit 09e90a07)
+#   0.3.0  + FfiNode::process_streaming + OutputSink trait
+#         (commit 08b40155) — per-frame streaming variant of
+#         process_multi. Pre-built 0.2.x cdylibs fail the
+#         abi_stable load-time layout check against a 0.3+ host
+#         (vtable slot count 6 vs 7); plugin authors must bump
+#         their `remotemedia-plugin-sdk` (or `loadable-node-abi`)
+#         dep and rebuild.
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.87"
+authors = ["RemoteMedia SDK Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk"
+
+# Pure rlib — both host and plugin link this as a regular library. The
+# only thing that crosses the dynamic boundary is the abi_stable types
+# defined in this crate, never `remotemedia-core` types directly.
+
+[dependencies]
+abi_stable = "0.11"
+async-ffi = { version = "0.5", features = ["abi_stable"] }

@@ -1,0 +1,39 @@
+[workspace]
+members = [
+    "crates/loadable-node-abi",
+    "crates/types",
+    "crates/traits",
+    "crates/py-env-manager",
+    "crates/plugin-sdk",
+]
+default-members = [
+    "crates/loadable-node-abi",
+    "crates/types",
+    "crates/traits",
+    "crates/py-env-manager",
+    "crates/plugin-sdk",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.87"
+authors = ["RemoteMedia SDK Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk"
+homepage = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk"
+
+[workspace.dependencies]
+async-trait = "0.1"
+futures = "0.3"
+hex = "0.4"
+iceoryx2 = "0.9.0"
+inventory = "0.3"
+libc = "0.2"
+schemars = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "1"
+tokio = { version = "1.35", features = ["sync", "macros", "io-util", "rt", "rt-multi-thread", "time", "fs", "process", "signal"] }
+tracing = "0.1"

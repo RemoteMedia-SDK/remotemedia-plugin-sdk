@@ -1,0 +1,27 @@
+[package]
+name = "remotemedia-traits"
+description = "Streaming node traits + schema metadata for RemoteMedia SDK — what hosts and plugins both implement against."
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.87"
+authors = ["RemoteMedia SDK Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk"
+
+[dependencies]
+remotemedia-types = { path = "../types", version = "0.4.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+# Snapshot ports — atomic latest-wins slot for tick-driven nodes reading
+# state-like inputs. Used by `OutputPort<T>` / `InputPort<T>`.
+arc-swap = "1.8"
+
+# Schema metadata (plugin-author surface). NodeSchema is a plain serde
+# struct used by `StreamingNodeFactory::schema()`. `inventory` powers the
+# `#[derive(NodeConfig)]` auto-collection mechanism. Both are leaf deps
+# (no tokio, no async runtime).
+schemars = { workspace = true }
+inventory = { workspace = true }
