@@ -25,7 +25,7 @@ edition = "2021"
 rust-version = "1.87"
 authors = ["RemoteMedia SDK Contributors"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk"
+repository = "https://github.com/RemoteMedia-SDK/remotemedia-sdk"
 
 # Pure rlib — both host and plugin link this as a regular library. The
 # only thing that crosses the dynamic boundary is the abi_stable types

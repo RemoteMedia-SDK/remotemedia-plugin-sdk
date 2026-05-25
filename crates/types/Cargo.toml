@@ -6,7 +6,7 @@ edition = "2021"
 rust-version = "1.87"
 authors = ["RemoteMedia SDK Contributors"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk"
+repository = "https://github.com/RemoteMedia-SDK/remotemedia-sdk"
 
 [dependencies]
 serde = { workspace = true }

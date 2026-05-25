@@ -188,7 +188,11 @@ impl EnvBackend for UvBackend {
         }
 
         // Write requirements to a temp file
-        let req_path = venv.path.join("requirements.txt");
+        let req_path = venv.path.join(format!(
+            "requirements-{}-{}.txt",
+            std::process::id(),
+            unique_suffix()
+        ));
         std::fs::write(&req_path, deps.join("\n")).map_err(|e| {
             Error::Execution(format!(
                 "Failed to write requirements.txt to {}: {}",
@@ -216,6 +220,13 @@ impl EnvBackend for UvBackend {
     fn resolve_python(&self, venv: &VenvInfo) -> PathBuf {
         resolve_venv_python(&venv.path)
     }
+}
+
+fn unique_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
 }
 
 /// Resolve the path to the Python executable inside a virtual environment.

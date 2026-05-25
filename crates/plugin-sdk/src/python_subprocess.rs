@@ -433,7 +433,7 @@ pub async fn provision_plugin_env(
         .map_err(|e| format!("read_to_string({}): {e}", module_file.display()))?;
     let deps = extract_python_requires(&module_src);
 
-    let env_config = PythonEnvConfig::default();
+    let env_config = PythonEnvConfig::from_env();
     let env_mgr =
         PythonEnvManager::new(env_config).map_err(|e| format!("PythonEnvManager::new: {e}"))?;
     let venv = env_mgr
@@ -533,11 +533,28 @@ pub async fn provision_plugin_env_from_path(
     deps: Vec<String>,
     hash: String,
 ) -> Result<PluginProvisioning, String> {
-    let env_config = PythonEnvConfig::default();
+    provision_plugin_env_from_path_scoped(
+        module_root,
+        deps,
+        hash,
+        PythonEnvConfig::from_env(),
+        None,
+    )
+    .await
+}
+
+/// Source-load provisioning with caller-supplied environment config and scope context.
+pub async fn provision_plugin_env_from_path_scoped(
+    module_root: PathBuf,
+    deps: Vec<String>,
+    hash: String,
+    env_config: PythonEnvConfig,
+    scope_context: Option<String>,
+) -> Result<PluginProvisioning, String> {
     let env_mgr =
         PythonEnvManager::new(env_config).map_err(|e| format!("PythonEnvManager::new: {e}"))?;
     let venv = env_mgr
-        .ensure_env(&deps)
+        .ensure_env_scoped(&deps, scope_context.as_deref())
         .await
         .map_err(|e| format!("PythonEnvManager::ensure_env({deps:?}): {e}"))?;
 

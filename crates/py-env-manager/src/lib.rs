@@ -366,6 +366,9 @@ struct VenvCache {
     lock: tokio::sync::Mutex<()>,
 }
 
+static GLOBAL_VENV_CACHE_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
 impl VenvCache {
     fn new(cache_dir: PathBuf, max_cached_envs: usize) -> Self {
         Self {
@@ -376,7 +379,7 @@ impl VenvCache {
     }
 
     /// Compute a cache key from the Python version and sorted dependency list.
-    fn cache_key(python_version: &str, deps: &[String]) -> String {
+    fn cache_key(python_version: &str, deps: &[String], scope_context: Option<&str>) -> String {
         let mut sorted_deps: Vec<String> = deps
             .iter()
             .map(|d| {
@@ -390,6 +393,10 @@ impl VenvCache {
         hasher.update(python_version.as_bytes());
         hasher.update(b"\0");
         hasher.update(sorted_deps.join("\0").as_bytes());
+        if let Some(scope_context) = scope_context.filter(|s| !s.is_empty()) {
+            hasher.update(b"\0scope\0");
+            hasher.update(scope_context.as_bytes());
+        }
         let hash = hasher.finalize();
         hex::encode(&hash[..8]) // 16 hex chars from first 8 bytes
     }
@@ -399,11 +406,14 @@ impl VenvCache {
         &self,
         deps: &[String],
         python_version: &str,
+        scope_context: Option<&str>,
         backend: &dyn EnvBackend,
     ) -> Result<VenvInfo> {
+        let global_lock = GLOBAL_VENV_CACHE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+        let _global_guard = global_lock.lock().await;
         let _guard = self.lock.lock().await;
 
-        let key = Self::cache_key(python_version, deps);
+        let key = Self::cache_key(python_version, deps, scope_context);
         let venv_dir = self.cache_dir.join(&key);
         let meta_path = venv_dir.join(METADATA_FILENAME);
 
@@ -633,6 +643,44 @@ impl Default for PythonEnvConfig {
     }
 }
 
+impl PythonEnvConfig {
+    /// Build config from defaults plus process environment overrides.
+    ///
+    /// Source-load and cdylib Python plugins use this so they honor the
+    /// same deployment knobs as the in-tree multiprocess executor.
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+        config.apply_env_overrides();
+        config
+    }
+
+    /// Apply process environment overrides in place.
+    pub fn apply_env_overrides(&mut self) {
+        if let Ok(mode) = std::env::var("PYTHON_ENV_MODE") {
+            self.mode = match mode.to_lowercase().as_str() {
+                "system" => PythonEnvMode::System,
+                "managed" | "uv" => PythonEnvMode::Managed,
+                "managed_with_python" | "managed-with-python" | "uv_python" | "uv-python" => {
+                    PythonEnvMode::ManagedWithPython
+                }
+                other => {
+                    tracing::warn!(
+                        value = other,
+                        "Ignoring unknown PYTHON_ENV_MODE; expected system, managed, or managed_with_python"
+                    );
+                    self.mode.clone()
+                }
+            };
+        }
+
+        if let Ok(version) = std::env::var("PYTHON_VERSION") {
+            if !version.trim().is_empty() {
+                self.python_version = version;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PythonEnvManager
 // ---------------------------------------------------------------------------
@@ -741,6 +789,18 @@ impl PythonEnvManager {
     /// 2. Return a cached environment if one matches
     /// 3. Otherwise create a new venv, install deps, and cache it
     pub async fn ensure_env(&self, deps: &[String]) -> Result<VenvInfo> {
+        self.ensure_env_scoped(deps, None).await
+    }
+
+    /// Ensure a virtual environment exists with an internally-derived scope context.
+    ///
+    /// `scope_context` is not user-facing. Callers derive it from manifest
+    /// scope policy plus runtime identity, such as session or node identity.
+    pub async fn ensure_env_scoped(
+        &self,
+        deps: &[String],
+        scope_context: Option<&str>,
+    ) -> Result<VenvInfo> {
         // Prepend `base_deps` — e.g. the `remotemedia` client itself —
         // so every provisioned venv can import the package that defines
         // the multiprocess nodes. Different `base_deps` values produce
@@ -756,7 +816,12 @@ impl PythonEnvManager {
             v
         };
         self.cache
-            .get_or_create(&merged, &self.config.python_version, self.backend.as_ref())
+            .get_or_create(
+                &merged,
+                &self.config.python_version,
+                scope_context,
+                self.backend.as_ref(),
+            )
             .await
     }
 
@@ -953,8 +1018,8 @@ mod tests {
     #[test]
     fn test_cache_key_deterministic() {
         let deps = vec!["numpy>=1.21".to_string(), "scipy".to_string()];
-        let key1 = VenvCache::cache_key("3.11", &deps);
-        let key2 = VenvCache::cache_key("3.11", &deps);
+        let key1 = VenvCache::cache_key("3.11", &deps, None);
+        let key2 = VenvCache::cache_key("3.11", &deps, None);
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 16); // 8 bytes = 16 hex chars
     }
@@ -963,17 +1028,27 @@ mod tests {
     fn test_cache_key_order_independent() {
         let deps1 = vec!["scipy".to_string(), "numpy".to_string()];
         let deps2 = vec!["numpy".to_string(), "scipy".to_string()];
-        let key1 = VenvCache::cache_key("3.11", &deps1);
-        let key2 = VenvCache::cache_key("3.11", &deps2);
+        let key1 = VenvCache::cache_key("3.11", &deps1, None);
+        let key2 = VenvCache::cache_key("3.11", &deps2, None);
         assert_eq!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_version_matters() {
         let deps = vec!["numpy".to_string()];
-        let key1 = VenvCache::cache_key("3.11", &deps);
-        let key2 = VenvCache::cache_key("3.12", &deps);
+        let key1 = VenvCache::cache_key("3.11", &deps, None);
+        let key2 = VenvCache::cache_key("3.12", &deps, None);
         assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_cache_key_scope_context_matters() {
+        let deps = vec!["numpy".to_string()];
+        let global = VenvCache::cache_key("3.11", &deps, None);
+        let node_a = VenvCache::cache_key("3.11", &deps, Some("session:s1;node:a"));
+        let node_b = VenvCache::cache_key("3.11", &deps, Some("session:s1;node:b"));
+        assert_ne!(global, node_a);
+        assert_ne!(node_a, node_b);
     }
 
     #[test]
@@ -992,22 +1067,13 @@ mod tests {
         assert_eq!(scope, EnvScope::PerPipeline);
     }
 
-    /// In the monorepo, the helper should find `clients/python/` two
-    /// levels up from this crate's manifest dir. Guards against the
+    /// In a workspace build, the helper should find `clients/python/`
+    /// two levels up from this crate's manifest dir. Guards against the
     /// fallback silently regressing if the workspace layout shifts.
-    ///
-    /// Skipped when the `clients/python` directory is absent (e.g., the
-    /// standalone plugin-sdk repo or a shallow checkout).
     #[test]
     fn test_discover_in_tree_python_src() {
-        let resolved = match discover_in_tree_python_src() {
-            Some(p) => p,
-            None => {
-                // Not in the monorepo layout (e.g., extracted plugin-sdk
-                // repo) — nothing to verify.
-                return;
-            }
-        };
+        let resolved =
+            discover_in_tree_python_src().expect("in-workspace build should locate clients/python");
         assert!(resolved.join("setup.py").is_file());
         assert!(resolved.ends_with("clients/python"));
     }
