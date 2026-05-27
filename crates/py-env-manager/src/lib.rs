@@ -735,12 +735,10 @@ impl PythonEnvManager {
                     );
                 }
                 None => {
-                    tracing::warn!(
-                        "Could not locate the remotemedia Python client. \
-                         Set REMOTEMEDIA_PYTHON_SRC=/path/to/clients/python or \
-                         populate PythonEnvConfig.base_deps; otherwise managed \
-                         venvs will lack the client and multiprocess nodes will \
-                         fail to register."
+                    config.base_deps = vec!["remotemedia-client".to_string()];
+                    tracing::info!(
+                        "Could not locate local remotemedia Python client. \
+                         Managed venvs will install 'remotemedia-client' from PyPI by default."
                     );
                 }
             }
@@ -863,10 +861,22 @@ fn discover_in_tree_python_src() -> Option<PathBuf> {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let candidate = crate_dir.parent()?.parent()?.join("clients").join("python");
     if candidate.join("setup.py").is_file() {
-        Some(candidate)
-    } else {
-        None
+        return Some(candidate);
     }
+    
+    // Check sibling repo remotemedia-sdk
+    if let Some(parent) = crate_dir.parent() {
+        if let Some(grandparent) = parent.parent() {
+            if let Some(great_grandparent) = grandparent.parent() {
+                let sibling_candidate = great_grandparent.join("remotemedia-sdk").join("clients").join("python");
+                if sibling_candidate.join("setup.py").is_file() {
+                    return Some(sibling_candidate);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Default cache directory: `~/.config/remotemedia/envs/`

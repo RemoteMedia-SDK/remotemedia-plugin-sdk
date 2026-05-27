@@ -84,6 +84,7 @@
 #![warn(clippy::all)]
 
 pub mod capabilities;
+pub mod llm;
 pub mod ports;
 pub mod runtime_context;
 pub mod schema;
@@ -94,6 +95,8 @@ pub use capabilities::{
     ConstraintValue, FileConstraints, JsonConstraints, MediaCapabilities, MediaConstraints,
     PixelFormat, TensorConstraints, TensorDataType, TextConstraints, VideoConstraints,
 };
+
+pub use llm::{InterruptableBackend, StatefulConversationBackend, VoiceActivityDetectorBackend};
 
 pub use ports::{InputPort, OutputPort, PortKind, SnapshotPort, TimestampedSnapshot};
 
