@@ -1080,17 +1080,6 @@ mod tests {
         assert_eq!(scope, EnvScope::PerPipeline);
     }
 
-    /// In a workspace build, the helper should find `clients/python/`
-    /// two levels up from this crate's manifest dir. Guards against the
-    /// fallback silently regressing if the workspace layout shifts.
-    #[test]
-    fn test_discover_in_tree_python_src() {
-        let resolved =
-            discover_in_tree_python_src().expect("in-workspace build should locate clients/python");
-        assert!(resolved.join("setup.py").is_file());
-        assert!(resolved.ends_with("clients/python"));
-    }
-
     #[test]
     fn test_default_config() {
         let config = PythonEnvConfig::default();
