@@ -863,12 +863,15 @@ fn discover_in_tree_python_src() -> Option<PathBuf> {
     if candidate.join("setup.py").is_file() {
         return Some(candidate);
     }
-    
+
     // Check sibling repo remotemedia-sdk
     if let Some(parent) = crate_dir.parent() {
         if let Some(grandparent) = parent.parent() {
             if let Some(great_grandparent) = grandparent.parent() {
-                let sibling_candidate = great_grandparent.join("remotemedia-sdk").join("clients").join("python");
+                let sibling_candidate = great_grandparent
+                    .join("remotemedia-sdk")
+                    .join("clients")
+                    .join("python");
                 if sibling_candidate.join("setup.py").is_file() {
                     return Some(sibling_candidate);
                 }
