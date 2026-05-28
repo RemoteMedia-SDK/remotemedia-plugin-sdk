@@ -22,7 +22,7 @@ description = "abi_stable FFI surface for RemoteMedia SDK loadable plugins (Node
 #         dep and rebuild.
 version = "0.3.0"
 edition = "2021"
-rust-version = "1.87"
+rust-version.workspace = true
 authors = ["RemoteMedia SDK Contributors"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/RemoteMedia-SDK/remotemedia-sdk"
