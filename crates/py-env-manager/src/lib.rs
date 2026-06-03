@@ -47,7 +47,7 @@ pub enum PythonEnvMode {
 
 impl Default for PythonEnvMode {
     fn default() -> Self {
-        Self::System
+        Self::Managed
     }
 }
 
@@ -1083,7 +1083,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = PythonEnvConfig::default();
-        assert_eq!(config.mode, PythonEnvMode::System);
+        assert_eq!(config.mode, PythonEnvMode::Managed);
         assert_eq!(config.scope, EnvScope::Global);
         assert_eq!(config.python_version, "3.11");
         assert_eq!(config.max_cached_envs, 8);
