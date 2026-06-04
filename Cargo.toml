@@ -5,6 +5,7 @@ members = [
     "crates/traits",
     "crates/py-env-manager",
     "crates/plugin-sdk",
+    "crates/modality",
 ]
 default-members = [
     "crates/loadable-node-abi",
@@ -12,6 +13,7 @@ default-members = [
     "crates/traits",
     "crates/py-env-manager",
     "crates/plugin-sdk",
+    "crates/modality",
 ]
 resolver = "2"
 

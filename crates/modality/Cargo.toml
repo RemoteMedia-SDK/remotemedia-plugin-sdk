@@ -1,0 +1,34 @@
+[package]
+name = "remotemedia-modality"
+version = "0.4.0"
+edition = "2021"
+rust-version.workspace = true
+authors = ["RemoteMedia SDK Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk"
+description = "Transport-agnostic, modality-organised primitives (chat, STT, TTS, T2I, vision, embedding) shared by RemoteMedia provider nodes and loadable plugins. Safe to depend on from cdylib plugins (does NOT link remotemedia-core)."
+
+[lib]
+name = "remotemedia_modality"
+crate-type = ["rlib"]
+
+[dependencies]
+# Shared wire-format types (`RuntimeData`, `Error`, `tag_text_str`,
+# `TEXT_CHANNEL_DEFAULT`). Both the host (`remotemedia-core`) and
+# loadable plugins depend on this skinny crate, so error and runtime-
+# data types match across the ABI boundary.
+remotemedia-types = { path = "../types", version = "0.4.0", features = ["schemars"] }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = []
+llm = []
+stt = []
+tts = []
+t2i = []
+vision = []
+embedding = []

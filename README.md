@@ -26,7 +26,7 @@ When testing an unreleased SDK line, pin a git revision instead of a
 branch:
 
 ```toml
-remotemedia-plugin-sdk = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk.git", rev = "<sha>" }
+remotemedia-plugin-sdk = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "<sha>" }
 ```
 
 ## Verification
