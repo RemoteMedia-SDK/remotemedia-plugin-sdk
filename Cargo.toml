@@ -41,3 +41,7 @@ sha2 = "0.10"
 thiserror = "1"
 tokio = { version = "1.35", features = ["sync", "macros", "io-util", "rt", "rt-multi-thread", "time", "fs", "process", "signal"] }
 tracing = "0.1"
+# PyO3 for in-process Python execution (Android)
+pyo3 = { version = "0.28", features = ["abi3-py310", "auto-initialize"], default-features = false }
+pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
+numpy = "0.28"

@@ -18,14 +18,20 @@ pub use rmp_serde;
 pub mod adapter;
 pub mod params;
 
-#[cfg(feature = "python-plugin")]
+#[cfg(all(feature = "python-plugin", not(target_os = "android")))]
 pub mod python_subprocess;
 
-#[cfg(feature = "python-plugin")]
+#[cfg(all(feature = "python-plugin", not(target_os = "android")))]
 pub mod python_ipc;
 
-#[cfg(feature = "python-plugin")]
+#[cfg(all(feature = "python-plugin", not(target_os = "android")))]
 pub mod control_hook;
+
+#[cfg(feature = "inprocess-python")]
+pub mod inprocess_python;
+
+#[cfg(feature = "inprocess-python")]
+pub use inprocess_python::PythonNodeHandle;
 
 /// Inventory entry describing one loadable-export factory.
 ///
@@ -194,6 +200,149 @@ macro_rules! python_plugin_export {
 
         // Emit the abi_stable root module. Identical to the no-arg form
         // of `plugin_export!()` — both walk the inventory.
+        $crate::plugin_export!();
+    };
+}
+
+/// Expand to a complete loadable Python-plugin definition for in-process execution.
+///
+/// Similar to `python_plugin_export!` but for in-process PyO3 execution (Android, or opt-in on Linux/macOS).
+/// Uses the `inprocess_python::PythonNodeHandle` directly instead of spawning a subprocess.
+///
+/// # Required keys
+///
+/// * `node_type` — string literal matching the pipeline's `node_type:` for this node
+/// * `module` — bare Python module name to import (e.g. `"my_plugin"`)
+/// * `class` — Python class name within the module
+/// * `embedded` — expression returning a `&'static include_dir::Dir<'static>` (same as subprocess)
+///
+/// # Example
+///
+/// ```ignore
+/// use include_dir::{include_dir, Dir};
+///
+/// static EMBED: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/embedded");
+///
+/// remotemedia_plugin_sdk::python_inprocess_plugin_export! {
+///     node_type: "MyInProcessNode",
+///     module:    "my_plugin",
+///     class:     "MyNode",
+///     embedded:  &EMBED,
+/// }
+/// ```
+///
+/// Available only when the `inprocess-python` cargo feature is enabled.
+#[cfg(feature = "inprocess-python")]
+#[macro_export]
+macro_rules! python_inprocess_plugin_export {
+    {
+        node_type: $node_type:literal,
+        module:    $module:literal,
+        class:     $class:literal,
+        embedded:  $embedded:expr $(,)?
+    } => {
+        fn __remotemedia_py_inprocess_plugin_factory()
+            -> $crate::FfiNodeFactoryBox
+        {
+            use $crate::inprocess_python::PythonNodeHandle;
+            use $crate::loadable_node_abi::{FfiNode, FfiNodeBox, FfiNodeFactory, FfiNodeFactoryBox, FfiNodeFactory_TO};
+            use $crate::abi_stable::std_types::RBox;
+            use $crate::abi_stable::sabi_trait::TD_Opaque;
+            use std::sync::Arc;
+            
+            struct InProcessPythonFactory {
+                module: String,
+                class: String,
+                embedded: $crate::include_dir::Dir<'static>,
+            }
+            
+            impl FfiNodeFactory for InProcessPythonFactory {
+                fn create(&self, config: Vec<u8>) -> FfiNodeBox {
+                    // For in-process, we create a node that uses PythonNodeHandle directly
+                    let node = InProcessPythonNode::new(self.module.clone(), self.class.clone());
+
+                    RBox::new(node) as FfiNodeBox
+                }
+                
+                fn node_schema(&self) -> $crate::types::NodeSchema {
+                    $crate::types::NodeSchema::default()
+                }
+            }
+            
+            struct InProcessPythonNode {
+                module: String,
+                class: String,
+                handle: Option<PythonNodeHandle>,
+            }
+            
+            impl InProcessPythonNode {
+                fn new(module: String, class: String) -> Self {
+                    Self { module, class, handle: None }
+                }
+            }
+            
+            #[async_trait::async_trait]
+            impl FfiNode for InProcessPythonNode {
+                async fn initialize(&mut self, config: Vec<u8>) -> Result<(), $crate::types::Error> {
+                    let config: serde_json::Value = rmp_serde::from_slice(&config)
+                        .map_err(|e| $crate::types::Error::Serialization(e.to_string()))?;
+                    
+                    let handle = PythonNodeHandle::load(&self.module, &self.class)
+                        .map_err(|e| $crate::types::Error::Execution(e.to_string()))?;
+                    
+                    if let Some(cfg) = config.as_object() {
+                        let mut map = std::collections::HashMap::new();
+                        for (k, v) in cfg {
+                            map.insert(k.clone(), v.clone());
+                        }
+                        handle.initialize(&map)
+                            .map_err(|e| $crate::types::Error::Execution(e.to_string()))?;
+                    }
+                    
+                    self.handle = Some(handle);
+                    Ok(())
+                }
+                
+                async fn process(&mut self, input: Vec<u8>) -> Result<Vec<u8>, $crate::types::Error> {
+                    let handle = self.handle.as_ref()
+                        .ok_or_else(|| $crate::types::Error::Execution("Node not initialized".into()))?;
+                    
+                    let input_data: $crate::inprocess_python::RuntimeData = rmp_serde::from_slice(&input)
+                        .map_err(|e| $crate::types::Error::Serialization(e.to_string()))?;
+                    
+                    let output = handle.process(&input_data)
+                        .map_err(|e| $crate::types::Error::Execution(e.to_string()))?;
+                    
+                    rmp_serde::to_vec(&output).map_err(|e| $crate::types::Error::Serialization(e.to_string()))
+                }
+                
+                async fn finalize(&mut self) -> Result<(), $crate::types::Error> {
+                    if let Some(handle) = self.handle.take() {
+                        handle.finalize()
+                            .map_err(|e| $crate::types::Error::Execution(e.to_string()))?;
+                    }
+                    Ok(())
+                }
+            }
+
+            $crate::FfiNodeFactory_TO::from_value(
+                InProcessPythonFactory {
+                    module: $module.to_string(),
+                    class: $class.to_string(),
+                    embedded: $embedded,
+                },
+                TD_Opaque,
+            )
+        }
+
+        // Surface the factory through the same inventory mechanism
+        $crate::inventory::submit! {
+            $crate::LoadableFactoryEntry {
+                make: __remotemedia_py_inprocess_plugin_factory,
+            }
+        }
+
+        // Emit the abi_stable root module
         $crate::plugin_export!();
     };
 }

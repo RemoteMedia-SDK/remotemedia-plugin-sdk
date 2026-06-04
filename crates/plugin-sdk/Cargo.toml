@@ -29,6 +29,8 @@ default = []
 # dirs dep weight. Python plugin crates opt in via
 # `remotemedia-plugin-sdk = { features = ["python-plugin"] }`.
 python-plugin = ["dep:include_dir", "dep:remotemedia-py-env", "dep:dirs", "dep:sha2", "dep:hex", "dep:iceoryx2", "dep:libc"]
+# Enables in-process Python execution via PyO3 (Android, and opt-in on Linux/macOS)
+inprocess-python = ["dep:include_dir", "dep:remotemedia-py-env", "dep:dirs", "dep:sha2", "dep:hex", "dep:pyo3", "dep:pyo3-async-runtimes", "dep:numpy"]
 # Forward bundled-uv feature flags to `remotemedia-py-env` so plugins
 # that ship with a Python runtime can opt into the uv backend. Without
 # either of these, `PYTHON_ENV_MODE=managed` silently falls back to
@@ -65,6 +67,11 @@ hex = { workspace = true, optional = true }
 # wire-format helpers we need; the binary format is the IPC contract
 # with the Python runner so it's effectively frozen.
 iceoryx2 = { workspace = true, optional = true }
+
+# In-process PyO3 deps (opt-in via inprocess-python feature)
+pyo3 = { workspace = true, optional = true }
+pyo3-async-runtimes = { workspace = true, optional = true }
+numpy = { workspace = true, optional = true }
 
 # libc is needed only on Linux for prctl(PR_SET_PDEATHSIG) — gives the
 # kernel a hook to SIGKILL the runner subprocess if the host process

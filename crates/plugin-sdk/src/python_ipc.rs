@@ -30,25 +30,36 @@
 //! The wire format and channel naming match the in-host executor
 //! exactly, so the runner needs zero changes.
 
-use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(all(feature = "python-plugin", not(target_os = "android")))]
+mod inner {
+    use std::path::Path;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use iceoryx2::prelude::*;
-use tokio::sync::{mpsc, oneshot};
+    use iceoryx2::prelude::*;
+    use tokio::sync::{mpsc, oneshot};
 
-const MAX_SLICE_LEN: usize = 1024 * 1024;
-const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(300);
-const READY_TIMEOUT_ENV: &str = "REMOTEMEDIA_PLUGIN_READY_TIMEOUT_SECS";
-const READY_POLL_INTERVAL: Duration = Duration::from_millis(10);
+    const MAX_SLICE_LEN: usize = 1024 * 1024;
+    const DEFAULT_READY_TIMEOUT: Duration = Duration::from_secs(300);
+    const READY_TIMEOUT_ENV: &str = "REMOTEMEDIA_PLUGIN_READY_TIMEOUT_SECS";
+    const READY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-fn ready_timeout() -> Duration {
-    std::env::var(READY_TIMEOUT_ENV)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_READY_TIMEOUT)
+    fn ready_timeout() -> Duration {
+        std::env::var(READY_TIMEOUT_ENV)
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_READY_TIMEOUT)
+    }
+
+    // ... rest of the file
+
+#[cfg(all(feature = "python-plugin", not(target_os = "android")))]
+pub use inner::*;
+
+#[cfg(not(all(feature = "python-plugin", not(target_os = "android"))))]
+compile_error!("python_ipc requires python-plugin feature and is not available on Android target");
 }
 
 /// Data-type discriminant — matches the byte values the Python runner
