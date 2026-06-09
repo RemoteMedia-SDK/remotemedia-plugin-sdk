@@ -104,8 +104,8 @@ pub use runtime_context::{InitializeContextRead, NodeRuntimeContextRead};
 
 pub use schema::{
     collect_registered_configs, generate_typescript, HasNodeSchema, LatencyClass,
-    NodeCapabilitiesSchema, NodeConfigSchema, NodeParameter, NodeSchema, NodeSchemaRegistry,
-    ParameterType, RegisteredNodeConfig, RuntimeDataType,
+    NodeCapabilitiesSchema, NodeConfigSchema, NodeModelSourceFile, NodeModelSources, NodeParameter,
+    NodeSchema, NodeSchemaRegistry, ParameterType, RegisteredNodeConfig, RuntimeDataType,
 };
 
 pub use streaming::{

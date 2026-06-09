@@ -22,6 +22,35 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+fn default_true() -> bool {
+    true
+}
+
+/// Model source declaration for a node (in its schema metadata).
+/// Distinct from `remotemedia_core::manifest::ModelSourceFile` which is used
+/// in pipeline manifests' `params["model_sources"]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeModelSourceFile {
+    /// Local path where the model should be placed (relative to model cache dir)
+    pub path: String,
+    /// Filename to download (key for lookup)
+    pub filename: String,
+    /// Download URL
+    pub url: String,
+    /// Expected file size in bytes (for progress/validation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_size: Option<u64>,
+    /// Whether this model is required for the node to function
+    #[serde(default = "default_true")]
+    pub required: bool,
+}
+
+/// Collection of model sources for a node
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NodeModelSources {
+    pub files: Vec<NodeModelSourceFile>,
+}
+
 /// RuntimeData variant types
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -114,10 +143,10 @@ pub struct NodeSchema {
     /// Execution characteristics
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<NodeCapabilitiesSchema>,
-}
 
-fn default_true() -> bool {
-    true
+    /// Model sources required by this node (download URLs, paths, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_sources: Option<NodeModelSources>,
 }
 
 /// Execution characteristics for scheduling
@@ -211,6 +240,7 @@ impl NodeSchema {
             streaming: true,
             multi_output: false,
             capabilities: None,
+            model_sources: None,
         }
     }
 
@@ -290,6 +320,12 @@ impl NodeSchema {
     /// Set capabilities
     pub fn capabilities(mut self, caps: NodeCapabilitiesSchema) -> Self {
         self.capabilities = Some(caps);
+        self
+    }
+
+    /// Set model sources required by this node
+    pub fn model_sources(mut self, sources: NodeModelSources) -> Self {
+        self.model_sources = Some(sources);
         self
     }
 
