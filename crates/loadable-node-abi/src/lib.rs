@@ -197,6 +197,30 @@ pub trait FfiNodeFactory: Send + Sync + 'static {
 /// Owned trait object for an FFI factory.
 pub type FfiNodeFactoryBox = FfiNodeFactory_TO<RBox<()>>;
 
+// Android plugins sometimes need to force instantiation of certain libc++
+// iostream template symbols, otherwise `dlopen` can fail at runtime with
+// missing vtable symbols such as `std::__ndk1::basic_ifstream`.
+//
+// This helper is only built and called on Android targets. On non-Android
+// platforms it is a no-op.
+#[cfg(target_os = "android")]
+mod android {
+    extern "C" {
+        fn loadable_node_android_force_libcxx_streams();
+    }
+
+    pub fn ensure_android_libcxx_streams() {
+        unsafe { loadable_node_android_force_libcxx_streams() }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+mod android {
+    pub fn ensure_android_libcxx_streams() {}
+}
+
+pub use android::ensure_android_libcxx_streams;
+
 /// Root module exported by every plugin.
 ///
 /// abi_stable validates layout, abi_stable version, and prefix-type

@@ -10,6 +10,7 @@ pub use inventory;
 pub use loadable_node_abi::{
     FfiNode, FfiNodeBox, FfiNodeFactory, FfiNodeFactoryBox, FfiNodeFactory_TO, FfiNode_TO,
     NodePlugin, NodePluginRef, OutputSink, OutputSinkBox, OutputSink_TO,
+    ensure_android_libcxx_streams,
 };
 pub use remotemedia_traits as traits;
 pub use remotemedia_types as types;
@@ -79,6 +80,10 @@ inventory::collect!(LoadableFactoryEntry);
 ///   `RVec<FfiNodeFactoryBox>`, and
 /// - a `#[export_root_module]` returning a [`NodePluginRef`] whose
 ///   `list_factories` field points at the function above.
+///
+/// On Android targets this also invokes an Android-only libc++ iostream
+/// symbol-instantiation helper before exposing the root module, which
+/// avoids `dlopen` failures for missing libc++ stream vtable symbols.
 #[macro_export]
 macro_rules! plugin_export {
     () => {
@@ -96,6 +101,12 @@ macro_rules! plugin_export {
         #[$crate::abi_stable::export_root_module]
         fn __remotemedia_root_module() -> $crate::NodePluginRef {
             use $crate::abi_stable::prefix_type::PrefixTypeTrait;
+            // Ensure Android libc++ iostream symbols required by loadable
+            // plugins are instantiated before the plugin root module is
+            // exposed. This avoids Android dlopen failures for symbols like
+            // `std::__ndk1::basic_ifstream`.
+            #[cfg(target_os = "android")]
+            $crate::ensure_android_libcxx_streams();
             $crate::NodePlugin {
                 list_factories: __remotemedia_list_factories,
             }.leak_into_prefix()
@@ -119,6 +130,12 @@ macro_rules! plugin_export {
         #[$crate::abi_stable::export_root_module]
         fn __remotemedia_root_module() -> $crate::NodePluginRef {
             use $crate::abi_stable::prefix_type::PrefixTypeTrait;
+            // Ensure Android libc++ iostream symbols required by loadable
+            // plugins are instantiated before the plugin root module is
+            // exposed. This avoids Android dlopen failures for symbols like
+            // `std::__ndk1::basic_ifstream`.
+            #[cfg(target_os = "android")]
+            $crate::ensure_android_libcxx_streams();
             $crate::NodePlugin {
                 list_factories: __remotemedia_list_factories,
             }.leak_into_prefix()

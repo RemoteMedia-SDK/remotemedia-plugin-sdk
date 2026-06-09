@@ -825,6 +825,7 @@ version = "0.3.0"
 dependencies = [
  "abi_stable",
  "async-ffi",
+ "cc",
 ]
 
 [[package]]

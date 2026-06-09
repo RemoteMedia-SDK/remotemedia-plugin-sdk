@@ -34,3 +34,6 @@ repository = "https://github.com/RemoteMedia-SDK/remotemedia-sdk"
 [dependencies]
 abi_stable = "0.11"
 async-ffi = { version = "0.5", features = ["abi_stable"] }
+
+[build-dependencies]
+cc = "1.0"
