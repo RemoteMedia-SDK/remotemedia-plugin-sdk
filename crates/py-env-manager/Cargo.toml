@@ -21,8 +21,10 @@ repository = "https://github.com/RemoteMedia-SDK/remotemedia-sdk"
 [features]
 default = []
 # Use `uv` for venv provisioning instead of system `python -m venv` + `pip`.
-bundled-uv = []
+# Activates reqwest (blocking + rustls-tls), flate2, tar, and zip (Windows) as optional deps.
+bundled-uv = ["dep:reqwest", "dep:flate2", "dep:tar", "dep:zip"]
 # Embed a uv binary at build time (used when no system uv is available).
+# Implies `bundled-uv` (download fallback if embedded extraction fails).
 bundled-uv-embedded = ["bundled-uv"]
 # Allow embedding python via uv as well (managed-with-python mode).
 embedded-python = ["bundled-uv"]
@@ -36,3 +38,12 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 tracing = { workspace = true }
+
+# HTTP download for uv binary (blocking client, rustls for no-OpenSSL manylinux CI).
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
+# Gzip decompression for .tar.gz archives.
+flate2 = { version = "1", optional = true }
+# tar archive extraction for unpacking uv releases.
+tar = { version = "0.4", optional = true }
+# Zip archive extraction for Windows uv releases.
+zip = { version = "2", optional = true }

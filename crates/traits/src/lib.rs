@@ -88,6 +88,7 @@ pub mod llm;
 pub mod ports;
 pub mod runtime_context;
 pub mod schema;
+pub mod stt;
 pub mod streaming;
 
 pub use capabilities::{
@@ -111,4 +112,7 @@ pub use schema::{
 pub use streaming::{
     AnySessionState, AsyncNodeWrapper, AsyncStreamingNode, NodeStatus, PacingNature, StreamingNode,
     StreamingNodeFactory, SyncNodeWrapper, SyncStreamingNode, Tick,
+};
+pub use stt::{
+    DecodedSegment, StreamingOptions, TranscriptEvent, Whisper, WhisperConfig, WhisperStreamingState,
 };
