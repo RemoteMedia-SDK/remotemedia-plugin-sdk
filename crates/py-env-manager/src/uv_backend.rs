@@ -71,7 +71,12 @@ impl UvBackend {
         // 5. Download from GitHub releases (feature-gated)
         #[cfg(feature = "bundled-uv")]
         {
-            let version = option_env!("UV_VERSION").unwrap_or("0.5.0");
+            // `cargo:rustc-env` emitted by remotemedia-sdk-base's build script
+            // is crate-local and therefore is not visible while this dependency
+            // is compiled. Keep the fallback aligned with that crate's pinned
+            // release; uv 0.5.0 can attempt Python-3.9-only llvmlite candidates
+            // while resolving liquid-audio on Python 3.12.
+            let version = option_env!("UV_VERSION").unwrap_or("0.6.14");
             let checksum = option_env!("UV_CHECKSUM").unwrap_or("");
             let dest = default_uv_bin_path();
             if let Ok(()) = download_uv(version, checksum, &dest) {
