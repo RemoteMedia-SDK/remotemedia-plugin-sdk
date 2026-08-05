@@ -47,3 +47,12 @@ flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 # Zip archive extraction for Windows uv releases.
 zip = { version = "2", optional = true }
+
+# Build script (build.rs) provisions the embedded uv binary. It needs the same
+# download/extract crates, but build scripts only see [build-dependencies], never
+# [dependencies] — so they are duplicated here.
+[build-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+flate2 = "1"
+tar = "0.4"
+zip = "2"
