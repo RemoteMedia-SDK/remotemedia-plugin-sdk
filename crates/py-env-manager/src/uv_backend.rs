@@ -107,7 +107,15 @@ impl UvBackend {
             let version = option_env!("UV_VERSION").unwrap_or("0.6.14");
             let checksum = option_env!("UV_CHECKSUM").unwrap_or("");
             let dest = default_uv_bin_path();
-            if let Ok(()) = download_uv(version, checksum, &dest) {
+            // `download_uv` performs a *blocking* HTTP fetch (reqwest::blocking).
+            // When this runs on a tokio worker thread, reqwest's nested runtime
+            // triggers "Cannot drop a runtime in a context where blocking is not
+            // allowed" if the runtime is torn down mid-download. Offload the work
+            // to the blocking pool (when a runtime is active) so blocking I/O is
+            // legal and cancellation can't panic the runtime. `dest` is cloned for
+            // the closure because the post-download code still needs the original.
+            let dest_for_dl = dest.clone();
+            if let Ok(()) = run_blocking(move || download_uv(version, checksum, &dest_for_dl)) {
                 tracing::info!(path = %dest.display(), "Downloaded uv binary");
                 return Ok(Self::from_uv_path(dest));
             }
@@ -294,6 +302,36 @@ fn which_uv() -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Run a blocking closure, preferring the tokio blocking pool when invoked
+/// from inside a runtime.
+///
+/// `reqwest::blocking` spins up its own runtime, which panics with
+/// "Cannot drop a runtime in a context where blocking is not allowed" if it
+/// runs on a tokio worker thread whose runtime is dropped (e.g. the stream is
+/// cancelled mid-download). Offloading to the blocking pool moves the work off
+/// the async worker so cancellation is safe. When no runtime is active (pure
+/// synchronous callers such as unit tests), the closure runs inline.
+fn run_blocking<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            // `block_in_place` is only valid on a multi-thread runtime; guard it
+            // so single-threaded runtimes fall back to the inline call.
+            if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+                tokio::task::block_in_place(|| {
+                    handle.block_on(async { tokio::task::spawn_blocking(f).await.unwrap() })
+                })
+            } else {
+                f()
+            }
+        }
+        Err(_) => f(),
+    }
 }
 
 /// Default path for the uv binary in the config directory.
