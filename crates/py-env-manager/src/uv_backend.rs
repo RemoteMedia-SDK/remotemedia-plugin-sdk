@@ -20,9 +20,37 @@ use remotemedia_types::{Error, Result};
 pub struct UvBackend {
     /// Path to the `uv` binary.
     uv_path: PathBuf,
+    /// Extra local wheel directories passed to uv as `--find-links`.
+    ///
+    /// Populated from [`crate::PythonEnvConfig::find_links`] so shipped
+    /// (offline) wheelhouses can satisfy dependency resolution.
+    find_links: Vec<PathBuf>,
 }
 
 impl UvBackend {
+    /// Construct a backend for an already-located `uv` binary.
+    fn from_uv_path(uv_path: PathBuf) -> Self {
+        Self {
+            uv_path,
+            find_links: Vec::new(),
+        }
+    }
+
+    /// Attach offline `--find-links` wheel directories to this backend.
+    pub fn with_find_links(mut self, find_links: Vec<PathBuf>) -> Self {
+        self.find_links = find_links;
+        self
+    }
+
+    /// Build the `--find-links <dir>` argument pairs for uv invocations.
+    fn find_links_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        for dir in &self.find_links {
+            args.push("--find-links".to_string());
+            args.push(dir.to_string_lossy().into_owned());
+        }
+        args
+    }
     /// Create a new UvBackend by locating the `uv` binary.
     ///
     /// Detection order:
@@ -37,7 +65,7 @@ impl UvBackend {
             let path = PathBuf::from(path);
             if path.exists() {
                 tracing::info!(path = %path.display(), "Found uv via UV_BINARY_PATH");
-                return Ok(Self { uv_path: path });
+                return Ok(Self::from_uv_path(path));
             }
         }
 
@@ -47,7 +75,7 @@ impl UvBackend {
                 // Find the actual path
                 let uv_path = which_uv().unwrap_or_else(|| PathBuf::from("uv"));
                 tracing::info!(path = %uv_path.display(), "Found uv on PATH");
-                return Ok(Self { uv_path });
+                return Ok(Self::from_uv_path(uv_path));
             }
         }
 
@@ -55,7 +83,7 @@ impl UvBackend {
         let config_uv = default_uv_bin_path();
         if config_uv.exists() {
             tracing::info!(path = %config_uv.display(), "Found uv in config directory");
-            return Ok(Self { uv_path: config_uv });
+            return Ok(Self::from_uv_path(config_uv));
         }
 
         // 4. Embedded binary (feature-gated)
@@ -64,7 +92,7 @@ impl UvBackend {
             let dest = default_uv_bin_path();
             if let Ok(()) = extract_embedded_uv(&dest) {
                 tracing::info!(path = %dest.display(), "Extracted embedded uv binary");
-                return Ok(Self { uv_path: dest });
+                return Ok(Self::from_uv_path(dest));
             }
         }
 
@@ -81,7 +109,7 @@ impl UvBackend {
             let dest = default_uv_bin_path();
             if let Ok(()) = download_uv(version, checksum, &dest) {
                 tracing::info!(path = %dest.display(), "Downloaded uv binary");
-                return Ok(Self { uv_path: dest });
+                return Ok(Self::from_uv_path(dest));
             }
         }
 
@@ -206,15 +234,19 @@ impl EnvBackend for UvBackend {
             ))
         })?;
 
-        self.run_uv(&[
-            "pip",
-            "install",
-            "-r",
-            &req_path.to_string_lossy(),
-            "--python",
-            &venv.python_executable.to_string_lossy(),
-        ])
-        .await?;
+        let mut args: Vec<String> = vec![
+            "pip".to_string(),
+            "install".to_string(),
+            "-r".to_string(),
+            req_path.to_string_lossy().into_owned(),
+            "--python".to_string(),
+            venv.python_executable.to_string_lossy().into_owned(),
+        ];
+        // Offline wheelhouses shipped with a bundle resolve from here.
+        args.extend(self.find_links_args());
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        self.run_uv(&arg_refs).await?;
 
         // Clean up the temp requirements file
         let _ = std::fs::remove_file(&req_path);

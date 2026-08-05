@@ -620,6 +620,13 @@ pub struct PythonEnvConfig {
     /// override.
     #[serde(default)]
     pub base_deps: Vec<String>,
+
+    /// Local wheel directories offered to the backend as `--find-links`.
+    ///
+    /// Used to satisfy dependency resolution offline from wheelhouses
+    /// shipped inside a portable bundle (`.rmpkg`). Empty by default.
+    #[serde(default)]
+    pub find_links: Vec<PathBuf>,
 }
 
 fn default_python_version() -> String {
@@ -639,6 +646,7 @@ impl Default for PythonEnvConfig {
             max_cached_envs: default_max_cached_envs(),
             cache_dir: None,
             base_deps: Vec::new(),
+            find_links: Vec::new(),
         }
     }
 }
@@ -753,7 +761,7 @@ impl PythonEnvManager {
                 #[cfg(feature = "bundled-uv")]
                 {
                     match uv_backend::UvBackend::new() {
-                        Ok(uv) => Arc::new(uv),
+                        Ok(uv) => Arc::new(uv.with_find_links(config.find_links.clone())),
                         Err(e) => {
                             tracing::warn!(
                                 error = %e,
