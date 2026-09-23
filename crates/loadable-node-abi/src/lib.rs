@@ -24,6 +24,16 @@ use abi_stable::{
 };
 use async_ffi::{FfiFuture, FutureExt};
 
+/// Host clock signal, preserved across the plugin boundary.
+#[repr(C)]
+#[derive(Debug, Clone, StableAbi)]
+pub struct FfiTick {
+    pub clock_id: RString,
+    pub pts_us: u64,
+    pub frame_idx: u64,
+    pub deadline_us: u64,
+}
+
 /// FFI-safe node.
 ///
 /// `process` returns an `FfiFuture` — an ABI-stable future the host
@@ -38,9 +48,9 @@ use async_ffi::{FfiFuture, FutureExt};
 /// `process` is marked `#[sabi(last_prefix_field)]` — that's the cut
 /// between the original FFI surface (1.x) and any methods added in
 /// minor versions. Methods added below it must carry a default impl
-/// so older plugins (whose vtables only expose `process`) continue to
-/// load. Hosts compiled against the newer ABI then transparently fall
-/// back to the default whenever a plugin omits the new method.
+/// so source implementations may omit the new hooks. Compiled vtables
+/// still undergo ABI layout and version checks; defaults alone are
+/// not a binary compatibility guarantee. Rebuild plugins for ABI 0.4.
 ///
 /// `process_multi` is the multi-output sibling of `process`: a node's
 /// `process_streaming` callback can fire N times per input (think
@@ -154,6 +164,34 @@ pub trait FfiNode: Send + Sync + 'static {
         _node_id: RString,
     ) -> FfiFuture<RResult<(), RString>> {
         async { ROk(()) }.into_ffi()
+    }
+
+    /// JSON scheduling contract: nature (reactive, outbound, wall), rate_hz,
+    /// and optional clocked_media_addr [medium, stream_id]. Older plugins
+    /// remain reactive through this default prefix-extension method.
+    fn pacing(&self) -> RString {
+        RString::from("{\"nature\":\"reactive\",\"rate_hz\":30}")
+    }
+
+    /// One host-clock tick. Timestamps remain in the host session clock;
+    /// outputs use the same MessagePack sink as reactive processing.
+    fn tick(
+        &self,
+        _tick: FfiTick,
+        _session_id: RString,
+        _sink: OutputSinkBox,
+    ) -> FfiFuture<RResult<usize, RString>> {
+        async { ROk(0) }.into_ffi()
+    }
+
+    /// Forward auxiliary controls independently of data processing.
+    /// Defaults to unhandled for plugins built against the earlier ABI.
+    fn process_control_message(
+        &self,
+        _input: RVec<u8>,
+        _session_id: RString,
+    ) -> FfiFuture<RResult<bool, RString>> {
+        async { ROk(false) }.into_ffi()
     }
 }
 

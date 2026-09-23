@@ -19,7 +19,7 @@ Host-side plugin resolution and pipeline execution live in
 Published plugins should depend on the released SDK line:
 
 ```toml
-remotemedia-plugin-sdk = "0.5"
+remotemedia-plugin-sdk = "0.6"
 ```
 
 When testing an unreleased SDK line, pin a git revision instead of a

@@ -9,13 +9,14 @@ description = "Author-facing umbrella for RemoteMedia SDK loadable plugins — r
 # pinning here keeps the SemVer signal where it matters.
 #
 # History:
+#   0.6.0   re-exports loadable-node-abi 0.4.0 (clock and control hooks).
 #   ≤0.4.0  shared workspace version (deprecated for this crate)
 #   0.5.0   re-exports loadable-node-abi 0.3.0 (FfiNode gained
 #           `process_streaming` + `OutputSink`). Pre-built cdylibs
 #           that linked plugin-sdk ≤ 0.4 fail abi_stable's load-time
 #           layout check; plugin authors must bump their dep to
 #           `remotemedia-plugin-sdk = "0.5"` and rebuild.
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 rust-version.workspace = true
 authors = ["RemoteMedia SDK Contributors"]
@@ -44,7 +45,7 @@ bundled-uv-embedded = ["bundled-uv", "remotemedia-py-env/bundled-uv-embedded"]
 [dependencies]
 remotemedia-types = { path = "../types", version = "0.4.0" }
 remotemedia-traits = { path = "../traits", version = "0.4.0" }
-loadable-node-abi = { path = "../loadable-node-abi", version = "0.3.0" }
+loadable-node-abi = { path = "../loadable-node-abi", version = "0.4.0" }
 abi_stable = "0.11"
 async-ffi = { version = "0.5", features = ["abi_stable"] }
 rmp-serde = "1"

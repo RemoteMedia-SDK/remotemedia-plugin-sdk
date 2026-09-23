@@ -9,6 +9,8 @@ description = "abi_stable FFI surface for RemoteMedia SDK loadable plugins (Node
 # check (which only fires once the .so is dlopen'd into a host).
 #
 # History:
+#   0.4.0  + FfiTick, pacing, tick and auxiliary control forwarding
+#          Rebuild plugins against plugin-sdk 0.6 for this host.
 #   0.1.0  initial release
 #   0.2.0  + FfiNode::process_multi (commit f4ba6b4e)
 #         + FfiNode::initialize (commit 3bc76021)
@@ -20,7 +22,7 @@ description = "abi_stable FFI surface for RemoteMedia SDK loadable plugins (Node
 #         (vtable slot count 6 vs 7); plugin authors must bump
 #         their `remotemedia-plugin-sdk` (or `loadable-node-abi`)
 #         dep and rebuild.
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version.workspace = true
 authors = ["RemoteMedia SDK Contributors"]

@@ -9,9 +9,9 @@ use std::sync::{Arc, OnceLock};
 
 use abi_stable::std_types::{RErr, ROk, RResult, RString, RVec};
 use async_ffi::{FfiFuture, FutureExt};
-use loadable_node_abi::{FfiNode, OutputSinkBox};
+use loadable_node_abi::{FfiNode, FfiTick, OutputSinkBox};
 use remotemedia_traits::runtime_context::InitializeContextRead;
-use remotemedia_traits::streaming::AsyncStreamingNode;
+use remotemedia_traits::streaming::{AsyncStreamingNode, PacingNature, Tick};
 use remotemedia_types::RuntimeData;
 use tokio::runtime::Runtime;
 
@@ -117,6 +117,77 @@ where
 {
     fn node_type(&self) -> RString {
         RString::from(self.node_type.clone())
+    }
+
+    fn pacing(&self) -> RString {
+        let (nature, rate) = match self.inner.pacing_nature() {
+            PacingNature::Reactive => ("reactive", self.inner.fallback_rate_hz()),
+            PacingNature::ClockedToOutboundMedia => ("outbound", self.inner.fallback_rate_hz()),
+            PacingNature::SourceWall(hz) => ("wall", hz),
+        };
+        serde_json::json!({"nature":nature, "rate_hz":rate,
+            "clocked_media_addr":self.inner.clocked_media_addr()})
+        .to_string()
+        .into()
+    }
+
+    fn tick(
+        &self,
+        tick: FfiTick,
+        session_id: RString,
+        sink: OutputSinkBox,
+    ) -> FfiFuture<RResult<usize, RString>> {
+        let inner = Arc::clone(&self.inner);
+        async move {
+            let join = plugin_runtime().spawn(async move {
+                let tick = Tick {
+                    clock_id: tick.clock_id.into_string(),
+                    pts_us: tick.pts_us,
+                    frame_idx: tick.frame_idx,
+                    deadline_us: tick.deadline_us,
+                };
+                inner
+                    .tick(
+                        tick,
+                        Some(session_id.into_string()),
+                        Box::new(move |data| push_output(&sink, data)),
+                    )
+                    .await
+            });
+            match join.await {
+                Ok(Ok(())) => ROk(0),
+                Ok(Err(e)) => RErr(e.to_string().into()),
+                Err(e) => RErr(format!("plugin tick panicked: {e}").into()),
+            }
+        }
+        .into_ffi()
+    }
+
+    fn process_control_message(
+        &self,
+        input: RVec<u8>,
+        session_id: RString,
+    ) -> FfiFuture<RResult<bool, RString>> {
+        let inner = Arc::clone(&self.inner);
+        async move {
+            let data = match rmp_serde::from_slice(input.as_slice()) {
+                Ok(data) => data,
+                Err(e) => return RErr(format!("rmp decode: {e}").into()),
+            };
+            match plugin_runtime()
+                .spawn(async move {
+                    inner
+                        .process_control_message(data, Some(session_id.into_string()))
+                        .await
+                })
+                .await
+            {
+                Ok(Ok(handled)) => ROk(handled),
+                Ok(Err(e)) => RErr(e.to_string().into()),
+                Err(e) => RErr(format!("plugin control panicked: {e}").into()),
+            }
+        }
+        .into_ffi()
     }
 
     fn process(&self, input: RVec<u8>) -> FfiFuture<RResult<RVec<u8>, RString>> {
@@ -284,5 +355,14 @@ where
             }
         }
         .into_ffi()
+    }
+}
+
+fn push_output(sink: &OutputSinkBox, data: RuntimeData) -> Result<(), remotemedia_types::Error> {
+    let bytes = rmp_serde::to_vec_named(&data)
+        .map_err(|e| remotemedia_types::Error::Execution(format!("rmp encode: {e}")))?;
+    match sink.push(bytes.into()) {
+        ROk(()) => Ok(()),
+        RErr(e) => Err(remotemedia_types::Error::Execution(e.into_string())),
     }
 }

@@ -89,6 +89,20 @@ Three methods, three semantics:
   Default is a no-op; plugins that do all their setup eagerly in
   `FfiNodeFactory::create` don't override it.
 
+### Clock and control hooks (ABI 0.4 / plugin-sdk 0.6)
+
+`pacing()` returns JSON declaring `nature` (`reactive`, `outbound`, or
+`source_wall`), positive `rate_hz`, and an optional `clock_address`. The host
+binds the scheduler and forwards `FfiTick` with `clock_id`, `pts_us`,
+`frame_idx`, and `deadline_us`. `tick()` streams output through `OutputSink`,
+preserving the same backpressure as `process_streaming()`.
+
+`process_control_message()` forwards a MessagePack RuntimeData envelope and
+session identity for auxiliary controls, including interruption and shutdown.
+The SDK adapter executes these hooks on the plugin runtime. Default methods
+keep source implementations valid; deployable plugins must be rebuilt against
+ABI 0.4. Binary compatibility with earlier compiled vtables is not assumed.
+
 ## 2. What is **not** in the ABI
 
 Anything that would force the plugin to link `remotemedia-core` or
@@ -101,7 +115,7 @@ match the host's exact dep graph is kept out:
 | `StreamingNodeFactory`, `MediaCapabilities`, `CapabilityBehavior` | live in `remotemedia-traits`, would couple ABI to trait shape | the plugin-sdk crate ships an `adapter::wrap_ffi_factory` that bridges in-process; loadable plugins declare capabilities only via static manifest metadata |
 | `tokio::Runtime`, `tokio::Handle` | runtime versions can differ | `async_ffi::FfiFuture` carries its own poll-state; plugin and host can each have their own runtime |
 | Progress events from inside `initialize()` | no FFI for the host's `emit_progress` | wrap heavy init in `WarmSessionPool::prewarm` on the host side, which fires its own progress before delegating |
-| Pacing domains | host-only scheduler concern | manifest pacing hints route only to in-tree nodes |
+| Scheduler internals | host owns scheduling and clock binding | plugins declare pacing metadata and receive `FfiTick` through ABI 0.4 |
 | Anything in `remotemedia-core` | by construction — that's the whole point | depend on `remotemedia-plugin-sdk` and `remotemedia-traits` / `remotemedia-types` instead |
 
 If you find yourself wanting to add a host-side concept to the ABI,
@@ -234,7 +248,7 @@ must:
       crates.io once the SDK line is published:
 
       ```toml
-      remotemedia-plugin-sdk = "0.5"
+      remotemedia-plugin-sdk = "0.6"
       ```
 
       If the plugin must consume an unpublished SDK snapshot, pin by
