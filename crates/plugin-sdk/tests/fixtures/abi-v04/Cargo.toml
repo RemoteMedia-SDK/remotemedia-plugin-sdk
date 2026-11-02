@@ -1,0 +1,16 @@
+[package]
+name = "abi-v04-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Frozen baseline: never replace this dependency with the current worktree.
+loadable-node-abi = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk", rev = "d50a232d15be6ad616b5d9b0ed4f20a612de25ab" }
+abi_stable = "0.11"
+async-ffi = { version = "0.5", features = ["abi_stable"] }

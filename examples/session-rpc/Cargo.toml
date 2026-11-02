@@ -1,0 +1,17 @@
+[package]
+name = "session-rpc-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+remotemedia-plugin-sdk = { path = "../../crates/plugin-sdk" }
+async-trait = "0.1"
+serde_json = "1"
+
+abi_stable = "0.11"

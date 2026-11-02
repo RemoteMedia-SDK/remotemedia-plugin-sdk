@@ -89,6 +89,14 @@ Three methods, three semantics:
   Default is a no-op; plugins that do all their setup eagerly in
   `FfiNodeFactory::create` don't override it.
 
+### Session context and RPC (ABI 0.5 / plugin-sdk 0.7, unreleased)
+
+`FfiCallContext` forwards owned session/node identity through
+`process_streaming_with_context`. `rpc_methods` advertises native RPC methods;
+`call_rpc` accepts MessagePack requests and emits MessagePack replies through a
+dedicated asynchronous `RpcReplySink`. Existing entry points retain defaults.
+ABI 0.4 binaries require rebuilding. See [the protocol and migration guide](SESSION_RPC.md).
+
 ### Clock and control hooks (ABI 0.4 / plugin-sdk 0.6)
 
 `pacing()` returns JSON declaring `nature` (`reactive`, `outbound`, or

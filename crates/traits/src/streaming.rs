@@ -281,6 +281,24 @@ pub trait AsyncStreamingNode: Send + Sync {
         self.process_streaming(data, session_id, callback).await
     }
 
+    /// Methods handled on the dedicated control RPC channel. Empty opts out.
+    fn rpc_methods(&self) -> Vec<crate::rpc::RpcMethod> {
+        Vec::new()
+    }
+
+    /// May run concurrently with media and other RPCs. Host context owns identity.
+    async fn call_rpc(
+        &self,
+        request: crate::rpc::RpcRequest,
+        _ctx: &dyn NodeRuntimeContextRead,
+        _replies: &mut crate::rpc::RpcResponder,
+    ) -> Result<(), Error> {
+        Err(Error::Execution(format!(
+            "unknown RPC method: {}",
+            request.method
+        )))
+    }
+
     /// Process control message for pipeline flow control.
     async fn process_control_message(
         &self,
@@ -378,6 +396,24 @@ pub trait StreamingNode: Send + Sync {
         let output = self.process_async(data, ctx).await?;
         callback(output)?;
         Ok(1)
+    }
+
+    /// Methods handled on the dedicated control RPC channel. Empty opts out.
+    fn rpc_methods(&self) -> Vec<crate::rpc::RpcMethod> {
+        Vec::new()
+    }
+
+    /// May run concurrently with media and other RPCs. Host context owns identity.
+    async fn call_rpc(
+        &self,
+        request: crate::rpc::RpcRequest,
+        _ctx: &dyn NodeRuntimeContextRead,
+        _replies: &mut crate::rpc::RpcResponder,
+    ) -> Result<(), Error> {
+        Err(Error::Execution(format!(
+            "unknown RPC method: {}",
+            request.method
+        )))
     }
 
     /// Process control message for pipeline flow control.
@@ -568,6 +604,19 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
         self.0
             .process_streaming_with_ctx(data, ctx, move |output_data| callback(output_data))
             .await
+    }
+
+    fn rpc_methods(&self) -> Vec<crate::rpc::RpcMethod> {
+        self.0.rpc_methods()
+    }
+
+    async fn call_rpc(
+        &self,
+        request: crate::rpc::RpcRequest,
+        ctx: &dyn NodeRuntimeContextRead,
+        replies: &mut crate::rpc::RpcResponder,
+    ) -> Result<(), Error> {
+        self.0.call_rpc(request, ctx, replies).await
     }
 
     /// Forward control messages. The session router dispatches

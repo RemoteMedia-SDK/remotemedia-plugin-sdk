@@ -88,8 +88,8 @@ pub mod llm;
 pub mod ports;
 pub mod runtime_context;
 pub mod schema;
-pub mod stt;
 pub mod streaming;
+pub mod stt;
 
 pub use capabilities::{
     AudioConstraints, AudioSampleFormat, CapabilityBehavior, CapabilityPixelFormat,
@@ -114,5 +114,12 @@ pub use streaming::{
     StreamingNodeFactory, SyncNodeWrapper, SyncStreamingNode, Tick,
 };
 pub use stt::{
-    DecodedSegment, StreamingOptions, TranscriptEvent, Whisper, WhisperConfig, WhisperStreamingState,
+    DecodedSegment, StreamingOptions, TranscriptEvent, Whisper, WhisperConfig,
+    WhisperStreamingState,
+};
+
+pub mod rpc;
+pub use rpc::{
+    CallContext, RpcEvent, RpcId, RpcMethod, RpcMode, RpcReply, RpcReplySink, RpcRequest,
+    RpcResponder,
 };

@@ -14,6 +14,12 @@ RemoteMedia hosts and dynamically loaded plugin cdylibs:
 Host-side plugin resolution and pipeline execution live in
 `RemoteMedia-SDK/remotemedia-sdk`.
 
+## Session-aware processing and RPC (unreleased)
+
+The 0.7 worktree adds per-call identity and a dedicated asynchronous RPC reply
+channel. See [usage, migration and verification](docs/SESSION_RPC.md). ABI 0.5
+requires rebuilding hosts and plugins together.
+
 ## Rust Plugin Dependency
 
 Published plugins should depend on the released SDK line:

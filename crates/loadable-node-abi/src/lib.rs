@@ -19,7 +19,7 @@ use abi_stable::{
     library::RootModule,
     package_version_strings, sabi_trait,
     sabi_types::VersionStrings,
-    std_types::{RBox, RErr, ROk, RResult, RString, RVec},
+    std_types::{RBox, RErr, ROk, ROption, RResult, RString, RVec},
     StableAbi,
 };
 use async_ffi::{FfiFuture, FutureExt};
@@ -32,6 +32,14 @@ pub struct FfiTick {
     pub pts_us: u64,
     pub frame_idx: u64,
     pub deadline_us: u64,
+}
+
+/// Owned identity for one invocation; never inferred from media or RPC payloads.
+#[repr(C)]
+#[derive(Debug, Clone, Default, StableAbi)]
+pub struct FfiCallContext {
+    pub session_id: ROption<RString>,
+    pub node_id: RString,
 }
 
 /// FFI-safe node.
@@ -50,7 +58,7 @@ pub struct FfiTick {
 /// minor versions. Methods added below it must carry a default impl
 /// so source implementations may omit the new hooks. Compiled vtables
 /// still undergo ABI layout and version checks; defaults alone are
-/// not a binary compatibility guarantee. Rebuild plugins for ABI 0.4.
+/// not a binary compatibility guarantee. Rebuild plugins for ABI 0.5.
 ///
 /// `process_multi` is the multi-output sibling of `process`: a node's
 /// `process_streaming` callback can fire N times per input (think
@@ -193,6 +201,31 @@ pub trait FfiNode: Send + Sync + 'static {
     ) -> FfiFuture<RResult<bool, RString>> {
         async { ROk(false) }.into_ffi()
     }
+    /// Context-aware media processing. The default preserves legacy implementations.
+    fn process_streaming_with_context(
+        &self,
+        input: RVec<u8>,
+        _context: FfiCallContext,
+        sink: OutputSinkBox,
+    ) -> FfiFuture<RResult<usize, RString>> {
+        self.process_streaming(input, sink)
+    }
+
+    /// JSON array of RPC method descriptors. Empty means no dedicated RPC support.
+    fn rpc_methods(&self) -> RString {
+        "[]".into()
+    }
+
+    /// MessagePack RpcRequest in, MessagePack RpcReply frames on a dedicated sink.
+    /// Dropping this future cancels asynchronous invocation work in SDK adapters.
+    fn call_rpc(
+        &self,
+        _request: RVec<u8>,
+        _context: FfiCallContext,
+        _sink: RpcReplySinkBox,
+    ) -> FfiFuture<RResult<(), RString>> {
+        async { RErr("dedicated RPC is not supported".into()) }.into_ffi()
+    }
 }
 
 /// Owned trait object for an FFI node.
@@ -224,6 +257,15 @@ pub trait OutputSink: Send + Sync + 'static {
 
 /// Owned trait object for an output sink.
 pub type OutputSinkBox = OutputSink_TO<RBox<()>>;
+
+/// Asynchronous RPC-only sink. Hosts bind its destination and enforce capacity.
+/// A failed push terminates delivery; plugins must not retry into a closed session.
+#[sabi_trait]
+pub trait RpcReplySink: Send + Sync + 'static {
+    fn push(&self, bytes: RVec<u8>) -> FfiFuture<RResult<(), RString>>;
+}
+
+pub type RpcReplySinkBox = RpcReplySink_TO<RBox<()>>;
 
 /// FFI-safe factory — produces FfiNode instances from a JSON params blob.
 #[sabi_trait]

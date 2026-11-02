@@ -8,9 +8,9 @@ pub use abi_stable;
 pub use async_ffi;
 pub use inventory;
 pub use loadable_node_abi::{
-    FfiNode, FfiNodeBox, FfiNodeFactory, FfiNodeFactoryBox, FfiNodeFactory_TO, FfiNode_TO,
-    NodePlugin, NodePluginRef, OutputSink, OutputSinkBox, OutputSink_TO,
-    ensure_android_libcxx_streams,
+    ensure_android_libcxx_streams, FfiCallContext, FfiNode, FfiNodeBox, FfiNodeFactory,
+    FfiNodeFactoryBox, FfiNodeFactory_TO, FfiNode_TO, NodePlugin, NodePluginRef, OutputSink,
+    OutputSinkBox, OutputSink_TO, RpcReplySink, RpcReplySinkBox, RpcReplySink_TO,
 };
 pub use remotemedia_traits as traits;
 pub use remotemedia_types as types;
@@ -266,13 +266,13 @@ macro_rules! python_inprocess_plugin_export {
             use $crate::abi_stable::std_types::RBox;
             use $crate::abi_stable::sabi_trait::TD_Opaque;
             use std::sync::Arc;
-            
+
             struct InProcessPythonFactory {
                 module: String,
                 class: String,
                 embedded: $crate::include_dir::Dir<'static>,
             }
-            
+
             impl FfiNodeFactory for InProcessPythonFactory {
                 fn create(&self, config: Vec<u8>) -> FfiNodeBox {
                     // For in-process, we create a node that uses PythonNodeHandle directly
@@ -280,33 +280,33 @@ macro_rules! python_inprocess_plugin_export {
 
                     RBox::new(node) as FfiNodeBox
                 }
-                
+
                 fn node_schema(&self) -> $crate::types::NodeSchema {
                     $crate::types::NodeSchema::default()
                 }
             }
-            
+
             struct InProcessPythonNode {
                 module: String,
                 class: String,
                 handle: Option<PythonNodeHandle>,
             }
-            
+
             impl InProcessPythonNode {
                 fn new(module: String, class: String) -> Self {
                     Self { module, class, handle: None }
                 }
             }
-            
+
             #[async_trait::async_trait]
             impl FfiNode for InProcessPythonNode {
                 async fn initialize(&mut self, config: Vec<u8>) -> Result<(), $crate::types::Error> {
                     let config: serde_json::Value = rmp_serde::from_slice(&config)
                         .map_err(|e| $crate::types::Error::Serialization(e.to_string()))?;
-                    
+
                     let handle = PythonNodeHandle::load(&self.module, &self.class)
                         .map_err(|e| $crate::types::Error::Execution(e.to_string()))?;
-                    
+
                     if let Some(cfg) = config.as_object() {
                         let mut map = std::collections::HashMap::new();
                         for (k, v) in cfg {
@@ -315,24 +315,24 @@ macro_rules! python_inprocess_plugin_export {
                         handle.initialize(&map)
                             .map_err(|e| $crate::types::Error::Execution(e.to_string()))?;
                     }
-                    
+
                     self.handle = Some(handle);
                     Ok(())
                 }
-                
+
                 async fn process(&mut self, input: Vec<u8>) -> Result<Vec<u8>, $crate::types::Error> {
                     let handle = self.handle.as_ref()
                         .ok_or_else(|| $crate::types::Error::Execution("Node not initialized".into()))?;
-                    
+
                     let input_data: $crate::inprocess_python::RuntimeData = rmp_serde::from_slice(&input)
                         .map_err(|e| $crate::types::Error::Serialization(e.to_string()))?;
-                    
+
                     let output = handle.process(&input_data)
                         .map_err(|e| $crate::types::Error::Execution(e.to_string()))?;
-                    
+
                     rmp_serde::to_vec(&output).map_err(|e| $crate::types::Error::Serialization(e.to_string()))
                 }
-                
+
                 async fn finalize(&mut self) -> Result<(), $crate::types::Error> {
                     if let Some(handle) = self.handle.take() {
                         handle.finalize()
@@ -363,3 +363,5 @@ macro_rules! python_inprocess_plugin_export {
         $crate::plugin_export!();
     };
 }
+
+pub use remotemedia_traits::rpc;
