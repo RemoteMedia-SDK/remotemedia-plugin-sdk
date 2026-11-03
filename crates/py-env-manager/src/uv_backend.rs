@@ -70,7 +70,14 @@ impl UvBackend {
         }
 
         // 2. Check PATH via which-style lookup
-        if let Ok(output) = std::process::Command::new("uv").arg("--version").output() {
+        let mut probe = std::process::Command::new("uv");
+        probe.arg("--version");
+        #[cfg(windows)]
+        if let Some(flags) = crate::no_window_flag() {
+            use std::os::windows::process::CommandExt;
+            probe.creation_flags(flags);
+        }
+        if let Ok(output) = probe.output() {
             if output.status.success() {
                 // Find the actual path
                 let uv_path = which_uv().unwrap_or_else(|| PathBuf::from("uv"));
@@ -138,7 +145,7 @@ impl UvBackend {
     /// we were previously swallowing them.
     async fn run_uv(&self, args: &[&str]) -> Result<String> {
         tracing::info!(argv = ?args, "Invoking uv");
-        let output = Command::new(&self.uv_path)
+        let output = crate::hidden(Command::new(&self.uv_path))
             .args(args)
             .output()
             .await

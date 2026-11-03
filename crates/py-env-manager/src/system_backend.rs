@@ -45,7 +45,7 @@ impl EnvBackend for SystemBackend {
     async fn ensure_python(&self, version: &str) -> Result<PathBuf> {
         let python_cmd = Self::python_command();
 
-        let output = Command::new(python_cmd)
+        let output = crate::hidden(Command::new(python_cmd))
             .arg("--version")
             .output()
             .await
@@ -91,7 +91,7 @@ impl EnvBackend for SystemBackend {
         // Create an isolated venv without --system-site-packages to avoid
         // inheriting broken/conflicting system packages (e.g., numba/coverage).
         // The remotemedia package is found via sys.path in the multiprocess runner.
-        let output = Command::new(python)
+        let output = crate::hidden(Command::new(python))
             .args(["-m", "venv", &venv_path.to_string_lossy()])
             .output()
             .await
@@ -157,7 +157,7 @@ impl EnvBackend for SystemBackend {
             req_path.to_string_lossy().into_owned(),
         ];
 
-        let output = Command::new(&venv.python_executable)
+        let output = crate::hidden(Command::new(&venv.python_executable))
             .args(&args)
             .output()
             .await
