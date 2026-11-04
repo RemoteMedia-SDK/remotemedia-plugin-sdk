@@ -9,7 +9,10 @@ use std::sync::{Arc, OnceLock};
 
 use abi_stable::std_types::{RErr, ROk, RResult, RString, RVec};
 use async_ffi::{FfiFuture, FutureExt};
-use loadable_node_abi::{FfiNode, FfiTick, OutputSinkBox};
+use loadable_node_abi::{FfiCallContext, FfiNode, FfiTick, OutputSinkBox, RpcReplySinkBox};
+use remotemedia_traits::rpc::{
+    CallContext, RpcMode, RpcReply, RpcReplySink, RpcRequest, RpcResponder,
+};
 use remotemedia_traits::runtime_context::InitializeContextRead;
 use remotemedia_traits::streaming::{AsyncStreamingNode, PacingNature, Tick};
 use remotemedia_types::RuntimeData;
@@ -320,38 +323,83 @@ where
         input: RVec<u8>,
         sink: OutputSinkBox,
     ) -> FfiFuture<RResult<usize, RString>> {
+        self.process_streaming_with_context(input, FfiCallContext::default(), sink)
+    }
+
+    fn process_streaming_with_context(
+        &self,
+        input: RVec<u8>,
+        context: FfiCallContext,
+        sink: OutputSinkBox,
+    ) -> FfiFuture<RResult<usize, RString>> {
         let inner = Arc::clone(&self.inner);
         async move {
-            let data: RuntimeData = match rmp_serde::from_slice(input.as_slice()) {
-                Ok(d) => d,
-                Err(e) => return RErr(RString::from(format!("rmp decode: {e}"))),
+            let data = match rmp_serde::from_slice(input.as_slice()) {
+                Ok(data) => data,
+                Err(e) => return RErr(format!("rmp decode: {e}").into()),
             };
-
-            // `OutputSinkBox`'s `push` takes `&self`, so we only need
-            // an `Arc` (not `Arc<Mutex<…>>`). The inner sink — see
-            // [`loadable_node_abi::OutputSink`] — is responsible for
-            // its own interior mutability.
-            let sink = Arc::new(sink);
-            let sink_for_cb = Arc::clone(&sink);
-
             let join = plugin_runtime().spawn(async move {
-                let cb =
-                    move |data: RuntimeData| -> std::result::Result<(), remotemedia_types::Error> {
-                        let bytes = rmp_serde::to_vec_named(&data).map_err(|e| {
-                            remotemedia_types::Error::Execution(format!("rmp encode: {e}"))
-                        })?;
-                        match sink_for_cb.push(RVec::from(bytes)) {
-                            ROk(()) => Ok(()),
-                            RErr(e) => Err(remotemedia_types::Error::Execution(e.into_string())),
-                        }
-                    };
-                inner.process_streaming(data, None, cb).await
+                let context = call_context(context);
+                inner
+                    .process_streaming_with_ctx(data, &context, move |data| {
+                        push_output(&sink, data)
+                    })
+                    .await
             });
-
+            let _abort = AbortOnDrop(join.abort_handle());
             match join.await {
                 Ok(Ok(count)) => ROk(count),
-                Ok(Err(e)) => RErr(RString::from(format!("{e}"))),
-                Err(e) => RErr(RString::from(format!("plugin task panicked: {e}"))),
+                Ok(Err(e)) => RErr(e.to_string().into()),
+                Err(e) => RErr(format!("plugin task panicked: {e}").into()),
+            }
+        }
+        .into_ffi()
+    }
+
+    fn rpc_methods(&self) -> RString {
+        serde_json::to_string(&self.inner.rpc_methods())
+            .expect("RPC descriptors serialize")
+            .into()
+    }
+
+    fn call_rpc(
+        &self,
+        request: RVec<u8>,
+        context: FfiCallContext,
+        sink: RpcReplySinkBox,
+    ) -> FfiFuture<RResult<(), RString>> {
+        let inner = Arc::clone(&self.inner);
+        async move {
+            let request: RpcRequest = match rmp_serde::from_slice(request.as_slice()) {
+                Ok(request) => request,
+                Err(e) => return RErr(format!("invalid RPC request: {e}").into()),
+            };
+            let join = plugin_runtime().spawn(async move {
+                let context = call_context(context);
+                let mode = inner
+                    .rpc_methods()
+                    .iter()
+                    .find(|m| m.name == request.method)
+                    .map(|m| m.mode);
+                let registered = mode.is_some();
+                let mode = mode.unwrap_or(RpcMode::Reply);
+                let mut replies =
+                    RpcResponder::new(Arc::new(FfiReplies(sink)), request.corr_id.clone(), mode);
+                let result = if registered {
+                    inner.call_rpc(request, &context, &mut replies).await
+                } else {
+                    Err(remotemedia_types::Error::Execution(format!(
+                        "unknown RPC method: {}",
+                        request.method
+                    )))
+                };
+                replies.finish(result).await
+            });
+            let _abort = AbortOnDrop(join.abort_handle());
+            match join.await {
+                Ok(Ok(())) => ROk(()),
+                Ok(Err(e)) => RErr(e.to_string().into()),
+                Err(e) => RErr(format!("plugin RPC panicked: {e}").into()),
             }
         }
         .into_ffi()
@@ -364,5 +412,33 @@ fn push_output(sink: &OutputSinkBox, data: RuntimeData) -> Result<(), remotemedi
     match sink.push(bytes.into()) {
         ROk(()) => Ok(()),
         RErr(e) => Err(remotemedia_types::Error::Execution(e.into_string())),
+    }
+}
+
+fn call_context(context: FfiCallContext) -> CallContext {
+    CallContext {
+        session_id: context.session_id.into_option().map(|id| id.into_string()),
+        node_id: context.node_id.into_string(),
+    }
+}
+
+struct AbortOnDrop(tokio::task::AbortHandle);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+struct FfiReplies(RpcReplySinkBox);
+#[async_trait::async_trait]
+impl RpcReplySink for FfiReplies {
+    async fn send(&self, reply: RpcReply) -> Result<(), remotemedia_types::Error> {
+        let bytes = rmp_serde::to_vec_named(&reply)
+            .map_err(|e| remotemedia_types::Error::Execution(format!("RPC encode: {e}")))?;
+        self.0
+            .push(bytes.into())
+            .await
+            .into_result()
+            .map_err(|e| remotemedia_types::Error::Execution(e.into_string()))
     }
 }
