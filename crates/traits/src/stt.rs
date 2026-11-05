@@ -153,10 +153,14 @@ impl WhisperConfig {
             return Err("streaming_max_window_ms must be between 1000 and 30000".to_string());
         }
         if self.streaming_overlap_ms >= self.streaming_max_window_ms {
-            return Err("streaming_overlap_ms must be smaller than streaming_max_window_ms".to_string());
+            return Err(
+                "streaming_overlap_ms must be smaller than streaming_max_window_ms".to_string(),
+            );
         }
         if self.streaming_decode_interval_ms > self.streaming_max_window_ms {
-            return Err("streaming_decode_interval_ms must not exceed streaming_max_window_ms".to_string());
+            return Err(
+                "streaming_decode_interval_ms must not exceed streaming_max_window_ms".to_string(),
+            );
         }
         if self.streaming_agreement_updates < 2 {
             return Err("streaming_agreement_updates must be at least 2".to_string());
@@ -269,7 +273,12 @@ struct StreamingNormalizer {
 }
 
 impl StreamingNormalizer {
-    fn push(&mut self, samples: &[f32], sample_rate: u32, channels: u32) -> Result<Vec<f32>, Error> {
+    fn push(
+        &mut self,
+        samples: &[f32],
+        sample_rate: u32,
+        channels: u32,
+    ) -> Result<Vec<f32>, Error> {
         if sample_rate == 0 || channels == 0 {
             return Err(invalid_input(format!(
                 "non-zero sample rate and channel count (got {sample_rate} Hz, {channels} ch)"
@@ -370,9 +379,7 @@ impl WhisperStreamingState {
         channels: u32,
     ) -> Result<usize, Error> {
         if self.finalized {
-            return Err(invalid_input(
-                "audio pushed after final flush".to_string(),
-            ));
+            return Err(invalid_input("audio pushed after final flush".to_string()));
         }
         let normalized = self.normalizer.push(samples, sample_rate, channels)?;
         let count = normalized.len();
@@ -384,7 +391,11 @@ impl WhisperStreamingState {
 
     /// Return the next decode window if enough new audio has arrived (or
     /// `force`). Returns `None` if nothing to decode yet.
-    pub fn decode_window(&mut self, options: StreamingOptions, force: bool) -> Option<DecodeWindow> {
+    pub fn decode_window(
+        &mut self,
+        options: StreamingOptions,
+        force: bool,
+    ) -> Option<DecodeWindow> {
         if self.audio.is_empty() {
             return None;
         }
@@ -419,7 +430,9 @@ impl WhisperStreamingState {
                 segment
             })
             .flat_map(split_segment_words)
-            .filter(|segment| segment.end_ms > self.committed_through_ms && !segment.text.is_empty())
+            .filter(|segment| {
+                segment.end_ms > self.committed_through_ms && !segment.text.is_empty()
+            })
             .collect();
         segments.sort_by_key(|segment| (segment.start_ms, segment.end_ms));
         let overlap = committed_prefix_overlap(&self.committed, &segments);
@@ -469,8 +482,10 @@ impl WhisperStreamingState {
     }
 
     fn force_commit_for_bound(&mut self, options: StreamingOptions) {
-        let max_window_start_ms =
-            samples_to_ms(self.total_samples.saturating_sub(ms_to_samples(options.max_window_ms as u64)));
+        let max_window_start_ms = samples_to_ms(
+            self.total_samples
+                .saturating_sub(ms_to_samples(options.max_window_ms as u64)),
+        );
         if max_window_start_ms <= samples_to_ms(self.buffer_start_sample) {
             return;
         }
@@ -553,7 +568,10 @@ impl WhisperStreamingState {
     }
 
     fn full_text(&self) -> String {
-        join_nonempty(&join_segments(&self.committed), &join_segments(&self.unstable))
+        join_nonempty(
+            &join_segments(&self.committed),
+            &join_segments(&self.unstable),
+        )
     }
 }
 
@@ -576,7 +594,11 @@ fn common_prefix_words<'a>(hypotheses: impl Iterator<Item = &'a Vec<DecodedSegme
         return 0;
     };
     (0..first.len())
-        .take_while(|&index| words.iter().all(|candidate| candidate.get(index) == first.get(index)))
+        .take_while(|&index| {
+            words
+                .iter()
+                .all(|candidate| candidate.get(index) == first.get(index))
+        })
         .count()
 }
 

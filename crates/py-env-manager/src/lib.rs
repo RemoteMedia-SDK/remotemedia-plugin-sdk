@@ -918,7 +918,9 @@ pub(crate) fn no_window_flag() -> Option<u32> {
         fn GetConsoleWindow() -> *mut core::ffi::c_void;
     }
     // SAFETY: takes no arguments; returns this process's console window or null.
-    unsafe { GetConsoleWindow() }.is_null().then_some(0x0800_0000)
+    unsafe { GetConsoleWindow() }
+        .is_null()
+        .then_some(0x0800_0000)
 }
 
 /// A tokio `Command` that opens no console window (see [`no_window_flag`]).
