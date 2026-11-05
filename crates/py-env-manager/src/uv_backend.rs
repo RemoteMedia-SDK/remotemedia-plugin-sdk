@@ -318,8 +318,10 @@ fn which_uv() -> Option<PathBuf> {
 /// "Cannot drop a runtime in a context where blocking is not allowed" if it
 /// runs on a tokio worker thread whose runtime is dropped (e.g. the stream is
 /// cancelled mid-download). Offloading to the blocking pool moves the work off
-/// the async worker so cancellation is safe. When no runtime is active (pure
-/// synchronous callers such as unit tests), the closure runs inline.
+/// the async worker so cancellation is safe. A current-thread runtime has no
+/// separate worker to hand off to, and dropping the nested runtime on its only
+/// thread always panics, so the closure gets its own OS thread there. When no
+/// runtime is active (pure synchronous callers), the closure runs inline.
 fn run_blocking<F, R>(f: F) -> R
 where
     F: FnOnce() -> R + Send + 'static,
@@ -327,14 +329,15 @@ where
 {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
-            // `block_in_place` is only valid on a multi-thread runtime; guard it
-            // so single-threaded runtimes fall back to the inline call.
+            // `block_in_place` is only valid on a multi-thread runtime.
             if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
                 tokio::task::block_in_place(|| {
                     handle.block_on(async { tokio::task::spawn_blocking(f).await.unwrap() })
                 })
             } else {
-                f()
+                std::thread::spawn(f)
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
             }
         }
         Err(_) => f(),
@@ -672,6 +675,33 @@ fn extract_embedded_uv(dest: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What `reqwest::blocking` does internally: build a runtime, then drop it.
+    fn create_and_drop_nested_runtime() -> u32 {
+        drop(tokio::runtime::Runtime::new().unwrap());
+        7
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn run_blocking_allows_nested_runtime_on_current_thread_runtime() {
+        assert_eq!(run_blocking(create_and_drop_nested_runtime), 7);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_blocking_allows_nested_runtime_on_multi_thread_runtime() {
+        assert_eq!(run_blocking(create_and_drop_nested_runtime), 7);
+    }
+
+    #[test]
+    fn run_blocking_allows_nested_runtime_without_a_runtime() {
+        assert_eq!(run_blocking(create_and_drop_nested_runtime), 7);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[should_panic(expected = "closure panicked")]
+    async fn run_blocking_propagates_panics_on_current_thread_runtime() {
+        run_blocking(|| panic!("closure panicked"));
+    }
 
     #[test]
     fn test_resolve_venv_python_unix() {
