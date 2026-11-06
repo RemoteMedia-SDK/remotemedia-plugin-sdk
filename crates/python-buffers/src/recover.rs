@@ -1,5 +1,5 @@
 //! Recover only views rooted in our immutable exporter. A private array, dtype
-//! conversion, writable loan, or strided range is never silently packed/copied.
+//! conversion, writable loan, or non-contiguous range is never silently packed/copied.
 use crate::{BufferData, ReadBuffer};
 use pyo3::{
     buffer::{PyBuffer, PyUntypedBuffer},
@@ -77,7 +77,7 @@ pub fn recover_bytes(obj: &Bound<'_, PyAny>) -> PyResult<SharedBuffer<u8>> {
     // Opaque tensor/image bytes may be viewed with a numeric NumPy dtype. We
     // recover their original byte range, without reinterpreting them as Rust T.
     let view = PyUntypedBuffer::get(obj)?;
-    if !view.readonly() || !view.is_c_contiguous() {
+    if !view.readonly() || !(view.is_c_contiguous() || view.is_fortran_contiguous()) {
         return Err(PyBufferError::new_err(
             "byte output must be readonly and contiguous",
         ));

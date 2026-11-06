@@ -379,6 +379,7 @@ import numpy as np
 array = np.frombuffer(input, dtype=np.uint8).reshape(4, 8)
 view = array[1:3].reshape(16)
 typed = np.frombuffer(input, dtype=np.uint32)[2:6]
+fortran = np.ndarray((4, 8), dtype=np.uint8, buffer=input, order='F')
 ",
             Some(&locals),
             Some(&locals),
@@ -390,6 +391,10 @@ typed = np.frombuffer(input, dtype=np.uint32)[2:6]
         let typed = recover_bytes(&locals.get_item("typed").unwrap().unwrap()).unwrap();
         assert_eq!(typed.as_ptr() as usize, pointer + 8);
         assert!(typed.shares_storage(&bytes));
+        let fortran = recover_bytes(&locals.get_item("fortran").unwrap().unwrap()).unwrap();
+        assert_eq!(fortran.as_ptr() as usize, pointer);
+        assert_eq!(fortran.len(), 32);
+        assert!(fortran.shares_storage(&bytes));
     });
 }
 
