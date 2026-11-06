@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 pub const BUFFER_CONTRACT_VERSION: u16 = 1;
 
+mod validation;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BufferDomain {

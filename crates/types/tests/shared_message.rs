@@ -81,6 +81,7 @@ fn split_and_attach_preserve_every_variant_and_bulk_address() {
         },
     ];
     for original in cases {
+        original.validate_shared_layout(ENCODING).unwrap();
         let pointer = address(&original);
         let expected = original.clone();
         let (metadata, storage) = original.into_shared_parts(ENCODING).unwrap();

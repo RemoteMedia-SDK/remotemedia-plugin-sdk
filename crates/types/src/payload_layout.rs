@@ -14,6 +14,46 @@ pub enum PayloadLayoutError {
 
 type Result<T> = std::result::Result<T, PayloadLayoutError>;
 
+pub(crate) fn audio(sample_rate: u32, channels: u32, bytes: u64) -> Result<()> {
+    if sample_rate == 0 || channels == 0 || !bytes.is_multiple_of(4 * u64::from(channels)) {
+        return Err(PayloadLayoutError::Invalid(
+            "audio rate/channels/frame length",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn video(
+    format: PixelFormat,
+    has_codec: bool,
+    width: u32,
+    height: u32,
+    bytes: u64,
+) -> Result<()> {
+    if (format == PixelFormat::Encoded) != has_codec {
+        return Err(PayloadLayoutError::Invalid("video codec/pixel format"));
+    }
+    pixels(format, width, height, bytes)
+}
+
+pub(crate) fn tensor(
+    shape: &[i32],
+    dtype: i32,
+    encoding: TensorEncoding,
+    bytes: u64,
+) -> Result<()> {
+    if shape.len() > 64 || shape.iter().any(|&d| d < 0) {
+        return Err(PayloadLayoutError::Invalid("tensor dimensions"));
+    }
+    let size = tensor_size(dtype, encoding)?;
+    let expected = if shape.contains(&0) {
+        0
+    } else {
+        product(shape.iter().map(|&d| d as u64), size)?
+    };
+    exact(bytes, expected)
+}
+
 pub(crate) fn exact(actual: u64, expected: u64) -> Result<()> {
     if actual == expected {
         Ok(())
@@ -140,6 +180,9 @@ pub(crate) fn numpy(
     f_contiguous: bool,
     bytes: u64,
 ) -> Result<()> {
+    if shape.iter().any(|&d| d > isize::MAX as usize) {
+        return Err(PayloadLayoutError::Invalid("array dimension"));
+    }
     if shape.len() != strides.len() || shape.len() > 64 {
         return Err(PayloadLayoutError::Invalid("array rank/stride count"));
     }

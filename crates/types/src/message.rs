@@ -107,6 +107,46 @@ pub enum RuntimeMetadata {
 }
 
 impl RuntimeData {
+    /// Validate a borrowed payload with the same rules as a shared descriptor.
+    /// Does not clone owners, metadata, or payload elements and never packs a view.
+    /// Tensor codes are interpreted only in the supplied negotiated convention.
+    pub fn validate_shared_layout(&self, encoding: TensorEncoding) -> Result<()> {
+        let bytes = self.bulk_payload_bytes() as u64;
+        if bytes > isize::MAX as u64 {
+            return Err(PayloadLayoutError::Invalid("payload too large"));
+        }
+        match self {
+            Self::Audio {
+                sample_rate,
+                channels,
+                ..
+            } => layout::audio(*sample_rate, *channels, bytes),
+            Self::Video {
+                format,
+                codec,
+                width,
+                height,
+                ..
+            } => layout::video(*format, codec.is_some(), *width, *height, bytes),
+            Self::Image {
+                format,
+                width,
+                height,
+                ..
+            } => layout::image(format, *width, *height, bytes),
+            Self::Tensor { shape, dtype, .. } => layout::tensor(shape, *dtype, encoding, bytes),
+            Self::Numpy {
+                shape,
+                dtype,
+                strides,
+                c_contiguous,
+                f_contiguous,
+                ..
+            } => layout::numpy(shape, strides, dtype, *c_contiguous, *f_contiguous, bytes),
+            _ => Ok(()),
+        }
+    }
+
     /// Move payload owners out without reading or copying their elements.
     /// Legacy Vec audio is promoted by moving its Vec into a shared owner.
     pub fn into_shared_parts(
@@ -285,29 +325,14 @@ impl RuntimeMetadata {
                 sample_rate,
                 channels,
                 ..
-            } => {
-                if *sample_rate == 0
-                    || *channels == 0
-                    || !bytes.is_multiple_of(4 * u64::from(*channels))
-                {
-                    return Err(PayloadLayoutError::Invalid(
-                        "audio rate/channels/frame length",
-                    ));
-                }
-                Ok(())
-            }
+            } => layout::audio(*sample_rate, *channels, bytes),
             Self::Video {
                 width,
                 height,
                 format,
                 codec,
                 ..
-            } => {
-                if (*format == PixelFormat::Encoded) != codec.is_some() {
-                    return Err(PayloadLayoutError::Invalid("video codec/pixel format"));
-                }
-                layout::pixels(*format, *width, *height, bytes)
-            }
+            } => layout::video(*format, codec.is_some(), *width, *height, bytes),
             Self::Image {
                 width,
                 height,
@@ -323,16 +348,7 @@ impl RuntimeMetadata {
                 if *encoding != tensor_encoding {
                     return Err(PayloadLayoutError::TensorEncodingMismatch);
                 }
-                if shape.len() > 64 || shape.iter().any(|&d| d < 0) {
-                    return Err(PayloadLayoutError::Invalid("tensor dimensions"));
-                }
-                let size = layout::tensor_size(*dtype, *encoding)?;
-                let expected = if shape.contains(&0) {
-                    0
-                } else {
-                    layout::product(shape.iter().map(|&d| d as u64), size)?
-                };
-                layout::exact(bytes, expected)
+                layout::tensor(shape, *dtype, *encoding, bytes)
             }
             Self::Numpy {
                 shape,
@@ -340,12 +356,7 @@ impl RuntimeMetadata {
                 strides,
                 c_contiguous,
                 f_contiguous,
-            } => {
-                if shape.iter().any(|&d| d > isize::MAX as usize) {
-                    return Err(PayloadLayoutError::Invalid("array dimension"));
-                }
-                layout::numpy(shape, strides, dtype, *c_contiguous, *f_contiguous, bytes)
-            }
+            } => layout::numpy(shape, strides, dtype, *c_contiguous, *f_contiguous, bytes),
             Self::Binary => Ok(()),
             _ => layout::exact(bytes, 0),
         }
