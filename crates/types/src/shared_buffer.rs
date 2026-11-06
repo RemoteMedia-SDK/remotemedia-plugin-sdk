@@ -69,6 +69,7 @@ impl<T> Clone for Storage<T> {
 pub struct SharedBuffer<T> {
     storage: Storage<T>,
     range: Range<usize>,
+    pub(crate) provenance: crate::provenance::Provenance,
 }
 
 /// A requested subrange lies outside the current buffer view.
@@ -106,6 +107,7 @@ impl<T> SharedBuffer<T> {
         Self {
             storage: Storage::Owner(Arc::new(owner)),
             range: 0..len,
+            provenance: Default::default(),
         }
     }
 
@@ -136,6 +138,7 @@ impl<T> SharedBuffer<T> {
         Ok(Self {
             storage: self.storage.clone(),
             range: self.range.start + range.start..self.range.start + range.end,
+            provenance: self.provenance.clone(),
         })
     }
 
@@ -182,7 +185,7 @@ impl<T> SharedBuffer<T> {
 /// ```
 #[derive(Debug)]
 pub struct BufferLoan<T> {
-    buffer: SharedBuffer<T>,
+    pub(crate) buffer: SharedBuffer<T>,
 }
 
 impl<T> BufferLoan<T> {
@@ -195,6 +198,7 @@ impl<T> BufferLoan<T> {
             buffer: SharedBuffer {
                 storage: Storage::MutableOwner(Arc::new(owner)),
                 range: 0..len,
+                provenance: Default::default(),
             },
         }
     }
@@ -310,6 +314,7 @@ impl<T> From<Vec<T>> for SharedBuffer<T> {
         Self {
             storage: Storage::Vec(Arc::new(value)),
             range: 0..len,
+            provenance: Default::default(),
         }
     }
 }
@@ -320,6 +325,7 @@ impl<T> From<Arc<[T]>> for SharedBuffer<T> {
         Self {
             storage: Storage::Slice(value),
             range: 0..len,
+            provenance: Default::default(),
         }
     }
 }
@@ -336,6 +342,7 @@ impl<T> Clone for SharedBuffer<T> {
         Self {
             storage: self.storage.clone(),
             range: self.range.clone(),
+            provenance: self.provenance.clone(),
         }
     }
 }

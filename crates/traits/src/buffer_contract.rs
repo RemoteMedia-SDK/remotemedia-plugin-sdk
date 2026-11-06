@@ -48,6 +48,9 @@ pub enum BufferProduction {
     ForwardInput,
     /// New payloads are filled directly through the supplied output allocator.
     OutputAllocator,
+    /// Each output either retains an admitted input or comes from the bound
+    /// allocator, e.g. a transform that can bypass work for matching formats.
+    ForwardOrOutputAllocator,
     /// A producer returns private storage requiring adaptation at a mapped edge.
     PrivateStorage,
 }

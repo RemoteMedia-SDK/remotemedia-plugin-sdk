@@ -83,6 +83,8 @@ fn split_and_attach_preserve_every_variant_and_bulk_address() {
     for original in cases {
         original.validate_shared_layout(ENCODING).unwrap();
         let pointer = address(&original);
+        let forwarding = remotemedia_types::ForwardingScope::default();
+        let original = forwarding.accept(original);
         let expected = original.clone();
         let (metadata, storage) = original.into_shared_parts(ENCODING).unwrap();
         let encoded = serde_json::to_vec(&metadata).unwrap();
@@ -90,7 +92,28 @@ fn split_and_attach_preserve_every_variant_and_bulk_address() {
         let output = decoded.attach(storage, ENCODING).unwrap();
         assert_eq!(output, expected);
         assert_eq!(address(&output), pointer);
+        assert!(forwarding.accepts_output(&output));
+        assert_bound_allocation(output);
     }
+}
+
+fn assert_bound_allocation(data: RuntimeData) {
+    use remotemedia_types::{BoundOutputAllocator, HeapOutputAllocator, OutputAllocator};
+    let allocator = BoundOutputAllocator::new(std::sync::Arc::new(HeapOutputAllocator));
+    let (metadata, original) = data.into_shared_parts(ENCODING).unwrap();
+    let storage = match original {
+        PayloadStorage::None => PayloadStorage::None,
+        PayloadStorage::Audio(samples) => {
+            PayloadStorage::Audio(allocator.allocate_audio(samples.len()).unwrap().freeze())
+        }
+        PayloadStorage::Bytes(bytes) => {
+            PayloadStorage::Bytes(allocator.allocate_bytes(bytes.len()).unwrap().freeze())
+        }
+    };
+    let output = metadata.attach(storage, ENCODING).unwrap();
+    assert!(allocator.owns_payload(&output));
+    let output = remotemedia_types::ForwardingScope::default().accept(output);
+    assert!(allocator.owns_payload(&output));
 }
 
 fn address(data: &RuntimeData) -> Option<usize> {
