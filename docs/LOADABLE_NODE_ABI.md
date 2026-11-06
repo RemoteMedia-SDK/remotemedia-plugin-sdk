@@ -19,9 +19,9 @@ The contract is enforced at these layers:
 If a plugin makes it past these checks, the host can call into it
 safely.
 
-## Shared media contract (ABI 0.7 / plugin-sdk 0.9)
+## Shared media contract (ABI 0.8 / plugin-sdk 0.10)
 
-Rebuild host and plugins together for this ABI. A compiled ABI 0.6 or older library is
+Rebuild host and plugins together for this ABI. A compiled ABI 0.7 or older library is
 rejected at load time; default methods preserve source compatibility only.
 A rebuilt plugin returning `shared_buffer_protocol() == 0` explicitly selects
 legacy MessagePack media. The SDK adapter advertises protocol 2. Unknown versions
@@ -60,7 +60,37 @@ Reason order and counter layout are versioned parts of this ABI.
 
 This governs explicit CopyContext operations only. Arbitrary plugin allocations,
 legacy hooks, worker processes and whole-graph negotiation need their own policy
-coverage. Rebuild plugins with `remotemedia-plugin-sdk = "0.9"` for this host.
+coverage. Rebuild plugins with `remotemedia-plugin-sdk = "0.10"` for this host.
+
+### Factory buffer declarations
+
+`FfiNodeFactory::buffer_contract(params)` is pure, fallible discovery for the exact
+parameters before creating a node. Its default returns unknown. Authors can use
+`remotemedia_plugin_sdk::buffer_contract::{encode, native_protocol}` to encode an
+explicit `BufferContract` v1 declaration; media schemas do not imply support.
+The host bounds JSON to 1 MiB, validates the typed declaration, and accepts only
+its exact native ABI and shared-buffer protocol. Errors remain errors.
+
+Host inspection uses `StreamingNodeFactory::try_buffer_contract`; its default
+delegates to the existing infallible Rust declaration. A factory's
+`supports_buffer_protocol` identifies the concrete adapter binding, independently
+of the protocol claimed by metadata. The default binds local Rust owners only.
+The native adapter verifies each created node advertises the declared protocol
+before initialization or execution. A lying declaration can pass pure inspection
+but fails this instance check; neither path falls back to serialization.
+
+With strict buffer preflight enabled, the host checks layouts and per-node input
+or allocator provenance at execution. Returning a host-origin buffer through the
+native owner bridge recovers its private provenance along with the storage and
+slice. A private plugin allocation cannot impersonate a bound host allocation.
+Declarations are trusted author commitments, not a sandbox for malicious plugins.
+Snapshot contracts, live retention budgets, mapped-worker and device bindings,
+and arbitrary copies inside plugins still require independent enforcement.
+
+The actual DLL/SO tests in `native_buffer_contracts.rs` cover discovery failures,
+ABI/protocol mismatch, and a strict producer-to-forwarder session. Frozen ABI 0.7
+and 0.6 binaries are supplied through `ABI_V07_DLL` and `ABI_V06_DLL` for loader
+rejection tests. Protocol 2's media representation is unchanged by ABI 0.8.
 
 The allocator returns initialized, exclusive byte/f32 loans. Publication consumes
 the loan and returns an immutable owner over the same allocation. Missing providers

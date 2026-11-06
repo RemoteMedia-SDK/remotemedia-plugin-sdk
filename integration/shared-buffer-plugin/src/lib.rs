@@ -477,4 +477,5 @@ impl AsyncStreamingNode for Fixture {
     }
 }
 
-remotemedia_plugin_sdk::plugin_export!(Factory);
+mod contract;
+remotemedia_plugin_sdk::plugin_export!(Factory, contract::ContractFactory);

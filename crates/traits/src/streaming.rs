@@ -765,6 +765,21 @@ pub trait StreamingNodeFactory: Send + Sync {
         None
     }
 
+    /// Fallible inspection used by hosts. Foreign factories must preserve
+    /// transport/metadata errors rather than silently returning an unknown.
+    fn try_buffer_contract(
+        &self,
+        params: &Value,
+    ) -> Result<Option<crate::buffer_contract::BufferContract>, Error> {
+        Ok(self.buffer_contract(params))
+    }
+
+    /// Which declared protocol this concrete adapter can bind. A transport
+    /// adapter must override the local-Rust default and verify its created node.
+    fn supports_buffer_protocol(&self, protocol: &crate::buffer_contract::BufferProtocol) -> bool {
+        matches!(protocol, crate::buffer_contract::BufferProtocol::RustOwners)
+    }
+
     /// Create a new streaming node instance.
     fn create(
         &self,

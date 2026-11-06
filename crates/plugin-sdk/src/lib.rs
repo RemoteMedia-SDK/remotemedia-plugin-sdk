@@ -18,6 +18,7 @@ pub use remotemedia_types as types;
 pub use rmp_serde;
 
 pub mod adapter;
+pub mod buffer_contract;
 pub mod params;
 
 #[cfg(all(feature = "mapped-python", any(windows, target_os = "linux")))]

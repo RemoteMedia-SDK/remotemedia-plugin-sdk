@@ -370,6 +370,16 @@ pub type RpcReplySinkBox = RpcReplySink_TO<RBox<()>>;
 pub trait FfiNodeFactory: Send + Sync + 'static {
     fn node_type(&self) -> RString;
     fn create(&self, params: RString) -> RResult<FfiNodeBox, RString>;
+    /// Pure capability declaration for these exact JSON parameters, before
+    /// creating/initializing nodes. None is unknown. Some is BufferContract v1
+    /// JSON, bounded to MAX_BUFFER_CONTRACT_BYTES by the host. Errors must not
+    /// be converted to implicit support or cause a copying execution fallback.
+    fn buffer_contract(
+        &self,
+        _params: RString,
+    ) -> RResult<abi_stable::std_types::ROption<RString>, RString> {
+        abi_stable::std_types::ROk(abi_stable::std_types::ROption::RNone)
+    }
     fn input_ports(&self) -> RVec<snapshot::FfiPortDeclaration> {
         RVec::new()
     }
@@ -380,6 +390,9 @@ pub trait FfiNodeFactory: Send + Sync + 'static {
 
 /// Owned trait object for an FFI factory.
 pub type FfiNodeFactoryBox = FfiNodeFactory_TO<RBox<()>>;
+
+pub const ABI_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const MAX_BUFFER_CONTRACT_BYTES: usize = 1024 * 1024;
 
 // Android plugins sometimes need to force instantiation of certain libc++
 // iostream template symbols, otherwise `dlopen` can fail at runtime with
