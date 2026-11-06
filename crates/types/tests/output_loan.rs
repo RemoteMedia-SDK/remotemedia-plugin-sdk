@@ -61,7 +61,8 @@ fn recovering_existing_storage_does_not_initialize_copy_accounting_or_allocate()
 
 #[test]
 fn prepared_loan_fill_freeze_and_reuse_allocate_nothing() {
-    let allocator = remotemedia_types::BoundOutputAllocator::new(Arc::new(HeapOutputAllocator));
+    let allocator = remotemedia_types::BoundOutputAllocator::new(Arc::new(HeapOutputAllocator))
+        .with_budget(remotemedia_types::BufferBudget::new(1, 256));
     let mut loan = allocator.allocate_audio(64).unwrap();
     assert!(loan.iter().all(|&x| x == 0.0));
     let pointer = loan.as_ptr();

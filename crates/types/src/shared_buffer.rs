@@ -82,6 +82,14 @@ pub struct BufferRangeError {
 }
 
 impl<T> SharedBuffer<T> {
+    pub(crate) fn backing_bytes(&self) -> usize {
+        let elements = match &self.storage {
+            Storage::Vec(owner) => owner.capacity(),
+            _ => self.storage.as_slice().len(),
+        };
+        elements * std::mem::size_of::<T>()
+    }
+
     /// Inspect a provider's owner without materializing payload bytes. This is
     /// for transport providers recognizing their own immutable storage handles.
     pub fn owner<O: Any>(&self) -> Option<&O> {
@@ -247,7 +255,8 @@ impl<T> DerefMut for BufferLoan<T> {
 
 impl<T: Clone> SharedBuffer<T> {
     /// Recover a uniquely owned, full Vec without copying. Other storage and
-    /// subranges require explicit materialization into a new allocation.
+    /// subranges require explicit materialization into a new allocation. Budgeted
+    /// owners also materialize: a bare Vec cannot retain their reservation.
     pub fn into_vec(self) -> Vec<T> {
         self.into_vec_with_context(None)
             .expect("legacy copy policy permits materialization")
@@ -260,7 +269,10 @@ impl<T: Clone> SharedBuffer<T> {
     }
 
     fn into_vec_with_context(self, context: Option<&CopyContext>) -> Result<Vec<T>, CopyRejected> {
-        if self.range.start == 0 && self.range.end == self.storage.as_slice().len() {
+        if self.provenance.budget.is_none()
+            && self.range.start == 0
+            && self.range.end == self.storage.as_slice().len()
+        {
             if let Storage::Vec(owner) = self.storage {
                 return match Arc::try_unwrap(owner) {
                     Ok(value) => Ok(value),
@@ -284,7 +296,8 @@ impl<T: Clone> SharedBuffer<T> {
     }
 
     /// Recover a full Arc slice if it is already backed by one. Converting any
-    /// other owner or a subrange allocates and copies the visible elements.
+    /// other owner, budgeted owner or subrange copies the visible elements. A bare
+    /// Arc slice cannot retain a separate budget reservation.
     pub fn into_arc(self) -> Arc<[T]> {
         self.into_arc_with_context(None)
             .expect("legacy copy policy permits materialization")
@@ -299,7 +312,10 @@ impl<T: Clone> SharedBuffer<T> {
         self,
         context: Option<&CopyContext>,
     ) -> Result<Arc<[T]>, CopyRejected> {
-        if self.range.start == 0 && self.range.end == self.storage.as_slice().len() {
+        if self.provenance.budget.is_none()
+            && self.range.start == 0
+            && self.range.end == self.storage.as_slice().len()
+        {
             if let Storage::Slice(owner) = self.storage {
                 return Ok(owner);
             }

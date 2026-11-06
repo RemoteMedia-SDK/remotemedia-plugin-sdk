@@ -57,6 +57,7 @@
 pub mod validation_error;
 pub use validation_error::{ValidationConstraint, ValidationError, ValidationWarning, WarningType};
 mod copy_policy;
+mod buffer_budget;
 mod message;
 mod output_allocator;
 mod provenance;
@@ -67,6 +68,7 @@ pub use copy_policy::{
     CopyReport, COPY_REASONS,
 };
 pub use message::{PayloadKind, PayloadStorage, RuntimeMetadata, TensorEncoding};
+pub use buffer_budget::{BufferBudget, BufferBudgetUsage};
 pub use output_allocator::{BufferAllocationError, HeapOutputAllocator, OutputAllocator};
 pub use provenance::{BoundOutputAllocator, ForwardingScope};
 pub use payload_layout::PayloadLayoutError;

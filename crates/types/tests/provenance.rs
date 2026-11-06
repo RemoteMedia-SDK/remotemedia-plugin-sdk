@@ -151,7 +151,8 @@ impl OutputAllocator for External {
 #[test]
 fn binding_preserves_provider_exhaustion_and_last_owner_release() {
     let releases = Arc::new(AtomicUsize::new(0));
-    let allocator = BoundOutputAllocator::new(Arc::new(External(releases.clone())));
+    let allocator = BoundOutputAllocator::new(Arc::new(External(releases.clone())))
+        .with_budget(remotemedia_types::BufferBudget::new(1, 8));
     assert_eq!(
         allocator.allocate_bytes(9).unwrap_err(),
         BufferAllocationError::Exhausted

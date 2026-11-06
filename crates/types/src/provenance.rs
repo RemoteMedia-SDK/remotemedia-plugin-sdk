@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 #[derive(Clone, Default)]
 pub(crate) struct Provenance {
+    pub(crate) budget: Option<Arc<crate::buffer_budget::BudgetOwner>>,
     allocation: Option<Arc<()>>,
     forwarding: Option<Arc<AcceptedBy>>,
 }
@@ -59,13 +60,22 @@ impl Provenance {
 pub struct BoundOutputAllocator {
     provider: Arc<dyn OutputAllocator>,
     token: Arc<()>,
+    budget: Option<crate::BufferBudget>,
 }
 impl BoundOutputAllocator {
     pub fn new(provider: Arc<dyn OutputAllocator>) -> Self {
         Self {
             provider,
             token: Arc::new(()),
+            budget: None,
         }
+    }
+
+    /// Limit live output loans and all their published descendants. Zero-size
+    /// outputs still consume one owner. The provider is not called when full.
+    pub fn with_budget(mut self, budget: crate::BufferBudget) -> Self {
+        self.budget = Some(budget);
+        self
     }
 
     /// Metadata has no allocation requirement. Even empty bulk buffers require
@@ -83,12 +93,20 @@ impl BoundOutputAllocator {
 }
 impl OutputAllocator for BoundOutputAllocator {
     fn allocate_bytes(&self, len: usize) -> Result<BufferLoan<u8>, BufferAllocationError> {
-        let mut loan = self.provider.allocate_bytes(len)?;
+        let allocate = || self.provider.allocate_bytes(len);
+        let mut loan = match &self.budget {
+            Some(budget) => budget.allocate(len, allocate)?,
+            None => allocate()?,
+        };
         loan.buffer.provenance.allocation = Some(self.token.clone());
         Ok(loan)
     }
     fn allocate_audio(&self, samples: usize) -> Result<BufferLoan<f32>, BufferAllocationError> {
-        let mut loan = self.provider.allocate_audio(samples)?;
+        let allocate = || self.provider.allocate_audio(samples);
+        let mut loan = match &self.budget {
+            Some(budget) => budget.allocate(samples, allocate)?,
+            None => allocate()?,
+        };
         loan.buffer.provenance.allocation = Some(self.token.clone());
         Ok(loan)
     }
