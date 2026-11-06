@@ -1,7 +1,7 @@
 use super::client::{Call, Client};
 use super::*;
 use remotemedia_shared_memory::{
-    peer::{Limits, PeerConnection, PeerEvent, SnapshotInputs},
+    peer::{CallResources, Limits, PeerConnection, PeerEvent, SnapshotInputs},
     SharedPool,
 };
 use remotemedia_traits::rpc::{RpcEvent, RpcMode};
@@ -249,10 +249,10 @@ impl NativeWorkerNode {
         kind: CallKind,
         arguments: serde_json::Value,
         inputs: Vec<(String, RuntimeData)>,
-        snapshots: SnapshotInputs,
+        resources: CallResources,
     ) -> Result<Call, Error> {
         self.client
-            .call(kind, self.identity.clone(), arguments, inputs, snapshots)
+            .call(kind, self.identity.clone(), arguments, inputs, resources)
             .await
     }
     async fn drain<F>(
@@ -260,13 +260,13 @@ impl NativeWorkerNode {
         kind: CallKind,
         arguments: serde_json::Value,
         inputs: Vec<(String, RuntimeData)>,
-        snapshots: SnapshotInputs,
+        resources: CallResources,
         mut callback: F,
     ) -> Result<usize, Error>
     where
         F: FnMut(RuntimeData) -> Result<(), Error> + Send,
     {
-        let mut call = self.begin(kind, arguments, inputs, snapshots).await?;
+        let mut call = self.begin(kind, arguments, inputs, resources).await?;
         let mut count = 0;
         while let Some(output) = call.next().await? {
             callback(output.into_data())?;
@@ -278,10 +278,10 @@ impl NativeWorkerNode {
         &self,
         kind: CallKind,
         inputs: Vec<(String, RuntimeData)>,
-        snapshots: SnapshotInputs,
+        resources: CallResources,
     ) -> Result<RuntimeData, Error> {
         let mut result = None;
-        self.drain(kind, serde_json::Value::Null, inputs, snapshots, |data| {
+        self.drain(kind, serde_json::Value::Null, inputs, resources, |data| {
             if result.is_some() {
                 return Err(Error::Execution(
                     "native unary call emitted multiple outputs".into(),
@@ -338,7 +338,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
             CallKind::Initialize,
             serde_json::Value::Null,
             vec![],
-            HashMap::new(),
+            CallResources::default(),
             |data| {
                 let RuntimeData::Json(value) = data else {
                     return Err(Error::Execution("invalid initialization progress".into()));
@@ -366,7 +366,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
         self.one(
             CallKind::Process,
             vec![("input".into(), data)],
-            HashMap::new(),
+            CallResources::default(),
         )
         .await
     }
@@ -379,7 +379,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
         self.one(
             CallKind::Process,
             vec![("input".into(), data)],
-            ctx.snapshot_inputs(),
+            call_resources(ctx),
         )
         .await
     }
@@ -390,7 +390,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
         self.one(
             CallKind::MultiInput,
             inputs.into_iter().collect(),
-            HashMap::new(),
+            CallResources::default(),
         )
         .await
     }
@@ -403,7 +403,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
         self.one(
             CallKind::MultiInput,
             inputs.into_iter().collect(),
-            ctx.snapshot_inputs(),
+            call_resources(ctx),
         )
         .await
     }
@@ -421,7 +421,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
             CallKind::Stream,
             serde_json::Value::Null,
             vec![("input".into(), data)],
-            HashMap::new(),
+            CallResources::default(),
             callback,
         )
         .await
@@ -440,7 +440,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
             CallKind::Stream,
             serde_json::Value::Null,
             vec![("input".into(), data)],
-            ctx.snapshot_inputs(),
+            call_resources(ctx),
             callback,
         )
         .await
@@ -456,7 +456,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
             CallKind::Tick,
             serde_json::to_value(TickRequest::from(tick)).map_err(transport_error)?,
             vec![],
-            HashMap::new(),
+            CallResources::default(),
             callback,
         )
         .await?;
@@ -473,7 +473,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
             CallKind::Tick,
             serde_json::to_value(TickRequest::from(tick)).map_err(transport_error)?,
             vec![],
-            ctx.snapshot_inputs(),
+            call_resources(ctx),
             callback,
         )
         .await?;
@@ -489,7 +489,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
             .one(
                 CallKind::Control,
                 vec![("input".into(), data)],
-                HashMap::new(),
+                CallResources::default(),
             )
             .await?
         {
@@ -507,7 +507,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
             .one(
                 CallKind::Control,
                 vec![("input".into(), data)],
-                ctx.snapshot_inputs(),
+                call_resources(ctx),
             )
             .await?
         {
@@ -534,7 +534,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
                 CallKind::Rpc,
                 serde_json::to_value(&request).map_err(transport_error)?,
                 vec![],
-                ctx.snapshot_inputs(),
+                call_resources(ctx),
             )
             .await?;
         let mut terminal = false;
@@ -663,5 +663,13 @@ impl Drop for NativeWorkerNode {
         // An in-flight output reader may hold a temporary strong client handle.
         // Node teardown must still close its process and unblock that read.
         self.client.close();
+    }
+}
+
+fn call_resources(ctx: &dyn NodeRuntimeContextRead) -> CallResources {
+    CallResources {
+        snapshots: ctx.snapshot_inputs(),
+        output_allocator: ctx.output_allocator(),
+        ..Default::default()
     }
 }

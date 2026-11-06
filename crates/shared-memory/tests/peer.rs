@@ -6,6 +6,9 @@ use remotemedia_shared_memory::{
 use remotemedia_types::{PayloadStorage, RuntimeData, TensorEncoding};
 use std::process::Command;
 
+#[path = "support/selected_allocator.rs"]
+mod selected_allocator;
+
 fn pool(slots: usize) -> SharedPool {
     SharedPool::new(
         SessionId([57; 16]),

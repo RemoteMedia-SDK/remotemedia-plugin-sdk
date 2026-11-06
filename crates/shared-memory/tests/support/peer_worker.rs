@@ -157,6 +157,9 @@ fn execute(request: &mut WorkerRequest, fixture: &Fixture) -> io::Result<()> {
                 request.emit(RuntimeData::Binary(frozen))?;
             }
         }
+        "abandon_loan" | "hold_loan" => {
+            abandon_loan(request, fixture)?;
+        }
         "hold" => {
             *fixture.held.lock().unwrap() = request.inputs.remove("input");
         }
@@ -195,6 +198,23 @@ fn execute(request: &mut WorkerRequest, fixture: &Fixture) -> io::Result<()> {
         "crash" => std::process::exit(27),
         _ => return Err(io::Error::other("unknown fixture operation")),
     }
+    Ok(())
+}
+
+fn abandon_loan(request: &mut WorkerRequest, fixture: &Fixture) -> io::Result<()> {
+    let mut loan = request
+        .allocator()
+        .allocate_bytes(16)
+        .map_err(io::Error::other)?;
+    loan.fill(99);
+    if request.arguments["operation"] == "hold_loan" {
+        request.emit(RuntimeData::Text("writing".into()))?;
+        let mut proceed = fixture.proceed.lock().unwrap();
+        while !*proceed {
+            proceed = fixture.changed.wait(proceed).unwrap();
+        }
+    }
+    drop(loan);
     Ok(())
 }
 

@@ -24,9 +24,19 @@ use std::{
     },
 };
 
+mod allocation;
 mod dispatch;
 mod snapshots;
 pub type SnapshotInputs = HashMap<String, Arc<dyn remotemedia_traits::ports::SnapshotPort>>;
+
+/// Host-owned capabilities retained for one worker call. An explicit output
+/// provider is authoritative: incompatible loans fail without a pool fallback.
+#[derive(Default)]
+pub struct CallResources {
+    pub copies: Option<CopyContext>,
+    pub snapshots: SnapshotInputs,
+    pub output_allocator: Option<Arc<dyn remotemedia_types::OutputAllocator>>,
+}
 mod output;
 pub mod wire;
 mod worker;
@@ -45,10 +55,12 @@ struct Input {
 struct Producer {
     descriptor: WriteDescriptor,
     published: Option<PayloadStorage>,
+    pending: Option<crate::remote::PendingPublication>,
 }
 struct Call {
     snapshots: SnapshotInputs,
     copies: Option<CopyContext>,
+    output_allocator: Option<Arc<dyn remotemedia_types::OutputAllocator>>,
     cancelled: bool,
     outstanding: usize,
     snapshot_reads: usize,
@@ -307,7 +319,7 @@ impl HostHandle {
         arguments: serde_json::Value,
         inputs: Vec<(String, RuntimeData)>,
     ) -> io::Result<u64> {
-        self.start_call_inner(kind, context, arguments, inputs, None, HashMap::new())
+        self.start_call_with_resources(kind, context, arguments, inputs, CallResources::default())
     }
 
     /// Start a call with an explicit host-input copy policy and ledger. Worker
@@ -321,13 +333,13 @@ impl HostHandle {
         inputs: Vec<(String, RuntimeData)>,
         copies: &CopyContext,
     ) -> io::Result<u64> {
-        self.start_call_inner(
+        self.start_call_with_snapshots(
             kind,
             context,
             arguments,
             inputs,
             Some(copies),
-            HashMap::new(),
+            SnapshotInputs::new(),
         )
     }
 
@@ -342,18 +354,34 @@ impl HostHandle {
         copies: Option<&CopyContext>,
         snapshots: SnapshotInputs,
     ) -> io::Result<u64> {
-        self.start_call_inner(kind, context, arguments, inputs, copies, snapshots)
+        self.start_call_with_resources(
+            kind,
+            context,
+            arguments,
+            inputs,
+            CallResources {
+                copies: copies.cloned(),
+                snapshots,
+                ..Default::default()
+            },
+        )
     }
 
-    fn start_call_inner(
+    /// Start a call with explicitly selected host capabilities. Newly produced
+    /// outputs preserve the provider's owning loan through remote publication.
+    pub fn start_call_with_resources(
         &self,
         kind: CallKind,
         context: CallContext,
         arguments: serde_json::Value,
         inputs: Vec<(String, RuntimeData)>,
-        copies: Option<&CopyContext>,
-        snapshots: SnapshotInputs,
+        resources: CallResources,
     ) -> io::Result<u64> {
+        let CallResources {
+            copies,
+            snapshots,
+            output_allocator,
+        } = resources;
         // Assign IDs in the same order as their complete Begin/Input/Execute
         // batches, even when callers use independent HostHandle clones.
         let _start = self.shared.start.lock().unwrap();
@@ -402,7 +430,8 @@ impl HostHandle {
                 id,
                 Call {
                     snapshots,
-                    copies: copies.cloned(),
+                    copies: copies.clone(),
+                    output_allocator,
                     cancelled: false,
                     outstanding: 0,
                     snapshot_reads: 0,
@@ -416,7 +445,7 @@ impl HostHandle {
             context,
             arguments,
             inputs,
-            copies,
+            copies.as_ref(),
             snapshot_ports,
         );
         if result.is_err() {

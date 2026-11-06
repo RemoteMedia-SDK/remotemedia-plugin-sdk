@@ -9,12 +9,19 @@ use memmap2::{Mmap, MmapMut, MmapOptions};
 use remotemedia_types::{BufferLoan, SharedBuffer};
 use std::{fs::File, marker::PhantomData, sync::Arc};
 
+#[cfg(feature = "worker-protocol")]
+mod publication;
+#[cfg(feature = "worker-protocol")]
+pub(crate) use publication::PendingPublication;
+
 /// Undispatched exclusive grant. Dropping it cancels the reservation; dispatch
 /// transfers reclamation responsibility to the authenticated worker connection.
 pub struct WriteGrant {
     pool: Arc<Inner>,
     descriptor: Option<WriteDescriptor>,
     file: Option<File>,
+    #[cfg(feature = "worker-protocol")]
+    pub(crate) publication: Option<PendingPublication>,
 }
 
 impl WriteGrant {
@@ -34,6 +41,8 @@ impl WriteGrant {
 
 impl Drop for WriteGrant {
     fn drop(&mut self) {
+        #[cfg(feature = "worker-protocol")]
+        drop(self.publication.take());
         if let Some(descriptor) = self.descriptor.take() {
             drop(self.file.take());
             let _ = self.pool.broker().release_producer(&descriptor);
@@ -62,6 +71,8 @@ impl SharedPool {
                 pool: self.inner.clone(),
                 descriptor: Some(descriptor),
                 file: Some(file),
+                #[cfg(feature = "worker-protocol")]
+                publication: None,
             })
         })();
         if result.is_err() {

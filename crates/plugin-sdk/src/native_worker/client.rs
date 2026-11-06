@@ -1,6 +1,6 @@
 use super::*;
 use remotemedia_shared_memory::peer::{
-    HostHandle, Limits, PeerConnection, PeerEvent, ReceivedOutput, SnapshotInputs,
+    CallResources, HostHandle, Limits, PeerConnection, PeerEvent, ReceivedOutput,
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -38,7 +38,7 @@ enum Command {
         context: CallContext,
         arguments: serde_json::Value,
         inputs: Vec<(String, RuntimeData)>,
-        snapshots: SnapshotInputs,
+        resources: CallResources,
         permit: Permit,
         cancellation: blocking::Sender<Command>,
         reply: oneshot::Sender<Result<Call, Error>>,
@@ -132,7 +132,7 @@ impl Client {
                             context,
                             arguments,
                             inputs,
-                            snapshots,
+                            resources,
                             permit,
                             cancellation,
                             reply,
@@ -142,7 +142,7 @@ impl Client {
                                 context,
                                 arguments,
                                 inputs,
-                                snapshots,
+                                resources,
                                 permit,
                                 cancellation,
                             );
@@ -216,7 +216,7 @@ impl Client {
         context: CallContext,
         arguments: serde_json::Value,
         inputs: Vec<(String, RuntimeData)>,
-        snapshots: SnapshotInputs,
+        resources: CallResources,
     ) -> Result<Call, Error> {
         self.admitted
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
@@ -231,7 +231,7 @@ impl Client {
                 context,
                 arguments,
                 inputs,
-                snapshots,
+                resources,
                 permit,
                 cancellation: self.commands.clone(),
                 reply,
@@ -253,7 +253,7 @@ impl State {
         context: CallContext,
         arguments: serde_json::Value,
         inputs: Vec<(String, RuntimeData)>,
-        snapshots: SnapshotInputs,
+        resources: CallResources,
         permit: Permit,
         commands: blocking::Sender<Command>,
     ) -> Result<Call, Error> {
@@ -262,19 +262,16 @@ impl State {
         if let Some(error) = &routing.closed {
             return Err(Error::Execution(error.clone()));
         }
+        let resources = CallResources {
+            copies: Some(self.input_copies.clone()),
+            ..resources
+        };
         // Prevent a fast worker output from racing route registration. The
         // receive thread still services allocation traffic within next_event;
         // the worker's independent reader can consume the whole input batch.
         let id = self
             .host
-            .start_call_with_snapshots(
-                kind,
-                context,
-                arguments,
-                inputs,
-                Some(&self.input_copies),
-                snapshots,
-            )
+            .start_call_with_resources(kind, context, arguments, inputs, resources)
             .map_err(transport_error)?;
         routing.calls.insert(
             id,

@@ -110,6 +110,24 @@ impl SharedPool {
         })
     }
 
+    /// Only a fresh full-range loan from this exact pool can become a writer grant.
+    #[cfg(feature = "worker-protocol")]
+    pub(crate) fn loan_identity<T: MappedElement>(
+        &self,
+        loan: &BufferLoan<T>,
+    ) -> Result<AllocationId> {
+        let owner = loan
+            .owner::<Writer<T>>()
+            .ok_or(SharedMemoryError::PrivateStorage)?;
+        if !Arc::ptr_eq(&owner.pool, &self.inner) {
+            return Err(SharedMemoryError::WrongSession);
+        }
+        if loan.len() != owner.elements {
+            return Err(SharedMemoryError::InvalidLayout);
+        }
+        Ok(owner.id)
+    }
+
     pub fn allocate<T: MappedElement>(&self, elements: usize) -> Result<BufferLoan<T>> {
         let bytes = elements
             .checked_mul(std::mem::size_of::<T>())

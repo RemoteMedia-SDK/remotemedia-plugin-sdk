@@ -77,7 +77,7 @@ pub(super) async fn discover(
             identity.clone(),
             serde_json::to_value(Operation::Discover).map_err(transport_error)?,
             vec![],
-            HashMap::new(),
+            remotemedia_shared_memory::peer::CallResources::default(),
         )
         .await?;
     let Some(output) = call.next().await? else {
@@ -128,7 +128,7 @@ impl Reader {
                 self.identity.clone(),
                 serde_json::to_value(operation).map_err(transport_error)?,
                 vec![],
-                HashMap::new(),
+                remotemedia_shared_memory::peer::CallResources::default(),
             )
             .await?;
         let Some(header) = call.next().await? else {

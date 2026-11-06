@@ -189,6 +189,12 @@ pub struct BufferLoan<T> {
 }
 
 impl<T> BufferLoan<T> {
+    /// Inspect the concrete provider before transferring exclusive ownership.
+    /// This borrows the owner only; it cannot extract or forge allocation proof.
+    pub fn owner<O: Any>(&self) -> Option<&O> {
+        self.buffer.owner::<O>()
+    }
+
     /// Retain an exclusive pool/mapping owner, allocating only its Arc header.
     /// AsRef and AsMut must expose the same stable initialized slice. Providers
     /// must ensure no external aliases can access it during exclusive use.
