@@ -132,6 +132,7 @@ impl Shared {
                         Input {
                             descriptor: buffer.clone(),
                             accepted: false,
+                            storage: delivery.storage(),
                         },
                     );
                 }

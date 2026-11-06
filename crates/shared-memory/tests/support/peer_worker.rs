@@ -104,6 +104,7 @@ fn execute(request: &mut WorkerRequest, fixture: &Fixture) -> io::Result<()> {
                 request.emit(data.clone())?;
             }
         }
+        "slice" => emit_input_slice(request)?,
         "transform" => {
             let input = request.inputs.remove("input").unwrap();
             let (metadata, storage) = input
@@ -194,5 +195,27 @@ fn execute(request: &mut WorkerRequest, fixture: &Fixture) -> io::Result<()> {
         "crash" => std::process::exit(27),
         _ => return Err(io::Error::other("unknown fixture operation")),
     }
+    Ok(())
+}
+
+fn emit_input_slice(request: &mut WorkerRequest) -> io::Result<()> {
+    let data = request.inputs.remove("input").unwrap();
+    let (metadata, storage) = data
+        .into_shared_parts(TensorEncoding::Runtime)
+        .map_err(io::Error::other)?;
+    let storage = match storage {
+        PayloadStorage::Bytes(data) => {
+            PayloadStorage::Bytes(data.slice(2..data.len() - 2).map_err(io::Error::other)?)
+        }
+        PayloadStorage::Audio(data) => {
+            PayloadStorage::Audio(data.slice(2..data.len() - 2).map_err(io::Error::other)?)
+        }
+        _ => return Err(io::Error::other("expected bulk input")),
+    };
+    request.emit(
+        metadata
+            .attach(storage, TensorEncoding::Runtime)
+            .map_err(io::Error::other)?,
+    )?;
     Ok(())
 }

@@ -58,7 +58,9 @@ impl Shared {
                 // SAFETY: authenticated peer's callback acknowledges final unmap;
                 // only the connection-owned descriptor can reach the broker.
                 unsafe { self.pool.release_remote(&input.descriptor) }.map_err(other)?;
-                ledger.inputs.remove(&lease);
+                let removed = ledger.inputs.remove(&lease);
+                drop(ledger);
+                drop(removed);
                 Ok(None)
             }
             WorkerMessage::ProducerReleased { allocation } => {
@@ -249,44 +251,11 @@ impl Shared {
                     .filter(|input| input.accepted)
                     .ok_or_else(|| invalid("output references an unaccepted input"))?;
                 validate_layout(&message.metadata, input.descriptor.element, byte_len)?;
-                let delivery = self
-                    .pool
-                    .forward(&input.descriptor, HOST_READER, offset, byte_len)
-                    .map_err(other)?;
-                self.pool.accept(delivery.descriptor()).map_err(other)?;
-                // SAFETY: this is a new broker-owned local read lease derived
-                // from an accepted immutable input. Its callback releases only it.
-                let (file, descriptor) = unsafe { delivery.into_transport() };
-                let pool = self.pool.clone();
-                let release = descriptor.clone();
-                match descriptor.element {
-                    ElementType::Bytes => PayloadStorage::Bytes(
-                        unsafe {
-                            crate::import::<u8>(
-                                file,
-                                descriptor,
-                                self.pool.session_id(),
-                                move || {
-                                    let _ = pool.release_remote(&release);
-                                },
-                            )
-                        }
-                        .map_err(other)?,
-                    ),
-                    ElementType::F32Le => PayloadStorage::Audio(
-                        unsafe {
-                            crate::import::<f32>(
-                                file,
-                                descriptor,
-                                self.pool.session_id(),
-                                move || {
-                                    let _ = pool.release_remote(&release);
-                                },
-                            )
-                        }
-                        .map_err(other)?,
-                    ),
-                }
+                // The authenticated lease identifies the exact exported host
+                // view. Returning a checked subview preserves its provenance and
+                // avoids a second mapping/lease. The worker release is independent
+                // of this retained host owner.
+                slice_storage(&input.storage, offset, byte_len)?
             }
             Some(BufferReference::Producer {
                 allocation,
@@ -319,23 +288,35 @@ impl Shared {
                         ),
                     });
                 }
-                match producer.published.as_ref().unwrap() {
-                    PayloadStorage::Audio(data) => PayloadStorage::Audio(
-                        data.slice(offset as usize / 4..(offset + byte_len) as usize / 4)
-                            .map_err(other)?,
-                    ),
-                    PayloadStorage::Bytes(data) => PayloadStorage::Bytes(
-                        data.slice(offset as usize..(offset + byte_len) as usize)
-                            .map_err(other)?,
-                    ),
-                    PayloadStorage::None => unreachable!(),
-                }
+                slice_storage(producer.published.as_ref().unwrap(), offset, byte_len)?
             }
         };
         message
             .metadata
             .attach(storage, TensorEncoding::Runtime)
             .map_err(other)
+    }
+}
+
+/// Offsets are relative to the retained exported view, never its wider backing
+/// allocation. Validate before conversion, including overflow and f32 alignment.
+fn slice_storage(storage: &PayloadStorage, offset: u64, bytes: u64) -> io::Result<PayloadStorage> {
+    let end = offset
+        .checked_add(bytes)
+        .ok_or_else(|| invalid("output range overflows"))?;
+    let start =
+        usize::try_from(offset).map_err(|_| invalid("output offset exceeds address space"))?;
+    let end = usize::try_from(end).map_err(|_| invalid("output end exceeds address space"))?;
+    match storage {
+        PayloadStorage::Bytes(data) => data
+            .slice(start..end)
+            .map(PayloadStorage::Bytes)
+            .map_err(other),
+        PayloadStorage::Audio(data) if start % 4 == 0 && end % 4 == 0 => data
+            .slice(start / 4..end / 4)
+            .map(PayloadStorage::Audio)
+            .map_err(other),
+        _ => Err(invalid("output storage or alignment mismatch")),
     }
 }
 
@@ -351,4 +332,35 @@ fn validate_layout(
     metadata
         .validate_payload(Some(kind), byte_len, TensorEncoding::Runtime)
         .map_err(other)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn returned_ranges_cannot_widen_retained_views_overflow_or_misalign() {
+        let backing: remotemedia_types::SharedBuffer<u8> = vec![7u8; 32].into();
+        let bytes = PayloadStorage::Bytes(backing.slice(8..24).unwrap());
+        let PayloadStorage::Bytes(view) = slice_storage(&bytes, 2, 12).unwrap() else {
+            panic!()
+        };
+        assert_eq!(view.as_ptr(), backing.as_ptr().wrapping_add(10));
+        assert!(slice_storage(&bytes, 0, 17).is_err());
+        assert!(slice_storage(&bytes, 17, 0).is_err());
+        assert!(slice_storage(&bytes, u64::MAX, 2).is_err());
+        assert!(slice_storage(&bytes, 16, 0).is_ok());
+
+        let backing: remotemedia_types::SharedBuffer<f32> = vec![0.75f32; 32].into();
+        let audio = PayloadStorage::Audio(backing.slice(8..24).unwrap());
+        let PayloadStorage::Audio(view) = slice_storage(&audio, 8, 48).unwrap() else {
+            panic!()
+        };
+        assert_eq!(view.as_ptr(), backing.as_ptr().wrapping_add(10));
+        assert!(slice_storage(&audio, 1, 4).is_err());
+        assert!(slice_storage(&audio, 4, 1).is_err());
+        assert!(slice_storage(&audio, 0, 68).is_err());
+        assert!(slice_storage(&audio, 64, 0).is_ok());
+        assert!(slice_storage(&PayloadStorage::None, 0, 0).is_err());
+    }
 }

@@ -1,6 +1,13 @@
 //! Broker-side typed worker dispatcher. Callers can send work/cancellation while
 //! a dedicated receive loop services allocations and releases. Output guards
 //! supply bounded credits; slow consumers never hold the receive-side lock.
+//!
+//! Input records retain the exact exported host view until worker release or
+//! connection teardown. Forwarded outputs slice that view after range/layout
+//! checks, preserving host provenance without a second mapping or recipient
+//! lease. Compatibility staging retains its new mapped owner and cannot inherit
+//! the copied source's proof. Remote producer publications remain a separate
+//! ownership path; this alone does not certify a worker's buffer contract.
 use crate::{
     channel::{HandleAccess, Receiver, Sender, WorkerProcess, MAX_CONTROL_BYTES},
     AllocationId, BufferDescriptor, ElementType, PeerId, SharedPool, WriteDescriptor,
@@ -29,11 +36,11 @@ use wire::{HostMessage, WorkerMessage};
 pub use worker::{WorkerEndpoint, WorkerRequest};
 
 static NEXT_PEER: AtomicU64 = AtomicU64::new(1 << 63);
-const HOST_READER: PeerId = PeerId(0);
 
 struct Input {
     descriptor: BufferDescriptor,
     accepted: bool,
+    storage: PayloadStorage,
 }
 struct Producer {
     descriptor: WriteDescriptor,
@@ -476,6 +483,7 @@ impl HostHandle {
                         Input {
                             descriptor: descriptor.clone(),
                             accepted: false,
+                            storage: delivery.storage(),
                         },
                     );
                 }
@@ -553,11 +561,14 @@ impl Shared {
             unsafe { self.pool.release_dead_peer(self.peer) };
         }
         let calls = std::mem::take(&mut ledger.calls);
-        ledger.inputs.clear();
-        ledger.producers.clear();
+        let inputs = std::mem::take(&mut ledger.inputs);
+        let producers = std::mem::take(&mut ledger.producers);
         ledger.outputs.clear();
         drop(ledger);
         drop(calls);
+        // Retained host owners may run arbitrary final-release callbacks.
+        drop(inputs);
+        drop(producers);
         // Failed termination intentionally leaves broker reservations quarantined.
     }
     fn acknowledge(&self, sequence: u64) {

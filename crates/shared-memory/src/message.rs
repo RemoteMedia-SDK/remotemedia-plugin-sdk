@@ -68,11 +68,19 @@ impl MessageDescriptor {
 pub struct MessageDelivery {
     descriptor: MessageDescriptor,
     delivery: Option<Delivery>,
+    storage: PayloadStorage,
 }
 
 impl MessageDelivery {
     pub fn descriptor(&self) -> &MessageDescriptor {
         &self.descriptor
+    }
+
+    /// Exact exported view, including host provenance. Compatibility staging
+    /// retains the new mapped owner, never the private owner it copied from.
+    #[cfg(feature = "worker-protocol")]
+    pub(crate) fn storage(&self) -> PayloadStorage {
+        self.storage.clone()
     }
 
     /// # Safety
@@ -84,6 +92,8 @@ impl MessageDelivery {
         let file = self
             .delivery
             .map(|delivery| unsafe { delivery.into_transport().0 });
+        // The dispatched lease now pins storage independently of this owner.
+        drop(self.storage);
         (self.descriptor, file)
     }
 }
@@ -122,13 +132,15 @@ impl SharedPool {
         context: Option<&CopyContext>,
     ) -> Result<MessageDelivery> {
         let (metadata, storage) = data.into_shared_parts(tensor_encoding)?;
-        let delivery = match storage {
-            PayloadStorage::None => None,
+        let (delivery, storage) = match storage {
+            PayloadStorage::None => (None, PayloadStorage::None),
             PayloadStorage::Audio(data) => {
-                Some(self.export_with_copy_context(&data, recipient, context)?)
+                let (delivery, data) = self.export_with_copy_context(data, recipient, context)?;
+                (Some(delivery), PayloadStorage::Audio(data))
             }
             PayloadStorage::Bytes(data) => {
-                Some(self.export_with_copy_context(&data, recipient, context)?)
+                let (delivery, data) = self.export_with_copy_context(data, recipient, context)?;
+                (Some(delivery), PayloadStorage::Bytes(data))
             }
         };
         let descriptor = MessageDescriptor {
@@ -141,17 +153,18 @@ impl SharedPool {
         Ok(MessageDelivery {
             descriptor,
             delivery,
+            storage,
         })
     }
 
     fn export_with_copy_context<T: crate::MappedElement>(
         &self,
-        data: &SharedBuffer<T>,
+        data: SharedBuffer<T>,
         recipient: PeerId,
         context: Option<&CopyContext>,
-    ) -> Result<Delivery> {
-        let (reason, original_error) = match self.export(data, recipient) {
-            Ok(delivery) => return Ok(delivery),
+    ) -> Result<(Delivery, SharedBuffer<T>)> {
+        let (reason, original_error) = match self.export(&data, recipient) {
+            Ok(delivery) => return Ok((delivery, data)),
             Err(SharedMemoryError::PrivateStorage) => (
                 CopyReason::PrivateIpcIngress,
                 SharedMemoryError::PrivateStorage,
@@ -168,8 +181,9 @@ impl SharedPool {
         let bytes = std::mem::size_of_val(data.as_slice()) as u64;
         context.check(reason, bytes)?;
         let mut loan = self.allocate::<T>(data.len())?;
-        context.materialize(reason, bytes, || loan.copy_from_slice(data))?;
-        self.export(&loan.freeze(), recipient)
+        context.materialize(reason, bytes, || loan.copy_from_slice(&data))?;
+        let staged = loan.freeze();
+        Ok((self.export(&staged, recipient)?, staged))
     }
 }
 

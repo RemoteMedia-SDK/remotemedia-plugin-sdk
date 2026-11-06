@@ -20,6 +20,73 @@ fn pool(slots: usize) -> SharedPool {
 fn spawn(pool: &SharedPool) -> (PeerConnection, HostHandle) {
     spawn_protocol(pool, false)
 }
+
+#[test]
+fn returned_input_slices_preserve_exact_host_owner_and_provenance_across_two_workers() {
+    use remotemedia_types::{BoundOutputAllocator, ForwardingScope};
+    use std::sync::Arc;
+    for audio in [false, true] {
+        let pool = pool(1);
+        let allocator = BoundOutputAllocator::new(Arc::new(pool.clone()));
+        let first_scope = ForwardingScope::default();
+        let second_scope = ForwardingScope::default();
+        let (input, expected_address) = provenance_input(&allocator, audio);
+        let (mut first, first_handle) = spawn(&pool);
+        let (mut second, second_handle) = spawn(&pool);
+        let call = start(
+            &first_handle,
+            CallKind::Process,
+            "slice",
+            vec![("input".into(), first_scope.accept(input))],
+        );
+        let sliced = output(&mut first, call).into_data();
+        complete(&mut first, call).unwrap();
+        assert!(first_scope.accepts_output(&sliced));
+        assert!(allocator.owns_payload(&sliced));
+        let call = start(
+            &second_handle,
+            CallKind::Process,
+            "echo",
+            vec![("input".into(), second_scope.accept(sliced))],
+        );
+        let retained = output(&mut second, call).into_data();
+        complete(&mut second, call).unwrap();
+        first_handle.close();
+        second_handle.close();
+        drop((first, second, first_handle, second_handle));
+        assert!(first_scope.accepts_output(&retained));
+        assert!(second_scope.accepts_output(&retained));
+        assert!(allocator.owns_payload(&retained));
+        match &retained {
+            RuntimeData::Audio { samples, .. } => {
+                assert_eq!(samples.as_ptr() as usize, expected_address);
+                assert_eq!(&samples[..], &[0.75; 12]);
+                let remotemedia_types::AudioSamples::Shared(samples) = samples else {
+                    panic!("shared samples required")
+                };
+                assert_eq!(
+                    pool.export(samples, PeerId(91))
+                        .unwrap()
+                        .descriptor()
+                        .offset,
+                    40
+                );
+            }
+            RuntimeData::Binary(bytes) => {
+                assert_eq!(bytes.as_ptr() as usize, expected_address);
+                assert_eq!(&bytes[..], &[7; 12]);
+                assert_eq!(
+                    pool.export(bytes, PeerId(91)).unwrap().descriptor().offset,
+                    10
+                );
+            }
+            _ => panic!("expected bulk owner"),
+        }
+        assert!(pool.allocate::<u8>(1).is_err());
+        drop(retained);
+        assert!(pool.allocate::<u8>(4096).is_ok());
+    }
+}
 fn spawn_protocol(pool: &SharedPool, snapshots: bool) -> (PeerConnection, HostHandle) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_shared-memory-test-peer"));
     command.arg("peer");
@@ -38,6 +105,41 @@ fn spawn_protocol(pool: &SharedPool, snapshots: bool) -> (PeerConnection, HostHa
     .unwrap();
     assert!(matches!(peer.next_event().unwrap(), PeerEvent::Ready { modes } if modes.len() == 6));
     (peer, handle)
+}
+
+#[test]
+fn returning_an_input_needs_no_additional_recipient_lease() {
+    let pool = SharedPool::new(
+        SessionId([58; 16]),
+        PoolConfig {
+            classes: vec![SizeClass {
+                bytes: 4096,
+                slots: 1,
+            }],
+            max_bytes: 4096,
+            max_leases: 1,
+        },
+    )
+    .unwrap();
+    let input = bytes(&pool, &[9; 16]);
+    let address = binary(&input).as_ptr();
+    let (mut peer, handle) = spawn(&pool);
+    let call = start(
+        &handle,
+        CallKind::Process,
+        "echo",
+        vec![("input".into(), input)],
+    );
+    // The worker holds the only recipient lease until this output is acknowledged.
+    let output = output(&mut peer, call);
+    assert_eq!(binary(output.data()).as_ptr(), address);
+    let retained = output.into_data();
+    complete(&mut peer, call).unwrap();
+    handle.close();
+    assert_eq!(binary(&retained), &[9; 16]);
+    assert!(pool.allocate::<u8>(1).is_err());
+    drop(retained);
+    assert!(pool.allocate::<u8>(4096).is_ok());
 }
 
 #[test]
@@ -76,7 +178,8 @@ fn live_snapshot_reads_preserve_versions_and_leases_across_replacement_and_death
             };
             grant.descriptor().allocation
         };
-        let original = make(7);
+        let admitted = remotemedia_types::ForwardingScope::default();
+        let original = admitted.accept(make(7));
         let original_id = allocation(&original);
         publication.publish(original, 100);
         let (mut peer, handle) = spawn_protocol(&pool, true);
@@ -97,6 +200,7 @@ fn live_snapshot_reads_preserve_versions_and_leases_across_replacement_and_death
             )
             .unwrap();
         let first = output(&mut peer, call);
+        assert!(admitted.accepts_output(first.data()));
         assert_eq!(allocation(first.data()), original_id);
         let replacement = make(9);
         let replacement_id = allocation(&replacement);
@@ -107,6 +211,8 @@ fn live_snapshot_reads_preserve_versions_and_leases_across_replacement_and_death
         complete(&mut peer, call).unwrap();
         assert_eq!(allocation(&second), replacement_id);
         assert_eq!(allocation(&old_again), original_id);
+        assert!(!admitted.accepts_output(&second));
+        assert!(admitted.accepts_output(&old_again));
         publication.publish(RuntimeData::Text("released".into()), 300);
         drop((first, second, old_again));
         // The worker retains the first read beyond call completion.
@@ -266,6 +372,8 @@ fn binary(data: &RuntimeData) -> &[u8] {
 
 #[test]
 fn counted_private_ingress_then_two_worker_forwarding_copies_only_once() {
+    let admitted = remotemedia_types::ForwardingScope::default();
+    let input = admitted.accept(RuntimeData::Binary(vec![1, 2, 3, 4].into()));
     use remotemedia_types::{CopyContext, CopyPolicy, CopyReason};
     let pool = pool(2);
     let (mut first, first_handle) = spawn(&pool);
@@ -281,7 +389,7 @@ fn counted_private_ingress_then_two_worker_forwarding_copies_only_once() {
             CallKind::Process,
             context(),
             arguments(),
-            vec![("input".into(), RuntimeData::Binary(vec![1, 2, 3, 4].into()))],
+            vec![("input".into(), input.clone())],
             &strict
         )
         .is_err());
@@ -291,11 +399,15 @@ fn counted_private_ingress_then_two_worker_forwarding_copies_only_once() {
             CallKind::Process,
             context(),
             arguments(),
-            vec![("input".into(), RuntimeData::Binary(vec![1, 2, 3, 4].into()))],
+            vec![("input".into(), input)],
             &allow,
         )
         .unwrap();
     let original = output(&mut first, call).into_data();
+    assert!(
+        !admitted.accepts_output(&original),
+        "staging must not inherit the private input's proof"
+    );
     complete(&mut first, call).unwrap();
     let RuntimeData::Binary(ref bytes) = original else {
         panic!("binary required")
@@ -953,5 +1065,36 @@ fn blocked_snapshot_reader_does_not_stall_control_or_cancellation() {
         let echo = start(&handle, CallKind::Process, "echo", vec![]);
         complete(&mut peer, echo).unwrap();
         handle.close();
+    }
+}
+
+fn provenance_input(
+    allocator: &remotemedia_types::BoundOutputAllocator,
+    audio: bool,
+) -> (RuntimeData, usize) {
+    use remotemedia_types::OutputAllocator;
+    if audio {
+        let mut loan = allocator.allocate_audio(32).unwrap();
+        loan.fill(0.75);
+        let buffer = loan.freeze();
+        let address = buffer.as_ptr() as usize + 10 * 4;
+        (
+            RuntimeData::Audio {
+                samples: buffer.slice(8..24).unwrap().into(),
+                sample_rate: 48000,
+                channels: 2,
+                stream_id: None,
+                timestamp_us: None,
+                arrival_ts_us: None,
+                metadata: None,
+            },
+            address,
+        )
+    } else {
+        let mut loan = allocator.allocate_bytes(32).unwrap();
+        loan.fill(7);
+        let buffer = loan.freeze();
+        let address = buffer.as_ptr() as usize + 10;
+        (RuntimeData::Binary(buffer.slice(8..24).unwrap()), address)
     }
 }
