@@ -63,7 +63,7 @@ fn audio_with_metadata_roundtrips() {
 #[test]
 fn video_roundtrips() {
     let original = RuntimeData::Video {
-        pixel_data: vec![1, 2, 3, 4, 5],
+        pixel_data: vec![1, 2, 3, 4, 5].into(),
         width: 1280,
         height: 720,
         format: PixelFormat::Yuv420p,
@@ -80,7 +80,7 @@ fn video_roundtrips() {
 #[test]
 fn video_encoded_roundtrips() {
     let original = RuntimeData::Video {
-        pixel_data: vec![0xff, 0xfe, 0xfd],
+        pixel_data: vec![0xff, 0xfe, 0xfd].into(),
         width: 1920,
         height: 1080,
         format: PixelFormat::Encoded,
@@ -97,7 +97,7 @@ fn video_encoded_roundtrips() {
 #[test]
 fn image_jpeg_roundtrips() {
     let original = RuntimeData::Image {
-        data: vec![0xff, 0xd8, 0xff, 0xe0],
+        data: vec![0xff, 0xd8, 0xff, 0xe0].into(),
         format: ImageFormat::Jpeg,
         width: 640,
         height: 480,
@@ -111,7 +111,7 @@ fn image_jpeg_roundtrips() {
 #[test]
 fn image_raw_roundtrips() {
     let original = RuntimeData::Image {
-        data: vec![0; 64],
+        data: vec![0; 64].into(),
         format: ImageFormat::Raw {
             pixel_format: PixelFormat::Rgba32,
         },
@@ -131,7 +131,7 @@ fn text_roundtrips() {
 
 #[test]
 fn binary_roundtrips() {
-    roundtrip(RuntimeData::Binary(vec![0, 1, 2, 3, 255]));
+    roundtrip(RuntimeData::Binary(vec![0, 1, 2, 3, 255].into()));
 }
 
 #[test]
@@ -146,7 +146,7 @@ fn json_roundtrips() {
 #[test]
 fn tensor_roundtrips() {
     let original = RuntimeData::Tensor {
-        data: vec![0u8; 16],
+        data: vec![0u8; 16].into(),
         shape: vec![2, 2, 2, 2],
         dtype: 0,
         metadata: None,
@@ -157,7 +157,7 @@ fn tensor_roundtrips() {
 #[test]
 fn tensor_with_metadata_roundtrips() {
     let original = RuntimeData::Tensor {
-        data: vec![1u8; 8],
+        data: vec![1u8; 8].into(),
         shape: vec![2, 4],
         dtype: 1,
         metadata: Some(serde_json::json!({"layer": "embedding"})),
@@ -168,7 +168,7 @@ fn tensor_with_metadata_roundtrips() {
 #[test]
 fn numpy_roundtrips() {
     let original = RuntimeData::Numpy {
-        data: vec![0u8; 32],
+        data: vec![0u8; 32].into(),
         shape: vec![4, 2],
         dtype: "float32".into(),
         strides: vec![8, 4],
@@ -272,7 +272,7 @@ fn audio_partial_optional_middle_some_roundtrips_named() {
 #[test]
 fn tensor_partial_optional_metadata_some_roundtrips_named() {
     let original = RuntimeData::Tensor {
-        data: vec![0u8; 4],
+        data: vec![0u8; 4].into(),
         shape: vec![1, 4],
         dtype: 0,
         metadata: Some(serde_json::json!({"layer": "head"})),
@@ -284,7 +284,7 @@ fn tensor_partial_optional_metadata_some_roundtrips_named() {
 fn image_partial_optional_stream_id_some_roundtrips_named() {
     // `stream_id = Some(_)` while `timestamp_us` and `metadata` stay None.
     let original = RuntimeData::Image {
-        data: vec![1, 2, 3],
+        data: vec![1, 2, 3].into(),
         format: ImageFormat::Png,
         width: 8,
         height: 8,
@@ -329,7 +329,7 @@ mod compact_encoder {
     /// variants whose optionals are uniformly `None` (or absent).
     #[test]
     fn binary_roundtrips_compact() {
-        let original = RuntimeData::Binary(vec![1, 2, 3, 4]);
+        let original = RuntimeData::Binary(vec![1, 2, 3, 4].into());
         let bytes = rmp_serde::to_vec(&original).expect("serialize");
         let decoded: RuntimeData = rmp_serde::from_slice(&bytes).expect("deserialize");
         assert_eq!(original, decoded);
@@ -353,7 +353,7 @@ mod compact_encoder {
     #[test]
     fn tensor_all_optionals_none_roundtrips_compact() {
         let original = RuntimeData::Tensor {
-            data: vec![0u8; 8],
+            data: vec![0u8; 8].into(),
             shape: vec![2, 4],
             dtype: 0,
             metadata: None,

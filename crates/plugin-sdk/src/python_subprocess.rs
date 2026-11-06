@@ -831,7 +831,7 @@ fn decode_output_to_ffi(resp_bytes: &[u8]) -> Result<Vec<u8>, String> {
                 other => Some(other),
             };
             remotemedia_types::RuntimeData::Tensor {
-                data,
+                data: data.into(),
                 shape: shape.into_iter().map(|d| d as i32).collect(),
                 dtype: dtype as i32,
                 metadata,
@@ -858,7 +858,7 @@ fn decode_output_to_ffi(resp_bytes: &[u8]) -> Result<Vec<u8>, String> {
                 )
             };
             remotemedia_types::RuntimeData::Video {
-                pixel_data,
+                pixel_data: pixel_data.into(),
                 width,
                 height,
                 format,

@@ -173,6 +173,40 @@ pub trait SyncStreamingNode: Send + Sync {
     /// Process single-input data.
     fn process(&self, data: RuntimeData) -> Result<RuntimeData, Error>;
 
+    /// Context-bearing single-output entrypoint. Override the context-bearing
+    /// streaming/multi entrypoints too when those lanes need the same behavior.
+    fn process_with_ctx(
+        &self,
+        data: RuntimeData,
+        _ctx: &dyn NodeRuntimeContextRead,
+    ) -> Result<RuntimeData, Error> {
+        self.process(data)
+    }
+
+    fn process_multi_with_ctx(
+        &self,
+        inputs: HashMap<String, RuntimeData>,
+        _ctx: &dyn NodeRuntimeContextRead,
+    ) -> Result<RuntimeData, Error> {
+        self.process_multi(inputs)
+    }
+
+    /// Defaults to the existing streaming override, preserving legacy multi-output
+    /// behavior. Context-aware nodes override this lane explicitly.
+    fn process_streaming_with_ctx(
+        &self,
+        data: RuntimeData,
+        ctx: &dyn NodeRuntimeContextRead,
+        callback: &mut dyn FnMut(RuntimeData) -> Result<(), Error>,
+    ) -> Result<usize, Error> {
+        let session_id = if ctx.session_id().is_empty() {
+            None
+        } else {
+            Some(ctx.session_id())
+        };
+        self.process_streaming(data, session_id, callback)
+    }
+
     /// Process multi-input data (for nodes that require multiple named
     /// inputs).
     fn process_multi(&self, inputs: HashMap<String, RuntimeData>) -> Result<RuntimeData, Error> {
@@ -211,6 +245,18 @@ pub trait SyncStreamingNode: Send + Sync {
 /// [`AsyncNodeWrapper`].
 #[async_trait::async_trait]
 pub trait AsyncStreamingNode: Send + Sync {
+    /// Validate a bound reader before media execution. Foreign adapters can
+    /// reject payload contracts they cannot transport without materialization.
+    fn validate_snapshot_input(
+        &self,
+        _port: &str,
+        _reader: &dyn SnapshotPort,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+    fn snapshot_outputs(&self) -> HashMap<String, Arc<dyn SnapshotPort>> {
+        HashMap::new()
+    }
     /// Get the node type name.
     fn node_type(&self) -> &str;
 
@@ -223,6 +269,25 @@ pub trait AsyncStreamingNode: Send + Sync {
 
     /// Process single-input data asynchronously.
     async fn process(&self, data: RuntimeData) -> Result<RuntimeData, Error>;
+
+    /// Context-bearing single-output entrypoint, including direct allocation.
+    async fn process_with_ctx(
+        &self,
+        data: RuntimeData,
+        _ctx: &dyn NodeRuntimeContextRead,
+    ) -> Result<RuntimeData, Error> {
+        self.process(data).await
+    }
+
+    /// Context-bearing named-input entrypoint. Existing nodes keep their
+    /// established multi-input behavior through the default delegation.
+    async fn process_multi_with_ctx(
+        &self,
+        inputs: HashMap<String, RuntimeData>,
+        _ctx: &dyn NodeRuntimeContextRead,
+    ) -> Result<RuntimeData, Error> {
+        self.process_multi(inputs).await
+    }
 
     /// Process multi-input data asynchronously.
     async fn process_multi(
@@ -336,6 +401,35 @@ pub trait AsyncStreamingNode: Send + Sync {
     ) -> Result<(), Error> {
         Ok(())
     }
+
+    /// Source/tick producers receive the same allocator and identity as media
+    /// calls. Default delegation preserves existing session-only source nodes.
+    async fn tick_with_ctx(
+        &self,
+        tick: Tick,
+        ctx: &dyn NodeRuntimeContextRead,
+        callback: Box<dyn FnMut(RuntimeData) -> Result<(), Error> + Send>,
+    ) -> Result<(), Error> {
+        let session_id = if ctx.session_id().is_empty() {
+            None
+        } else {
+            Some(ctx.session_id().to_string())
+        };
+        self.tick(tick, session_id, callback).await
+    }
+
+    async fn process_control_with_ctx(
+        &self,
+        message: RuntimeData,
+        ctx: &dyn NodeRuntimeContextRead,
+    ) -> Result<bool, Error> {
+        let session_id = if ctx.session_id().is_empty() {
+            None
+        } else {
+            Some(ctx.session_id().to_string())
+        };
+        self.process_control_message(message, session_id).await
+    }
 }
 
 /// Unified streaming node trait used by the registry and pipeline
@@ -346,6 +440,13 @@ pub trait AsyncStreamingNode: Send + Sync {
 /// [`AsyncNodeWrapper`]).
 #[async_trait::async_trait]
 pub trait StreamingNode: Send + Sync {
+    fn validate_snapshot_input(
+        &self,
+        _port: &str,
+        _reader: &dyn SnapshotPort,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
     /// Get the node type name.
     fn node_type(&self) -> &str;
 
@@ -511,6 +612,9 @@ pub trait StreamingNode: Send + Sync {
 
     /// Type-erased read handles for this node's snapshot output ports,
     /// keyed by output port name.
+    /// The session binds these after initialize completes and retains the chosen
+    /// handles. Publish new values through those ports; do not replace their
+    /// identity after session binding.
     fn snapshot_outputs(&self) -> HashMap<String, Arc<dyn SnapshotPort>> {
         HashMap::new()
     }
@@ -528,17 +632,17 @@ impl<T: SyncStreamingNode + 'static> StreamingNode for SyncNodeWrapper<T> {
     async fn process_async(
         &self,
         data: RuntimeData,
-        _ctx: &dyn NodeRuntimeContextRead,
+        ctx: &dyn NodeRuntimeContextRead,
     ) -> Result<RuntimeData, Error> {
-        self.0.process(data)
+        self.0.process_with_ctx(data, ctx)
     }
 
     async fn process_multi_async(
         &self,
         inputs: HashMap<String, RuntimeData>,
-        _ctx: &dyn NodeRuntimeContextRead,
+        ctx: &dyn NodeRuntimeContextRead,
     ) -> Result<RuntimeData, Error> {
-        self.0.process_multi(inputs)
+        self.0.process_multi_with_ctx(inputs, ctx)
     }
 
     fn is_multi_input(&self) -> bool {
@@ -551,12 +655,7 @@ impl<T: SyncStreamingNode + 'static> StreamingNode for SyncNodeWrapper<T> {
         ctx: &dyn NodeRuntimeContextRead,
         mut callback: Box<dyn FnMut(RuntimeData) -> Result<(), Error> + Send>,
     ) -> Result<usize, Error> {
-        let session_id = if ctx.session_id().is_empty() {
-            None
-        } else {
-            Some(ctx.session_id())
-        };
-        self.0.process_streaming(data, session_id, &mut *callback)
+        self.0.process_streaming_with_ctx(data, ctx, &mut *callback)
     }
 }
 
@@ -565,6 +664,12 @@ pub struct AsyncNodeWrapper<T: AsyncStreamingNode>(pub Arc<T>);
 
 #[async_trait::async_trait]
 impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
+    fn validate_snapshot_input(&self, port: &str, reader: &dyn SnapshotPort) -> Result<(), Error> {
+        self.0.validate_snapshot_input(port, reader)
+    }
+    fn snapshot_outputs(&self) -> HashMap<String, Arc<dyn SnapshotPort>> {
+        self.0.snapshot_outputs()
+    }
     fn node_type(&self) -> &str {
         self.0.node_type()
     }
@@ -576,17 +681,17 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
     async fn process_async(
         &self,
         data: RuntimeData,
-        _ctx: &dyn NodeRuntimeContextRead,
+        ctx: &dyn NodeRuntimeContextRead,
     ) -> Result<RuntimeData, Error> {
-        self.0.process(data).await
+        self.0.process_with_ctx(data, ctx).await
     }
 
     async fn process_multi_async(
         &self,
         inputs: HashMap<String, RuntimeData>,
-        _ctx: &dyn NodeRuntimeContextRead,
+        ctx: &dyn NodeRuntimeContextRead,
     ) -> Result<RuntimeData, Error> {
-        self.0.process_multi(inputs).await
+        self.0.process_multi_with_ctx(inputs, ctx).await
     }
 
     fn is_multi_input(&self) -> bool {
@@ -626,12 +731,7 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
         message: RuntimeData,
         ctx: &dyn NodeRuntimeContextRead,
     ) -> Result<bool, Error> {
-        let session_id = if ctx.session_id().is_empty() {
-            None
-        } else {
-            Some(ctx.session_id().to_string())
-        };
-        self.0.process_control_message(message, session_id).await
+        self.0.process_control_with_ctx(message, ctx).await
     }
 
     fn pacing_nature(&self) -> PacingNature {
@@ -652,12 +752,7 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
         ctx: &dyn NodeRuntimeContextRead,
         callback: Box<dyn FnMut(RuntimeData) -> Result<(), Error> + Send>,
     ) -> Result<(), Error> {
-        let session_id = if ctx.session_id().is_empty() {
-            None
-        } else {
-            Some(ctx.session_id().to_string())
-        };
-        self.0.tick(tick, session_id, callback).await
+        self.0.tick_with_ctx(tick, ctx, callback).await
     }
 }
 

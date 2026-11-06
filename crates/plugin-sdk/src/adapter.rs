@@ -9,14 +9,16 @@ use std::sync::{Arc, OnceLock};
 
 use abi_stable::std_types::{RErr, ROk, RResult, RString, RVec};
 use async_ffi::{FfiFuture, FutureExt};
-use loadable_node_abi::{FfiCallContext, FfiNode, FfiTick, OutputSinkBox, RpcReplySinkBox};
-use remotemedia_traits::rpc::{
-    CallContext, RpcMode, RpcReply, RpcReplySink, RpcRequest, RpcResponder,
+use loadable_node_abi::buffer::{
+    FfiExecutionContext, FfiMessage, FfiNamedInput, SharedOutputSinkBox, BUFFER_ABI_VERSION,
 };
+use loadable_node_abi::{FfiCallContext, FfiNode, FfiTick, OutputSinkBox, RpcReplySinkBox};
+use remotemedia_traits::rpc::{CallContext, RpcReply, RpcReplySink};
 use remotemedia_traits::runtime_context::InitializeContextRead;
 use remotemedia_traits::streaming::{AsyncStreamingNode, PacingNature, Tick};
 use remotemedia_types::RuntimeData;
 use tokio::runtime::Runtime;
+mod shared;
 
 /// Tiny stand-in for the host's `InitializeContext`. Used to satisfy
 /// `AsyncStreamingNode::initialize`'s `&dyn InitializeContextRead`
@@ -118,6 +120,139 @@ impl<N> FfiNode for StreamingNodeFfiAdapter<N>
 where
     N: AsyncStreamingNode + Send + Sync + 'static,
 {
+    fn snapshot_outputs(
+        &self,
+    ) -> RResult<RVec<loadable_node_abi::snapshot::FfiSnapshotPort>, RString> {
+        match loadable_node_abi::snapshot::runtime::export_ports(self.inner.snapshot_outputs()) {
+            Ok(ports) => ROk(ports),
+            Err(error) => RErr(error.to_string().into()),
+        }
+    }
+    fn shared_buffer_protocol(&self) -> u16 {
+        BUFFER_ABI_VERSION
+    }
+
+    fn is_multi_input(&self) -> bool {
+        self.inner.is_multi_input()
+    }
+
+    fn process_shared(
+        &self,
+        input: FfiMessage,
+        context: FfiExecutionContext,
+    ) -> FfiFuture<RResult<FfiMessage, RString>> {
+        let inner = self.inner.clone();
+        shared::run(async move {
+            let input = shared::decode(input)?;
+            let context = shared::Context::try_from(context)?;
+            shared::encode(inner.process_with_ctx(input, &context).await?)
+        })
+    }
+
+    fn process_inputs_shared(
+        &self,
+        inputs: RVec<FfiNamedInput>,
+        context: FfiExecutionContext,
+    ) -> FfiFuture<RResult<FfiMessage, RString>> {
+        let inner = self.inner.clone();
+        shared::run(async move {
+            let mut decoded = std::collections::HashMap::new();
+            for input in inputs {
+                if decoded
+                    .insert(input.name.into_string(), shared::decode(input.message)?)
+                    .is_some()
+                {
+                    return Err(remotemedia_types::Error::Execution(
+                        "duplicate named plugin input".into(),
+                    ));
+                }
+            }
+            let context = shared::Context::try_from(context)?;
+            shared::encode(inner.process_multi_with_ctx(decoded, &context).await?)
+        })
+    }
+
+    fn process_many_shared(
+        &self,
+        input: FfiMessage,
+        context: FfiExecutionContext,
+    ) -> FfiFuture<RResult<RVec<FfiMessage>, RString>> {
+        let inner = self.inner.clone();
+        shared::run(async move {
+            let input = shared::decode(input)?;
+            let context = shared::Context::try_from(context)?;
+            let mut outputs = Vec::new();
+            inner
+                .process_streaming_with_ctx(input, &context, |data| {
+                    outputs.push(shared::encode(data)?);
+                    Ok(())
+                })
+                .await?;
+            Ok(outputs.into())
+        })
+    }
+
+    fn process_streaming_shared(
+        &self,
+        input: FfiMessage,
+        context: FfiExecutionContext,
+        sink: SharedOutputSinkBox,
+    ) -> FfiFuture<RResult<usize, RString>> {
+        let inner = self.inner.clone();
+        shared::run(async move {
+            let input = shared::decode(input)?;
+            let context = shared::Context::try_from(context)?;
+            inner
+                .process_streaming_with_ctx(input, &context, move |data| shared::push(&sink, data))
+                .await
+        })
+    }
+
+    fn tick_shared(
+        &self,
+        tick: FfiTick,
+        context: FfiExecutionContext,
+        sink: SharedOutputSinkBox,
+    ) -> FfiFuture<RResult<usize, RString>> {
+        let inner = self.inner.clone();
+        shared::run(async move {
+            let context = shared::Context::try_from(context)?;
+            let tick = Tick {
+                clock_id: tick.clock_id.into_string(),
+                pts_us: tick.pts_us,
+                frame_idx: tick.frame_idx,
+                deadline_us: tick.deadline_us,
+            };
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let emitted = count.clone();
+            inner
+                .tick_with_ctx(
+                    tick,
+                    &context,
+                    Box::new(move |data| {
+                        shared::push(&sink, data)?;
+                        emitted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Ok(())
+                    }),
+                )
+                .await?;
+            Ok(count.load(std::sync::atomic::Ordering::Relaxed))
+        })
+    }
+
+    fn process_control_shared(
+        &self,
+        input: FfiMessage,
+        context: FfiExecutionContext,
+    ) -> FfiFuture<RResult<bool, RString>> {
+        let inner = self.inner.clone();
+        shared::run(async move {
+            let input = shared::decode(input)?;
+            let context = shared::Context::try_from(context)?;
+            inner.process_control_with_ctx(input, &context).await
+        })
+    }
+
     fn node_type(&self) -> RString {
         RString::from(self.node_type.clone())
     }
@@ -368,41 +503,23 @@ where
         context: FfiCallContext,
         sink: RpcReplySinkBox,
     ) -> FfiFuture<RResult<(), RString>> {
-        let inner = Arc::clone(&self.inner);
-        async move {
-            let request: RpcRequest = match rmp_serde::from_slice(request.as_slice()) {
-                Ok(request) => request,
-                Err(e) => return RErr(format!("invalid RPC request: {e}").into()),
-            };
-            let join = plugin_runtime().spawn(async move {
-                let context = call_context(context);
-                let mode = inner
-                    .rpc_methods()
-                    .iter()
-                    .find(|m| m.name == request.method)
-                    .map(|m| m.mode);
-                let registered = mode.is_some();
-                let mode = mode.unwrap_or(RpcMode::Reply);
-                let mut replies =
-                    RpcResponder::new(Arc::new(FfiReplies(sink)), request.corr_id.clone(), mode);
-                let result = if registered {
-                    inner.call_rpc(request, &context, &mut replies).await
-                } else {
-                    Err(remotemedia_types::Error::Execution(format!(
-                        "unknown RPC method: {}",
-                        request.method
-                    )))
-                };
-                replies.finish(result).await
-            });
-            let _abort = AbortOnDrop(join.abort_handle());
-            match join.await {
-                Ok(Ok(())) => ROk(()),
-                Ok(Err(e)) => RErr(e.to_string().into()),
-                Err(e) => RErr(format!("plugin RPC panicked: {e}").into()),
-            }
-        }
-        .into_ffi()
+        shared::rpc(
+            self.inner.clone(),
+            request,
+            Ok(Box::new(call_context(context))),
+            sink,
+        )
+    }
+
+    fn call_rpc_shared(
+        &self,
+        request: RVec<u8>,
+        context: FfiExecutionContext,
+        sink: RpcReplySinkBox,
+    ) -> FfiFuture<RResult<(), RString>> {
+        let context = shared::Context::try_from(context)
+            .map(|ctx| Box::new(ctx) as Box<dyn remotemedia_traits::NodeRuntimeContextRead>);
+        shared::rpc(self.inner.clone(), request, context, sink)
     }
 }
 

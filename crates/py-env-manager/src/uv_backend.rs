@@ -25,6 +25,7 @@ pub struct UvBackend {
     /// Populated from [`crate::PythonEnvConfig::find_links`] so shipped
     /// (offline) wheelhouses can satisfy dependency resolution.
     find_links: Vec<PathBuf>,
+    no_index: bool,
 }
 
 impl UvBackend {
@@ -33,12 +34,19 @@ impl UvBackend {
         Self {
             uv_path,
             find_links: Vec::new(),
+            no_index: false,
         }
     }
 
     /// Attach offline `--find-links` wheel directories to this backend.
     pub fn with_find_links(mut self, find_links: Vec<PathBuf>) -> Self {
         self.find_links = find_links;
+        self
+    }
+
+    /// Disable package indexes while retaining explicit local/direct sources.
+    pub fn with_no_index(mut self, no_index: bool) -> Self {
+        self.no_index = no_index;
         self
     }
 
@@ -259,6 +267,9 @@ impl EnvBackend for UvBackend {
         ];
         // Offline wheelhouses shipped with a bundle resolve from here.
         args.extend(self.find_links_args());
+        if self.no_index {
+            args.push("--no-index".to_string());
+        }
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
         self.run_uv(&arg_refs).await?;
@@ -412,9 +423,8 @@ fn download_uv(version: &str, expected_checksum: &str, dest: &Path) -> Result<()
     tracing::info!(%url, "Downloading uv binary");
 
     // --- Download the archive ---
-    let response = reqwest::blocking::get(&url).map_err(|e| {
-        Error::ConfigError(format!("Failed to download uv from {}: {}", url, e))
-    })?;
+    let response = reqwest::blocking::get(&url)
+        .map_err(|e| Error::ConfigError(format!("Failed to download uv from {}: {}", url, e)))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -501,16 +511,16 @@ fn extract_from_tar_gz(archive: &[u8], filename: &str, dest: &Path) -> Result<()
     let decoder = flate2::read::GzDecoder::new(archive);
     let mut archive = tar::Archive::new(decoder);
 
-    for entry in archive.entries().map_err(|e| {
-        Error::ConfigError(format!("Failed to read tar archive: {}", e))
-    })? {
-        let mut entry = entry.map_err(|e| {
-            Error::ConfigError(format!("Failed to read tar entry: {}", e))
-        })?;
+    for entry in archive
+        .entries()
+        .map_err(|e| Error::ConfigError(format!("Failed to read tar archive: {}", e)))?
+    {
+        let mut entry =
+            entry.map_err(|e| Error::ConfigError(format!("Failed to read tar entry: {}", e)))?;
 
-        let entry_path = entry.path().map_err(|e| {
-            Error::ConfigError(format!("Failed to read entry path: {}", e))
-        })?;
+        let entry_path = entry
+            .path()
+            .map_err(|e| Error::ConfigError(format!("Failed to read entry path: {}", e)))?;
 
         if entry_path.file_name().and_then(|n| n.to_str()) == Some(filename) {
             // Ensure parent directory exists
@@ -546,14 +556,13 @@ fn extract_from_tar_gz(archive: &[u8], filename: &str, dest: &Path) -> Result<()
 /// Extract a single file from a `.zip` archive.
 fn extract_from_zip(archive: &[u8], filename: &str, dest: &Path) -> Result<()> {
     let cursor = std::io::Cursor::new(archive);
-    let mut zip = zip::ZipArchive::new(cursor).map_err(|e| {
-        Error::ConfigError(format!("Failed to read zip archive: {}", e))
-    })?;
+    let mut zip = zip::ZipArchive::new(cursor)
+        .map_err(|e| Error::ConfigError(format!("Failed to read zip archive: {}", e)))?;
 
     for i in 0..zip.len() {
-        let mut entry = zip.by_index(i).map_err(|e| {
-            Error::ConfigError(format!("Failed to read zip entry {}: {}", i, e))
-        })?;
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| Error::ConfigError(format!("Failed to read zip entry {}: {}", i, e)))?;
 
         let entry_name = entry.name().to_string();
         let entry_file = std::path::Path::new(&entry_name);
@@ -781,8 +790,8 @@ mod tests {
         let mut zip_bytes = Vec::new();
         {
             let mut zip_writer = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_bytes));
-            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
-                .unix_permissions(0o755);
+            let options: zip::write::FileOptions<'_, ()> =
+                zip::write::FileOptions::default().unix_permissions(0o755);
             zip_writer.start_file("uv.exe", options).unwrap();
             zip_writer.write_all(b"hello").unwrap();
             zip_writer.finish().unwrap();

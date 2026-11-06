@@ -39,6 +39,59 @@ use crate::ports::TimestampedSnapshot;
 /// helpers in this module — plugin code is expected to call those rather
 /// than handle `Arc<dyn Any>` directly.
 pub trait NodeRuntimeContextRead: Send + Sync {
+    /// Retain the explicit materialization policy and ledger for this node.
+    /// None means this context/adapter does not expose that contract. Callers
+    /// must not infer permission or invent a compatibility fallback from None.
+    /// This scopes instrumented operations, not arbitrary node/library copies.
+    fn copy_context(&self) -> Option<remotemedia_types::CopyContext> {
+        None
+    }
+
+    /// Retain bound snapshot readers for an asynchronous or foreign call.
+    fn snapshot_inputs(
+        &self,
+    ) -> std::collections::HashMap<String, Arc<dyn crate::ports::SnapshotPort>> {
+        std::collections::HashMap::new()
+    }
+
+    /// Portable media snapshot read, preserving transport/type errors. The
+    /// generic `snapshot` helper is for local Rust payload types.
+    fn runtime_snapshot(
+        &self,
+        port: &str,
+    ) -> Result<
+        Option<Arc<TimestampedSnapshot<remotemedia_types::RuntimeData>>>,
+        remotemedia_types::Error,
+    > {
+        match self.snapshot_inputs().get(port) {
+            Some(reader) => reader.runtime_snapshot(),
+            None => Ok(None),
+        }
+    }
+
+    /// Retain the selected provider for a foreign/asynchronous call. Contexts
+    /// without a provider return None; callers must not invent a heap fallback.
+    fn output_allocator(&self) -> Option<Arc<dyn remotemedia_types::OutputAllocator>> {
+        None
+    }
+
+    /// Allocate output in this execution context's selected memory domain.
+    /// Legacy contexts fail explicitly until they supply an allocator.
+    fn allocate_output_bytes(
+        &self,
+        _len: usize,
+    ) -> Result<remotemedia_types::BufferLoan<u8>, remotemedia_types::BufferAllocationError> {
+        Err(remotemedia_types::BufferAllocationError::Unavailable)
+    }
+
+    /// Allocate initialized f32 output, including from source/tick callbacks.
+    fn allocate_output_audio(
+        &self,
+        _samples: usize,
+    ) -> Result<remotemedia_types::BufferLoan<f32>, remotemedia_types::BufferAllocationError> {
+        Err(remotemedia_types::BufferAllocationError::Unavailable)
+    }
+
     /// Pipeline session this call belongs to.
     fn session_id(&self) -> &str;
 
@@ -103,13 +156,17 @@ pub trait NodeRuntimeContextRead: Send + Sync {
 ///   - the port name isn't registered for this node, OR
 ///   - the producer hasn't published anything yet, OR
 ///   - the consumer's `T` doesn't match the producer's published type.
-pub fn snapshot<T>(ctx: &dyn NodeRuntimeContextRead, port: &str) -> Option<TimestampedSnapshot<T>>
+///
+/// The returned owner retains the publication; no payload clone is performed.
+pub fn snapshot<T>(
+    ctx: &dyn NodeRuntimeContextRead,
+    port: &str,
+) -> Option<Arc<TimestampedSnapshot<T>>>
 where
-    T: Clone + Send + Sync + 'static,
+    T: Send + Sync + 'static,
 {
     let any = ctx.snapshot_any(port)?;
-    let arc: Arc<TimestampedSnapshot<T>> = any.downcast().ok()?;
-    Some((*arc).clone())
+    any.downcast().ok()
 }
 
 /// Downcast the per-session state to the node's expected type.
@@ -255,6 +312,60 @@ mod tests {
         let snap = snapshot::<u32>(&ctx, "weights").expect("populated");
         assert_eq!(snap.value, 7);
         assert_eq!(snap.pts_us, 1000);
+    }
+
+    #[test]
+    fn snapshot_reads_retain_one_publication_without_a_clone_bound() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct NonClone {
+            bytes: Vec<u8>,
+            released: Arc<AtomicUsize>,
+        }
+        impl Drop for NonClone {
+            fn drop(&mut self) {
+                self.released.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let released = Arc::new(AtomicUsize::new(0));
+        let value = NonClone {
+            bytes: vec![3; 4096],
+            released: released.clone(),
+        };
+        let pointer = value.bytes.as_ptr();
+        let port = OutputPort::empty();
+        port.publish(value, 12);
+        let input = port.input();
+        let producer = port.snapshot().unwrap();
+        let consumer = input.snapshot().unwrap();
+        let mut snapshots: HashMap<String, Arc<dyn SnapshotPort>> = HashMap::new();
+        snapshots.insert("bytes".into(), Arc::new(input));
+        let ctx = StubCtx {
+            session_id: "session".into(),
+            node_id: "node".into(),
+            snapshots,
+            state: Arc::new(()),
+        };
+        let retained = snapshot::<NonClone>(&ctx, "bytes").unwrap();
+        assert!(Arc::ptr_eq(&producer, &consumer));
+        assert!(Arc::ptr_eq(&producer, &retained));
+        assert_eq!(retained.value.bytes.as_ptr(), pointer);
+        port.publish(
+            NonClone {
+                bytes: vec![4],
+                released: released.clone(),
+            },
+            13,
+        );
+        assert_eq!(snapshot::<NonClone>(&ctx, "bytes").unwrap().pts_us, 13);
+        drop((port, ctx, producer, consumer));
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        std::thread::spawn(move || {
+            assert_eq!(retained.pts_us, 12);
+            assert_eq!(retained.value.bytes, vec![3; 4096]);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(released.load(Ordering::SeqCst), 2);
     }
 
     /// Wrong-type snapshot reads return `None` (silent — same policy

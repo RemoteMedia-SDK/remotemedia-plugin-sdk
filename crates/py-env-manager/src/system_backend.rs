@@ -16,12 +16,28 @@ use remotemedia_types::{Error, Result};
 ///
 /// This is the fallback when `uv` is not available. It is slower but
 /// requires no additional tooling beyond a Python installation.
-pub struct SystemBackend;
+pub struct SystemBackend {
+    find_links: Vec<PathBuf>,
+    no_index: bool,
+    require_python_version: bool,
+}
 
 impl SystemBackend {
     /// Create a new SystemBackend.
     pub fn new() -> Self {
-        Self
+        Self {
+            find_links: Vec::new(),
+            no_index: false,
+            require_python_version: false,
+        }
+    }
+
+    /// Apply the same resolution and interpreter policy as the uv backend.
+    pub fn with_config(mut self, config: &super::PythonEnvConfig) -> Self {
+        self.find_links = config.find_links.clone();
+        self.no_index = config.no_index;
+        self.require_python_version = config.require_python_version;
+        self
     }
 
     /// Get the platform-appropriate Python command name.
@@ -44,6 +60,10 @@ impl Default for SystemBackend {
 impl EnvBackend for SystemBackend {
     async fn ensure_python(&self, version: &str) -> Result<PathBuf> {
         let python_cmd = Self::python_command();
+        if self.require_python_version {
+            super::interpreter::validate_python_version(Path::new(python_cmd), version).await?;
+            return Ok(PathBuf::from(python_cmd));
+        }
 
         let output = crate::hidden(Command::new(python_cmd))
             .arg("--version")
@@ -92,7 +112,7 @@ impl EnvBackend for SystemBackend {
         // inheriting broken/conflicting system packages (e.g., numba/coverage).
         // The remotemedia package is found via sys.path in the multiprocess runner.
         let output = crate::hidden(Command::new(python))
-            .args(["-m", "venv", &venv_path.to_string_lossy()])
+            .args(["-I", "-m", "venv", &venv_path.to_string_lossy()])
             .output()
             .await
             .map_err(|e| {
@@ -149,7 +169,8 @@ impl EnvBackend for SystemBackend {
             ))
         })?;
 
-        let args = vec![
+        let mut args = vec![
+            "-I".to_string(),
             "-m".to_string(),
             "pip".to_string(),
             "install".to_string(),
@@ -157,6 +178,14 @@ impl EnvBackend for SystemBackend {
             req_path.to_string_lossy().into_owned(),
         ];
 
+        for directory in &self.find_links {
+            args.push("--find-links".to_string());
+            args.push(directory.to_string_lossy().into_owned());
+        }
+        if self.no_index {
+            args.push("--no-index".to_string());
+        }
+        args.push("--disable-pip-version-check".to_string());
         let output = crate::hidden(Command::new(&venv.python_executable))
             .args(&args)
             .output()

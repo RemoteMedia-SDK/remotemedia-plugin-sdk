@@ -9,6 +9,8 @@ description = "abi_stable FFI surface for RemoteMedia SDK loadable plugins (Node
 # check (which only fires once the .so is dlopen'd into a host).
 #
 # History:
+#   0.7.0  + owning per-node materialization policy and ledger (buffer protocol 2)
+#   0.6.0  + shared buffer owners, output loans, per-call allocators and media hooks
 #   0.5.0  + per-call context and dedicated asynchronous RPC replies
 #   0.4.0  + FfiTick, pacing, tick and auxiliary control forwarding
 #          Rebuild plugins against plugin-sdk 0.6 for this host.
@@ -23,7 +25,7 @@ description = "abi_stable FFI surface for RemoteMedia SDK loadable plugins (Node
 #         (vtable slot count 6 vs 7); plugin authors must bump
 #         their `remotemedia-plugin-sdk` (or `loadable-node-abi`)
 #         dep and rebuild.
-version = "0.5.0"
+version = "0.7.0"
 edition = "2021"
 rust-version.workspace = true
 authors = ["RemoteMedia SDK Contributors"]
@@ -37,6 +39,16 @@ repository = "https://github.com/RemoteMedia-SDK/remotemedia-sdk"
 [dependencies]
 abi_stable = "0.11"
 async-ffi = { version = "0.5", features = ["abi_stable"] }
+remotemedia-types = { path = "../types", version = "0.4.0", optional = true }
+remotemedia-traits = { path = "../traits", version = "0.4.0", optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+runtime = ["dep:remotemedia-types", "dep:remotemedia-traits", "dep:serde_json"]
+
+[dev-dependencies]
+remotemedia-types = { path = "../types", version = "0.4.0" }
+remotemedia-shared-memory = { path = "../shared-memory" }
 
 [build-dependencies]
 cc = "1.0"

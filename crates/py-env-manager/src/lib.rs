@@ -15,6 +15,7 @@
 #[cfg(feature = "bundled-uv")]
 pub mod uv_backend;
 
+mod interpreter;
 pub mod system_backend;
 
 use std::collections::HashMap;
@@ -630,6 +631,17 @@ pub struct PythonEnvConfig {
     /// shipped inside a portable bundle (`.rmpkg`). Empty by default.
     #[serde(default)]
     pub find_links: Vec<PathBuf>,
+
+    /// Disable package indexes in pip/uv. Direct URLs may still use the network;
+    /// this is a resolver policy, not a network sandbox.
+    #[serde(default)]
+    pub no_index: bool,
+
+    /// Require the selected and cached interpreter to match `python_version`.
+    /// Accepts numeric major.minor or major.minor.patch. Legacy system callers
+    /// retain advisory version selection when false.
+    #[serde(default)]
+    pub require_python_version: bool,
 }
 
 fn default_python_version() -> String {
@@ -650,6 +662,8 @@ impl Default for PythonEnvConfig {
             cache_dir: None,
             base_deps: Vec::new(),
             find_links: Vec::new(),
+            no_index: false,
+            require_python_version: false,
         }
     }
 }
@@ -758,26 +772,31 @@ impl PythonEnvManager {
         let cache_dir = config.cache_dir.clone().unwrap_or_else(default_cache_dir);
 
         let backend: Arc<dyn EnvBackend> = match config.mode {
-            PythonEnvMode::System => Arc::new(system_backend::SystemBackend::new()),
+            PythonEnvMode::System => {
+                Arc::new(system_backend::SystemBackend::new().with_config(&config))
+            }
             PythonEnvMode::Managed | PythonEnvMode::ManagedWithPython => {
                 // Try uv first, fall back to system
                 #[cfg(feature = "bundled-uv")]
                 {
                     match uv_backend::UvBackend::new() {
-                        Ok(uv) => Arc::new(uv.with_find_links(config.find_links.clone())),
+                        Ok(uv) => Arc::new(
+                            uv.with_find_links(config.find_links.clone())
+                                .with_no_index(config.no_index),
+                        ),
                         Err(e) => {
                             tracing::warn!(
                                 error = %e,
                                 "uv not available, falling back to system venv+pip"
                             );
-                            Arc::new(system_backend::SystemBackend::new())
+                            Arc::new(system_backend::SystemBackend::new().with_config(&config))
                         }
                     }
                 }
                 #[cfg(not(feature = "bundled-uv"))]
                 {
                     tracing::info!("bundled-uv feature not enabled, using system venv+pip");
-                    Arc::new(system_backend::SystemBackend::new())
+                    Arc::new(system_backend::SystemBackend::new().with_config(&config))
                 }
             }
         };
@@ -824,14 +843,43 @@ impl PythonEnvManager {
             v.extend(deps.iter().cloned());
             v
         };
-        self.cache
+        // Preserve existing cache identities for default policies. Explicit
+        // resolver settings are namespaced with the caller's scope, without
+        // concatenation ambiguities between paths and scope strings.
+        let resolver_scope = if self.config.find_links.is_empty()
+            && !self.config.no_index
+            && !self.config.require_python_version
+        {
+            None
+        } else {
+            Some(
+                serde_json::to_string(&(
+                    "resolver-v1",
+                    scope_context,
+                    &self.config.find_links,
+                    self.config.no_index,
+                    self.config.require_python_version,
+                ))
+                .map_err(|e| Error::ConfigError(e.to_string()))?,
+            )
+        };
+        let venv = self
+            .cache
             .get_or_create(
                 &merged,
                 &self.config.python_version,
-                scope_context,
+                resolver_scope.as_deref().or(scope_context),
                 self.backend.as_ref(),
             )
-            .await
+            .await?;
+        if self.config.require_python_version {
+            interpreter::validate_python_version(
+                &venv.python_executable,
+                &self.config.python_version,
+            )
+            .await?;
+        }
+        Ok(venv)
     }
 
     /// Install additional dependencies into an existing virtual environment.
@@ -918,7 +966,9 @@ pub(crate) fn no_window_flag() -> Option<u32> {
         fn GetConsoleWindow() -> *mut core::ffi::c_void;
     }
     // SAFETY: takes no arguments; returns this process's console window or null.
-    unsafe { GetConsoleWindow() }.is_null().then_some(0x0800_0000)
+    unsafe { GetConsoleWindow() }
+        .is_null()
+        .then_some(0x0800_0000)
 }
 
 /// A tokio `Command` that opens no console window (see [`no_window_flag`]).

@@ -1,0 +1,31 @@
+[package]
+name = "remotemedia-python-buffers"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Owning Python buffer exports and exclusive output loans for RemoteMedia"
+
+[lib]
+name = "_remotemedia_buffers"
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+remotemedia-types = { path = "../types", version = "0.4.0" }
+remotemedia-traits = { path = "../traits", version = "0.4.0", optional = true }
+pyo3 = { workspace = true, features = ["macros"] }
+remotemedia-shared-memory = { path = "../shared-memory", optional = true, features = ["worker-protocol"] }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+remotemedia-shared-memory = { path = "../shared-memory" }
+
+[features]
+extension-module = ["pyo3/extension-module"]
+worker = ["dep:remotemedia-shared-memory", "dep:serde_json", "dep:remotemedia-traits"]
+test-worker = ["worker"]
+
+[[bin]]
+name = "python-buffer-test-worker"
+path = "tests/support/python_worker.rs"
+required-features = ["test-worker"]

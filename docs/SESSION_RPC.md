@@ -1,9 +1,11 @@
 # Session-aware native processing and RPC
 
-This worktree introduces **plugin-sdk 0.7 / loadable-node-abi 0.5**. It is an
-unreleased SDK change. Build the host and plugins against the same revision.
-ABI 0.4 binaries require rebuilding; retaining default Rust methods preserves
-source compatibility, not binary compatibility.
+Session identity and RPC originated in plugin-sdk 0.7 / loadable-node-abi 0.5.
+The current worktree uses **plugin-sdk 0.9 / loadable-node-abi 0.7**. Build host
+and plugins together; ABI 0.6 and older binaries require rebuilding. Shared-media
+protocol 2 uses `call_rpc_shared` with owning allocator, snapshots and copy ledger,
+while preserving the dedicated RPC request/reply codec. Legacy protocol-0 plugins
+retain identity-only RPC. See [the current ABI contract](LOADABLE_NODE_ABI.md).
 
 ## Processing identity
 

@@ -7,8 +7,13 @@ members = [
     "crates/plugin-sdk",
     "crates/modality",
     "crates/core-derive",
+    "crates/shared-memory",
+    "crates/python-buffers",
+    "integration/shared-buffer-plugin",
+    "integration/abi-v05-fixture",
 ]
 default-members = [
+    "crates/shared-memory",
     "crates/loadable-node-abi",
     "crates/types",
     "crates/traits",

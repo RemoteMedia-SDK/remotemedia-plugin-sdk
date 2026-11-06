@@ -7,7 +7,7 @@ is the canonical spec — it explains what's in the contract, what's
 deliberately not, and the rules both sides must follow to keep
 plugins forward-compatible.
 
-The contract is enforced at three layers:
+The contract is enforced at these layers:
 
 | Layer | Where | Catches |
 |---|---|---|
@@ -18,6 +18,95 @@ The contract is enforced at three layers:
 
 If a plugin makes it past these checks, the host can call into it
 safely.
+
+## Shared media contract (ABI 0.7 / plugin-sdk 0.9)
+
+Rebuild host and plugins together for this ABI. A compiled ABI 0.6 or older library is
+rejected at load time; default methods preserve source compatibility only.
+A rebuilt plugin returning `shared_buffer_protocol() == 0` explicitly selects
+legacy MessagePack media. The SDK adapter advertises protocol 2. Unknown versions
+fail, and a failed shared call never retries with a copying codec. Placement-wide
+strict-policy negotiation and copy accounting are separate, unfinished work.
+
+`FfiMessage` contains a protocol version, payload-free `RuntimeMetadata` JSON
+(maximum 1 MiB), and an optional `FfiBuffer`. The buffer holds an ABI-stable retained
+owner, byte offset and length. Import validates version, type, range, alignment,
+and media layout. Audio uses native aligned f32 storage; other bulk variants use
+byte storage with explicit format/dtype metadata. Native `RuntimeData`, `Vec`,
+`Arc`, and Rust trait object layouts never cross the DLL boundary.
+
+The shared hooks cover single output (`process_shared`), named multi-input
+(`process_inputs_shared`), multiple output (`process_many_shared`), incremental
+streaming (`process_streaming_shared`), clock/source output (`tick_shared`) and
+auxiliary controls (`process_control_shared`). Named inputs reject duplicate keys.
+Streaming retains bounded-channel backpressure and cancellation. Per-call
+`FfiExecutionContext` carries session/node identity, optional output allocator,
+snapshots, and optional owning materialization policy/ledger;
+RPC retains its dedicated existing MessagePack request/reply channel.
+Protocol-2 nodes receive RPC through `call_rpc_shared`, carrying the same owning
+execution context. Its default rejects unsupported calls instead of retrying the
+identity-only hook; legacy protocol-0 nodes retain that older hook.
+
+The `copy_ledger::FfiCopyContext` bridge retains the exact originating host ledger.
+The SDK's shared-call context exposes it through `NodeRuntimeContextRead::copy_context`.
+Policy and boundary identity are immutable snapshots; counter updates and reports
+call the original ledger through ABI-stable methods. Clones and re-exports retain
+the provider, including after the original context/node/session drops. The loader
+keeps dynamic library code mapped for the process lifetime. No Rust Arc or trait
+object layout is passed through the ABI. Missing context remains `None`, never an
+invented permission to copy. Started operations end as completed or failed,
+including local unwinding; strict rejection is recorded before invoking the copy.
+Reason order and counter layout are versioned parts of this ABI.
+
+This governs explicit CopyContext operations only. Arbitrary plugin allocations,
+legacy hooks, worker processes and whole-graph negotiation need their own policy
+coverage. Rebuild plugins with `remotemedia-plugin-sdk = "0.9"` for this host.
+
+The allocator returns initialized, exclusive byte/f32 loans. Publication consumes
+the loan and returns an immutable owner over the same allocation. Missing providers
+and exhausted budgets fail explicitly, without allocating replacement heap media.
+The runtime bridge preallocates the owner header when granting the loan. Metadata
+encoding still allocates and serializes; this is not a zero-allocation ABI claim.
+
+`BufferOwner` and `BufferLoan` are unsafe implementation contracts: pointers must
+remain stable, ranges initialized, published storage immutable, and all aliases
+retained until final release. Loan publication must revoke mutable access and
+preserve the allocation. The runtime bridge supplies these implementations; plugin
+authors should use it rather than hand-roll pointer lifetime management.
+
+Imported owners keep the creating library's destructor callback and reference count.
+Re-export preserves the original owner and range. `abi_stable` downcasts only in the
+binary that created the owner; returning there recovers the original storage provider
+and slice, allowing mapped storage to remain exportable to IPC without a registry or
+Rust layout shared between libraries. DLL-private heap output is valid local storage,
+but cannot be sent through strict mapped IPC without a mapped producer allocation.
+
+The current host pins each loaded library for the process lifetime. Nodes and factory
+bundles may drop while exported buffers remain readable. Library unloading is not
+implemented; any future unloading mechanism must retain executable code until all
+owners, futures, sinks and callbacks have released.
+
+Real fixtures live in `integration/shared-buffer-plugin` and
+`integration/abi-v05-fixture` in the plugin SDK repository. The latter freezes the old
+ABI and must not be updated to the new surface. Production host tests live in
+`crates/core/tests/native_shared_buffers.rs` in the runtime repository and load actual
+DLL/SO artifacts via `SHARED_BUFFER_PLUGIN`; frozen-version rejection uses
+`ABI_V05_DLL`. See the approved runtime change's `validation.md` for executed checks.
+
+### Native worker live snapshot inputs
+
+The separate native-worker adapter can consume portable RuntimeData snapshots:
+register static input names with
+`NativeWorkerFactory::with_snapshot_inputs(vec!["latest".into()])?` and read with
+`ctx.runtime_snapshot("latest")?`. The optional snapshot protocol is explicitly
+negotiated; older workers cannot silently ignore bindings. Every read samples the
+live host publication and retains a read-only mapped lease. Context bindings
+reach process, named input, stream, tick, control and RPC hooks. Returned owners
+outlive calls and worker termination; new reads after completion fail. Ordinary
+worker traffic omits the extension. Managed Python consumers also support static input declarations and async
+execution_context.runtime_snapshot through matching protocol-1 wheels.
+Subprocess-originated snapshot outputs and full placement negotiation remain pending. Remote
+reads allocate metadata and wait for IPC; this is not a real-time callback API.
 
 ## 1. The ABI surface
 
@@ -76,14 +165,14 @@ pub trait FfiNode: Send + Sync + 'static {
 }
 ```
 
-Three methods, three semantics:
+The original three methods have these semantics (later hooks are described above):
 
 - **`process`** — single-input, single-output. The original surface.
 - **`process_multi`** — single-input, N-outputs. Required by nodes
   whose `process_streaming` callback fires multiple times per input
   (e.g. Silero VAD emitting both a speech-state JSON event and the
   audio passthrough). Default impl wraps `process` as a 1-element
-  vec, so older plugins keep working but are limited to single-output.
+  vec, so rebuilt source implementations may keep single-output behavior.
 - **`initialize`** — one-time per-session init hook for lazy-load
   plugins (e.g. llama-cpp spawning a multi-GB GGUF loader thread).
   Default is a no-op; plugins that do all their setup eagerly in
@@ -95,7 +184,7 @@ Three methods, three semantics:
 `process_streaming_with_context`. `rpc_methods` advertises native RPC methods;
 `call_rpc` accepts MessagePack requests and emits MessagePack replies through a
 dedicated asynchronous `RpcReplySink`. Existing entry points retain defaults.
-ABI 0.4 binaries require rebuilding. See [the protocol and migration guide](SESSION_RPC.md).
+ABI 0.4 and 0.5 binaries require rebuilding for the current ABI. See [the protocol and migration guide](SESSION_RPC.md).
 
 ### Clock and control hooks (ABI 0.4 / plugin-sdk 0.6)
 
@@ -109,7 +198,7 @@ preserving the same backpressure as `process_streaming()`.
 session identity for auxiliary controls, including interruption and shutdown.
 The SDK adapter executes these hooks on the plugin runtime. Default methods
 keep source implementations valid; deployable plugins must be rebuilt against
-ABI 0.4. Binary compatibility with earlier compiled vtables is not assumed.
+the current ABI. Binary compatibility with earlier compiled vtables is not assumed.
 
 ## 2. What is **not** in the ABI
 
@@ -118,7 +207,7 @@ match the host's exact dep graph is kept out:
 
 | Not in ABI | Why | What plugins do instead |
 |---|---|---|
-| `RuntimeData` (native enum) | dragging it across `dlopen` would require both sides to agree on `remotemedia-types` byte-for-byte | serialize/deserialize via `rmp-serde::to_vec_named` ↔ `from_slice` at every FFI hop (see [`crates/plugin-sdk/src/adapter.rs:125,146`](../crates/plugin-sdk/src/adapter.rs)) |
+| `RuntimeData` (native enum) | Rust enum layout is not an ABI contract | protocol 2 uses metadata plus retained owners; protocol 0 explicitly uses legacy MessagePack |
 | `ControlBus` / `SessionContext` | bus is host-owned, threads through async tasks the plugin can't see | plugins use a polled-state pattern from inside their `FfiFuture` if they need host context |
 | `StreamingNodeFactory`, `MediaCapabilities`, `CapabilityBehavior` | live in `remotemedia-traits`, would couple ABI to trait shape | the plugin-sdk crate ships an `adapter::wrap_ffi_factory` that bridges in-process; loadable plugins declare capabilities only via static manifest metadata |
 | `tokio::Runtime`, `tokio::Handle` | runtime versions can differ | `async_ffi::FfiFuture` carries its own poll-state; plugin and host can each have their own runtime |
@@ -132,8 +221,8 @@ treats as a token?" Usually the answer is yes.
 
 ## 3. Wire format
 
-All `RVec<u8>` payloads across the boundary are **msgpack** encoded
-with `rmp-serde::to_vec_named`. This applies to:
+Legacy media hooks use **MessagePack** encoded with
+`rmp-serde::to_vec_named`. This applies to:
 
 - `FfiNode::process` input and output
 - `FfiNode::process_multi` input and each `RVec<u8>` inside the output
@@ -161,13 +250,13 @@ must have a default impl. Two markers exist today:
 - `FfiNode::process` — the original v0.1 surface
 
 Anything added after these markers (in declaration order) must carry a
-default. Plugins built against the old surface keep loading; the host
-silently uses the default whenever the plugin doesn't override.
+default for source implementations rebuilt against the current ABI. Compiled
+plugins still undergo layout and version checks; defaults do not bypass them.
 
 ### 4.2 Default impls
 
 Every method added after the prefix cut **must** have a default that
-preserves the v0.1 behavior. Examples:
+preserves compatibility or explicitly reports an unsupported new operation. Examples:
 
 ```rust
 // process_multi default: delegate to process, wrap as 1-element vec.
@@ -216,7 +305,7 @@ with this rule:
 
 Currently we're pre-1.0, so MINOR is the practical unit of breakage —
 `abi_stable` will reject a plugin built against a different MINOR
-even though cargo's semver normally allows `^0.x` resolution. That's
+and Cargo caret requirements also exclude the next pre-1.0 minor line. That's
 intentional: pre-1.0 is the right shape while we're still discovering
 what the contract should be.
 
@@ -232,10 +321,10 @@ above the `version =` line. Update it on every bump:
 ```
 
 After bumping either `loadable-node-abi` or `remotemedia-plugin-sdk`,
-run:
+run from the runtime repository:
 
 ```bash
-python3 scripts/sync-loadable-abi-versions.py
+python3 scripts/sync-loadable-abi-versions.py --plugin-sdk-root ../remotemedia-plugin-sdk
 ```
 
 That refreshes the reusable plugin release workflow defaults and the
@@ -256,7 +345,7 @@ must:
       crates.io once the SDK line is published:
 
       ```toml
-      remotemedia-plugin-sdk = "0.6"
+      remotemedia-plugin-sdk = "0.9"
       ```
 
       If the plugin must consume an unpublished SDK snapshot, pin by
@@ -278,9 +367,9 @@ must:
       `plugin-export`, default-on). Hosts that want to link the plugin
       as an rlib (in-process registration) opt out of the feature to
       avoid symbol collision.
-- [ ] Use msgpack (`rmp-serde::to_vec_named` / `from_slice`) for
-      every `RVec<u8>` payload. JSON-encoded payloads from older
-      plugins will decode as garbage on a current host.
+- [ ] Use the SDK adapter for protocol-1 media ownership and direct output
+      allocation. Handwritten legacy hooks must keep their MessagePack codec;
+      metadata JSON is confined to the versioned shared-message contract.
 - [ ] Provide a CI matrix build (see
       [`docs/PLUGIN_PUBLISHING.md`](PLUGIN_PUBLISHING.md)) that
       produces .so / .dll / .dylib artifacts under predictable names
