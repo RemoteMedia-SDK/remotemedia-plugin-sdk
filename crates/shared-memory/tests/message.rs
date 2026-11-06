@@ -99,6 +99,7 @@ fn private_ingress_is_rejected_or_copied_once_with_visible_accounting() {
             RuntimeData::Binary(vec![1u8; 4].into())
         };
         let bytes = if is_audio { 16 } else { 4 };
+        assert!(!pool.owns_payload(&input));
         let strict = CopyContext::new(CopyPolicy::RequireZeroCopy, "session.node.input");
         assert!(matches!(
             pool.prepare_message_with_copy_context(input.clone(), RECIPIENT, ENCODING, &strict),
@@ -220,7 +221,10 @@ fn foreign_pool_copy_is_explicit_and_validation_or_budget_errors_never_trigger_f
 #[test]
 fn mapped_audio_message_survives_session_close_and_forwards_same_storage() {
     let pool = pool();
-    let (input, released) = receive(&pool, audio(&pool));
+    let produced = audio(&pool);
+    assert!(pool.owns_payload(&produced));
+    let (input, released) = receive(&pool, produced);
+    assert!(!pool.owns_payload(&input)); // Raw imported descriptor is not host ownership.
     let RuntimeData::Audio {
         samples,
         sample_rate,
@@ -294,6 +298,7 @@ fn all_byte_payloads_roundtrip_metadata_with_mapped_owners() {
                 f_contiguous: true,
             },
         };
+        assert!(pool.owns_payload(&input));
         let expected = input.clone();
         let (output, released) = receive(&pool, input);
         assert_eq!(output, expected);

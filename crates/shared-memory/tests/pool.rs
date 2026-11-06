@@ -19,6 +19,29 @@ fn pool(slots: usize, leases: usize) -> SharedPool {
 }
 
 #[test]
+fn exact_pool_membership_rejects_same_label_foreign_and_private_owners_without_leases() {
+    let local = pool(2, 1);
+    let foreign = pool(1, 1);
+    assert_eq!(local.session_id(), foreign.session_id());
+    let own = local.allocate::<u8>(16).unwrap().freeze();
+    let foreign_owner = foreign.allocate::<u8>(16).unwrap().freeze();
+    let empty = local.allocate::<f32>(0).unwrap().freeze();
+    let grant = local.export(&own, PeerId(12)).unwrap();
+    for _ in 0..32 {
+        assert!(local.owns_buffer(&own.slice(3..9).unwrap()));
+        assert!(local.owns_buffer(&empty));
+        assert!(!local.owns_buffer(&foreign_owner));
+        assert!(!local.owns_buffer(&remotemedia_types::SharedBuffer::from(Vec::<u8>::new())));
+    }
+    assert!(local.export(&own, PeerId(13)).is_err());
+    drop(grant);
+    assert!(local.export(&own, PeerId(13)).is_ok());
+    local.close();
+    assert!(local.owns_buffer(&own));
+    assert!(local.owns_buffer(&empty));
+}
+
+#[test]
 fn direct_audio_output_keeps_pointer_and_reuses_only_after_last_view() {
     let pool = pool(1, 4);
     let mut loan = pool.allocate::<f32>(128).unwrap();

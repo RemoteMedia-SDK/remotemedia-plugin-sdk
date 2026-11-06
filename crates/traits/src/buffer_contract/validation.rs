@@ -26,13 +26,24 @@ impl BufferPortContract {
     /// No adaptation is implicit: an incompatible payload is an error even when
     /// the enclosing execution permits explicit counted copies.
     pub fn validate_payload(&self, data: &RuntimeData) -> Result<(), String> {
+        self.validate_payload_in_domain(data, &BufferDomain::Host)
+    }
+
+    /// Validate layout and bounds against a domain already verified by the host.
+    /// The caller must establish the concrete provider/transport identity first;
+    /// passing a domain here does not establish that identity or create proof.
+    pub fn validate_payload_in_domain(
+        &self,
+        data: &RuntimeData,
+        verified_domain: &BufferDomain,
+    ) -> Result<(), String> {
         let Some((layout, encoding)) = self.payload_layout(data)? else {
             return Ok(());
         };
         if !self.layouts.contains(&layout) {
             return Err(format!("undeclared payload layout {layout:?}"));
         }
-        if !self.domains.contains(&BufferDomain::Host) {
+        if !self.domains.contains(verified_domain) {
             return Err("payload memory domain requires verified provider binding".into());
         }
         let bytes = data.bulk_payload_bytes() as u64;

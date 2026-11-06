@@ -8,6 +8,8 @@ use std::fs::File;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+mod membership;
+
 mod sealed {
     pub trait Sealed {}
     impl Sealed for u8 {}

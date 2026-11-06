@@ -91,9 +91,12 @@ fn worker_freeze_host_publication_and_forwarded_slices_retain_independent_owners
     assert!(worker.clone().try_into_loan().is_err());
     // SAFETY: consuming freeze revoked the only writable Rust access path.
     let host = unsafe { pool.publish_remote::<f32>(&descriptor) }.unwrap();
+    assert!(pool.owns_buffer(&host));
+    assert!(!pool.owns_buffer(&worker));
     assert_eq!(host.as_ref(), worker.as_ref());
     assert!(unsafe { pool.publish_remote::<f32>(&descriptor) }.is_err());
     let slice = host.slice(2..6).unwrap();
+    assert!(pool.owns_buffer(&slice));
     let delivery = pool.export(&slice, PeerId(2)).unwrap();
     assert_eq!(delivery.descriptor().allocation, descriptor.allocation);
     assert_eq!(delivery.descriptor().offset, 8);
@@ -107,6 +110,7 @@ fn worker_freeze_host_publication_and_forwarded_slices_retain_independent_owners
         })
     }
     .unwrap();
+    assert!(!pool.owns_buffer(&reader));
     drop(host);
     drop(slice);
     drop(worker);

@@ -189,4 +189,21 @@ fn tensor_conventions_and_memory_domains_cannot_be_guessed() {
         .validate_payload(&RuntimeData::Binary(vec![1u8].into()))
         .unwrap_err()
         .contains("provider binding"));
+    // Only the host can establish provider identity; after it does so, the
+    // declared layout and size rules still apply to that verified domain.
+    mapped
+        .validate_payload_in_domain(
+            &RuntimeData::Binary(vec![1u8].into()),
+            &BufferDomain::SessionMapped,
+        )
+        .unwrap();
+    assert!(mapped
+        .validate_payload_in_domain(
+            &RuntimeData::Binary(vec![0u8; 65].into()),
+            &BufferDomain::SessionMapped
+        )
+        .is_err());
+    assert!(mapped
+        .validate_payload_in_domain(&audio(2), &BufferDomain::SessionMapped)
+        .is_err());
 }
