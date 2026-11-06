@@ -53,7 +53,10 @@ impl FfiNodeFactory for Factory {
             _ => None,
         };
         if let Some(protocol) = protocol {
-            return ROk(FfiNode_TO::from_value(LegacyEcho(protocol), TD_Opaque));
+            return ROk(FfiNode_TO::from_value(
+                LegacyEcho(protocol, Mutex::new(None)),
+                TD_Opaque,
+            ));
         }
         let node = Fixture {
             initialized: AtomicBool::new(false),
@@ -82,7 +85,9 @@ struct Fixture {
     control: Mutex<Option<(String, String)>>,
     continue_stream: tokio::sync::Notify,
 }
-struct LegacyEcho(u16);
+// Retain encoded controls without decoding/copying; a tick returns the same
+// bytes, letting host tests isolate encode/decode attribution across calls.
+struct LegacyEcho(u16, Mutex<Option<abi_stable::std_types::RVec<u8>>>);
 impl remotemedia_plugin_sdk::FfiNode for LegacyEcho {
     fn shared_buffer_protocol(&self) -> u16 {
         self.0
@@ -98,6 +103,36 @@ impl remotemedia_plugin_sdk::FfiNode for LegacyEcho {
     > {
         use remotemedia_plugin_sdk::async_ffi::FutureExt;
         async move { ROk(input) }.into_ffi()
+    }
+
+    fn process_control_message(
+        &self,
+        input: abi_stable::std_types::RVec<u8>,
+        _session: RString,
+    ) -> remotemedia_plugin_sdk::async_ffi::FfiFuture<RResult<bool, RString>> {
+        use remotemedia_plugin_sdk::async_ffi::FutureExt;
+        *self.1.lock().unwrap() = Some(input);
+        async { ROk(true) }.into_ffi()
+    }
+
+    fn tick(
+        &self,
+        _tick: remotemedia_plugin_sdk::FfiTick,
+        _session: RString,
+        sink: remotemedia_plugin_sdk::OutputSinkBox,
+    ) -> remotemedia_plugin_sdk::async_ffi::FfiFuture<RResult<usize, RString>> {
+        use remotemedia_plugin_sdk::async_ffi::FutureExt;
+        let output = self.1.lock().unwrap().take();
+        async move {
+            match output {
+                Some(bytes) => match sink.push(bytes) {
+                    ROk(()) => ROk(1),
+                    RErr(error) => RErr(error),
+                },
+                None => ROk(0),
+            }
+        }
+        .into_ffi()
     }
 }
 struct Cancelled(Arc<AtomicUsize>);

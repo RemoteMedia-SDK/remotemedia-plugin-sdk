@@ -9,7 +9,7 @@ pub use async_ffi;
 pub use inventory;
 pub use loadable_node_abi::{
     buffer, copy_ledger, ensure_android_libcxx_streams, runtime_buffer, snapshot, FfiCallContext,
-    FfiNode, FfiNodeBox, FfiNodeFactory, FfiNodeFactoryBox, FfiNodeFactory_TO, FfiNode_TO,
+    FfiNode, FfiNodeBox, FfiNodeFactory, FfiNodeFactoryBox, FfiNodeFactory_TO, FfiNode_TO, FfiTick,
     NodePlugin, NodePluginRef, OutputSink, OutputSinkBox, OutputSink_TO, RpcReplySink,
     RpcReplySinkBox, RpcReplySink_TO,
 };
