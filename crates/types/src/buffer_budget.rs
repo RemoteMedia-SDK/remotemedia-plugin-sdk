@@ -46,9 +46,18 @@ impl BufferBudget {
     /// of the same owning Arc shares one live reservation, including subranges.
     /// Independent wrappers are conservatively distinct. Metadata is uncharged.
     /// The weak lookup never keeps payloads or reservations alive.
-    pub fn admit(&self, data: RuntimeData) -> Result<RuntimeData, BufferAllocationError> {
-        let mut data = crate::provenance::normalize_owner(data);
-        match &mut data {
+    pub fn admit(&self, mut data: RuntimeData) -> Result<RuntimeData, BufferAllocationError> {
+        self.admit_in_place(&mut data)?;
+        Ok(data)
+    }
+
+    /// Admit without consuming the message on failure, for retryable send APIs.
+    /// Legacy audio may be promoted to a shared representation even on error;
+    /// its allocation, metadata and samples remain unchanged. No payload is copied.
+    pub fn admit_in_place(&self, data: &mut RuntimeData) -> Result<(), BufferAllocationError> {
+        let owned = std::mem::replace(data, RuntimeData::Text(String::new()));
+        *data = crate::provenance::normalize_owner(owned);
+        match data {
             RuntimeData::Audio {
                 samples: AudioSamples::Shared(buffer),
                 ..
@@ -62,7 +71,7 @@ impl BufferBudget {
             | RuntimeData::Numpy { data: buffer, .. } => self.retain(buffer)?,
             _ => {}
         }
-        Ok(data)
+        Ok(())
     }
 
     fn retain<T>(&self, buffer: &mut SharedBuffer<T>) -> Result<(), BufferAllocationError> {

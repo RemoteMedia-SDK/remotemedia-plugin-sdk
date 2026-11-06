@@ -26,6 +26,37 @@ fn audio(samples: AudioSamples) -> RuntimeData {
 }
 
 #[test]
+fn failed_in_place_admission_preserves_audio_for_zero_copy_retry() {
+    let budget = BufferBudget::new(1, 16);
+    let held = budget.admit(input(16)).unwrap();
+    let samples = vec![1.0, 2.0];
+    let pointer = samples.as_ptr();
+    let mut message = audio(samples.into());
+    assert!(budget.admit_in_place(&mut message).is_err());
+    let RuntimeData::Audio {
+        samples,
+        sample_rate,
+        ..
+    } = &message
+    else {
+        panic!()
+    };
+    assert_eq!(samples.as_slice().as_ptr(), pointer);
+    assert_eq!(*sample_rate, 48000);
+    usage(&budget, 1, 16);
+    drop(held);
+    budget.admit_in_place(&mut message).unwrap();
+    let RuntimeData::Audio { samples, .. } = &message else {
+        panic!()
+    };
+    assert_eq!(samples.as_slice().as_ptr(), pointer);
+    assert_eq!(samples.as_slice(), &[1.0, 2.0]);
+    usage(&budget, 1, 8);
+    drop(message);
+    usage(&budget, 0, 0);
+}
+
+#[test]
 fn repeated_admission_and_empty_slices_share_full_backing_reservation() {
     let budget = BufferBudget::new(1, 64);
     let mut values = Vec::with_capacity(64);
