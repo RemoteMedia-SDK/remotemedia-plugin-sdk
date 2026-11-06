@@ -78,6 +78,11 @@ impl BoundOutputAllocator {
         self
     }
 
+    /// The live reservation shared with this node's input admission boundary.
+    pub fn budget(&self) -> Option<&crate::BufferBudget> {
+        self.budget.as_ref()
+    }
+
     /// Metadata has no allocation requirement. Even empty bulk buffers require
     /// evidence from this exact binding. Provider internals remain trusted.
     pub fn owns_payload(&self, data: &RuntimeData) -> bool {
@@ -125,12 +130,7 @@ impl ForwardingScope {
     /// Call only after accepting/validating input. Legacy audio is promoted by
     /// moving its owner. Existing allocation and earlier forwarding proofs survive.
     pub fn accept(&self, data: RuntimeData) -> RuntimeData {
-        let mut data = data.into_shared();
-        if let RuntimeData::Audio { samples, .. } = &mut data {
-            if matches!(samples, AudioSamples::Arc(_)) {
-                *samples = AudioSamples::Shared(std::mem::take(samples).into_shared());
-            }
-        }
+        let mut data = normalize_owner(data);
         if let Some(proof) = provenance_mut(&mut data) {
             proof.accept(&self.token);
         }
@@ -143,6 +143,16 @@ impl ForwardingScope {
             PayloadProvenance::Untracked => false,
         }
     }
+}
+
+pub(crate) fn normalize_owner(data: RuntimeData) -> RuntimeData {
+    let mut data = data.into_shared();
+    if let RuntimeData::Audio { samples, .. } = &mut data {
+        if matches!(samples, AudioSamples::Arc(_)) {
+            *samples = AudioSamples::Shared(std::mem::take(samples).into_shared());
+        }
+    }
+    data
 }
 
 enum PayloadProvenance<'a> {

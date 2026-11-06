@@ -81,20 +81,39 @@ fn split_and_attach_preserve_every_variant_and_bulk_address() {
         },
     ];
     for original in cases {
-        original.validate_shared_layout(ENCODING).unwrap();
-        let pointer = address(&original);
-        let forwarding = remotemedia_types::ForwardingScope::default();
-        let original = forwarding.accept(original);
-        let expected = original.clone();
-        let (metadata, storage) = original.into_shared_parts(ENCODING).unwrap();
-        let encoded = serde_json::to_vec(&metadata).unwrap();
-        let decoded: RuntimeMetadata = serde_json::from_slice(&encoded).unwrap();
-        let output = decoded.attach(storage, ENCODING).unwrap();
-        assert_eq!(output, expected);
-        assert_eq!(address(&output), pointer);
-        assert!(forwarding.accepts_output(&output));
-        assert_bound_allocation(output);
+        assert_shared_roundtrip(original);
     }
+}
+
+fn assert_shared_roundtrip(original: RuntimeData) {
+    original.validate_shared_layout(ENCODING).unwrap();
+    let pointer = address(&original);
+    let budget = remotemedia_types::BufferBudget::new(1, 48);
+    let bytes = original.bulk_payload_bytes() as u64;
+    let original = budget.admit(original).unwrap();
+    let forwarding = remotemedia_types::ForwardingScope::default();
+    let original = forwarding.accept(original);
+    let expected = original.clone();
+    let (metadata, storage) = original.into_shared_parts(ENCODING).unwrap();
+    let encoded = serde_json::to_vec(&metadata).unwrap();
+    let decoded: RuntimeMetadata = serde_json::from_slice(&encoded).unwrap();
+    let output = decoded.attach(storage, ENCODING).unwrap();
+    assert_eq!(output, expected);
+    assert_eq!(address(&output), pointer);
+    assert!(forwarding.accepts_output(&output));
+    assert_eq!(
+        budget.usage(),
+        remotemedia_types::BufferBudgetUsage {
+            owners: u64::from(pointer.is_some()),
+            bytes,
+        }
+    );
+    assert_bound_allocation(output);
+    drop(expected);
+    assert_eq!(
+        budget.usage(),
+        remotemedia_types::BufferBudgetUsage::default()
+    );
 }
 
 fn assert_bound_allocation(data: RuntimeData) {

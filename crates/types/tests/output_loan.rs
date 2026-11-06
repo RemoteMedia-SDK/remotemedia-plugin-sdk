@@ -89,10 +89,15 @@ fn prepared_loan_fill_freeze_and_reuse_allocate_nothing() {
 fn repeated_forwarding_admission_and_validation_allocate_nothing() {
     use remotemedia_types::{ForwardingScope, RuntimeData};
     let scope = ForwardingScope::default();
-    let mut data = scope.accept(RuntimeData::Binary(vec![7; 32].into()));
+    let budget = remotemedia_types::BufferBudget::new(1, 32);
+    let mut data = scope.accept(
+        budget
+            .admit(RuntimeData::Binary(vec![7; 32].into()))
+            .unwrap(),
+    );
     ALLOCATIONS.with(|n| n.set(Some(0)));
     for _ in 0..64 {
-        data = scope.accept(data);
+        data = scope.accept(budget.admit(data).unwrap());
         assert!(scope.accepts_output(&data));
     }
     let allocations = ALLOCATIONS.with(|n| n.replace(None).unwrap());

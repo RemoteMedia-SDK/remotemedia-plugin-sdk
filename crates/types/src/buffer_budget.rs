@@ -1,6 +1,9 @@
 //! Live capacity for allocations that remain owned by loans or published views.
-use crate::{BufferAllocationError, BufferLoan};
-use std::sync::{Arc, Mutex};
+use crate::{AudioSamples, BufferAllocationError, BufferLoan, RuntimeData, SharedBuffer};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, Weak},
+};
 
 /// Outstanding allocation groups and their backing bytes, not visible slice sizes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -12,9 +15,10 @@ pub struct BufferBudgetUsage {
 struct State {
     limits: BufferBudgetUsage,
     usage: Mutex<BufferBudgetUsage>,
+    admitted: Mutex<HashMap<(u8, usize), Weak<Reservation>>>,
 }
 
-/// A shared, nonblocking allocation budget. Exhaustion returns an explicit error.
+/// A shared budget that fails rather than waiting for capacity.
 /// A reservation survives allocator/session destruction until its last view drops.
 /// Clones and slices share one reservation; independently allocated outputs do not.
 /// This covers provider backing spans, not hidden provider metadata or device memory.
@@ -26,11 +30,67 @@ impl BufferBudget {
         Self(Arc::new(State {
             limits: BufferBudgetUsage { owners, bytes },
             usage: Mutex::new(BufferBudgetUsage::default()),
+            admitted: Mutex::new(HashMap::new()),
         }))
     }
 
     pub fn usage(&self) -> BufferBudgetUsage {
         *self.0.usage.lock().unwrap()
+    }
+
+    pub fn limits(&self) -> BufferBudgetUsage {
+        self.0.limits
+    }
+
+    /// Charge a retained input without copying its payload. Repeated admission
+    /// of the same owning Arc shares one live reservation, including subranges.
+    /// Independent wrappers are conservatively distinct. Metadata is uncharged.
+    /// The weak lookup never keeps payloads or reservations alive.
+    pub fn admit(&self, data: RuntimeData) -> Result<RuntimeData, BufferAllocationError> {
+        let mut data = crate::provenance::normalize_owner(data);
+        match &mut data {
+            RuntimeData::Audio {
+                samples: AudioSamples::Shared(buffer),
+                ..
+            } => self.retain(buffer)?,
+            RuntimeData::Binary(buffer)
+            | RuntimeData::Video {
+                pixel_data: buffer, ..
+            }
+            | RuntimeData::Image { data: buffer, .. }
+            | RuntimeData::Tensor { data: buffer, .. }
+            | RuntimeData::Numpy { data: buffer, .. } => self.retain(buffer)?,
+            _ => {}
+        }
+        Ok(data)
+    }
+
+    fn retain<T>(&self, buffer: &mut SharedBuffer<T>) -> Result<(), BufferAllocationError> {
+        let mut link = buffer.provenance.budget.as_deref();
+        while let Some(owner) = link {
+            if Arc::ptr_eq(&owner._reservation.state, &self.0) {
+                return Ok(());
+            }
+            link = owner.prior.as_deref();
+        }
+        let key = buffer.storage_identity();
+        let reservation = {
+            let mut admitted = self.0.admitted.lock().unwrap();
+            match admitted.get(&key).and_then(Weak::upgrade) {
+                Some(reservation) => reservation,
+                None => {
+                    admitted.retain(|_, lease| lease.strong_count() != 0);
+                    let reservation = Arc::new(self.reserve(buffer.backing_bytes() as u64)?);
+                    admitted.insert(key, Arc::downgrade(&reservation));
+                    reservation
+                }
+            }
+        };
+        buffer.provenance.budget = Some(Arc::new(BudgetOwner {
+            _reservation: reservation,
+            prior: buffer.provenance.budget.take(),
+        }));
+        Ok(())
     }
 
     fn reserve(&self, bytes: u64) -> Result<Reservation, BufferAllocationError> {
@@ -72,7 +132,7 @@ impl BufferBudget {
         // exposed backing owner before publishing the loan; roll back on failure.
         reservation.resize(loan.buffer.backing_bytes() as u64)?;
         loan.buffer.provenance.budget = Some(Arc::new(BudgetOwner {
-            _reservation: reservation,
+            _reservation: Arc::new(reservation),
             prior: loan.buffer.provenance.budget.take(),
         }));
         Ok(loan)
@@ -105,7 +165,7 @@ impl Drop for Reservation {
 
 /// Metadata only: does not wrap or hide the provider's recognizable storage owner.
 pub(crate) struct BudgetOwner {
-    _reservation: Reservation,
+    _reservation: Arc<Reservation>,
     prior: Option<Arc<BudgetOwner>>,
 }
 impl Drop for BudgetOwner {

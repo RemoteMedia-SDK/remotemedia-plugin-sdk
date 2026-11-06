@@ -82,6 +82,17 @@ pub struct BufferRangeError {
 }
 
 impl<T> SharedBuffer<T> {
+    // Identity is the owning Arc allocation, never the visible slice pointer.
+    // Independently wrapped aliases intentionally remain distinct admissions.
+    pub(crate) fn storage_identity(&self) -> (u8, usize) {
+        match &self.storage {
+            Storage::Vec(v) => (0, Arc::as_ptr(v) as usize),
+            Storage::Slice(v) => (1, Arc::as_ptr(v) as *const () as usize),
+            Storage::Owner(v) => (2, Arc::as_ptr(v) as *const () as usize),
+            Storage::MutableOwner(v) => (3, Arc::as_ptr(v) as *const () as usize),
+        }
+    }
+
     pub(crate) fn backing_bytes(&self) -> usize {
         let elements = match &self.storage {
             Storage::Vec(owner) => owner.capacity(),

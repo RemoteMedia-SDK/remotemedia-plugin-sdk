@@ -1,19 +1,19 @@
 use remotemedia_types::{
-    BoundOutputAllocator, BufferAllocationError, BufferBudget, BufferBudgetUsage, BufferLoan,
+    BoundOutputAllocator, BufferAllocationError, BufferBudget, BufferLoan,
     CopyContext, CopyPolicy, CopyReason, ForwardingScope, HeapOutputAllocator, OutputAllocator,
     RuntimeData, SharedBuffer, TensorEncoding,
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, Barrier,
+    Arc,
 };
 
 fn bound(budget: &BufferBudget) -> BoundOutputAllocator {
     BoundOutputAllocator::new(Arc::new(HeapOutputAllocator)).with_budget(budget.clone())
 }
-fn usage(budget: &BufferBudget, owners: u64, bytes: u64) {
-    assert_eq!(budget.usage(), BufferBudgetUsage { owners, bytes });
-}
+#[path = "support/budget_checks.rs"]
+mod checks;
+use checks::{hold_concurrently, usage};
 
 #[test]
 fn live_loans_views_and_reuse_hold_one_reservation_until_last_owner() {
@@ -261,28 +261,13 @@ fn bare_vec_and_arc_extraction_cannot_escape_the_live_budget() {
 fn concurrent_allocators_never_exceed_shared_capacity_and_recover_after_release() {
     let budget = BufferBudget::new(4, 32);
     let allocator = Arc::new(bound(&budget));
-    let rendezvous = Arc::new(Barrier::new(17));
-    let threads: Vec<_> = (0..16)
-        .map(|_| {
-            let allocator = allocator.clone();
-            let barrier = rendezvous.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                let result = allocator.allocate_bytes(8);
-                barrier.wait();
-                barrier.wait();
-                result.is_ok()
-            })
-        })
-        .collect();
-    rendezvous.wait();
-    rendezvous.wait();
-    usage(&budget, 4, 32);
-    rendezvous.wait();
-    let successes = threads
-        .into_iter()
-        .map(|t| usize::from(t.join().unwrap()))
-        .sum::<usize>();
+    let producing = allocator.clone();
+    let results = hold_concurrently(
+        16,
+        move || producing.allocate_bytes(8),
+        || usage(&budget, 4, 32),
+    );
+    let successes = results.into_iter().filter(Result::is_ok).count();
     assert_eq!(successes, 4);
     usage(&budget, 0, 0);
     assert!(allocator.allocate_bytes(32).is_ok());
