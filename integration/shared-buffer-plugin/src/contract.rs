@@ -3,10 +3,20 @@ use abi_stable::std_types::ROption;
 use remotemedia_plugin_sdk::traits::buffer_contract::*;
 use std::collections::BTreeMap;
 
-/// Snapshot-free audited factory; the older fixture retains its unknown contract.
+/// Audited stream/snapshot factory; the older fixture retains its unknown contract.
 #[derive(Default)]
 pub struct ContractFactory;
 impl FfiNodeFactory for ContractFactory {
+    fn input_ports(
+        &self,
+    ) -> remotemedia_plugin_sdk::abi_stable::std_types::RVec<snapshot_abi::FfiPortDeclaration> {
+        Factory.input_ports()
+    }
+    fn output_ports(
+        &self,
+    ) -> remotemedia_plugin_sdk::abi_stable::std_types::RVec<snapshot_abi::FfiPortDeclaration> {
+        Factory.output_ports()
+    }
     fn node_type(&self) -> RString {
         "ContractBufferFixture".into()
     }
@@ -24,7 +34,9 @@ impl FfiNodeFactory for ContractFactory {
             _ => {}
         }
         let production = match mode {
-            "echo" | "chunks" | "retain" => BufferProduction::ForwardInput,
+            "echo" | "chunks" | "retain" | "snapshot_late" | "snapshot_read" => {
+                BufferProduction::ForwardInput
+            }
             "gain" | "private" | "lie_protocol" | "wrong_abi" | "wrong_buffers"
             | "rust_protocol" => BufferProduction::OutputAllocator,
             _ => return ROk(ROption::RNone),
@@ -37,8 +49,8 @@ impl FfiNodeFactory for ContractFactory {
         let mut contract = BufferContract {
             version: BUFFER_CONTRACT_VERSION,
             protocol: remotemedia_plugin_sdk::buffer_contract::native_protocol(),
-            inputs: BTreeMap::from([("".into(), port.clone())]),
-            outputs: BTreeMap::from([("".into(), port)]),
+            inputs: BTreeMap::from([("".into(), port.clone()), ("latest".into(), port.clone())]),
+            outputs: BTreeMap::from([("".into(), port.clone()), ("latest".into(), port)]),
             production,
             retention: Some(BufferRetention {
                 owners: 4,

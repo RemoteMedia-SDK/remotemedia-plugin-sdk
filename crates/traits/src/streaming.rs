@@ -440,6 +440,17 @@ pub trait AsyncStreamingNode: Send + Sync {
 /// [`AsyncNodeWrapper`]).
 #[async_trait::async_trait]
 pub trait StreamingNode: Send + Sync {
+    /// Bind the reader actually delivered to runtime contexts. Validation
+    /// adapters may retain a checked view; ordinary nodes keep the same owner.
+    fn bind_snapshot_input(
+        &self,
+        port: &str,
+        reader: Arc<dyn SnapshotPort>,
+    ) -> Result<Arc<dyn SnapshotPort>, Error> {
+        self.validate_snapshot_input(port, reader.as_ref())?;
+        Ok(reader)
+    }
+
     fn validate_snapshot_input(
         &self,
         _port: &str,
