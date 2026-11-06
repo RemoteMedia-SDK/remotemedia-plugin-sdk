@@ -7,6 +7,7 @@ use std::{path::PathBuf, process::Command, time::Duration};
 /// Worker outputs always require mapped publication.
 #[derive(Clone)]
 pub struct NativeWorkerFactory {
+    buffer_declaration: Option<crate::native_worker::contracts::Declaration>,
     binary_path: PathBuf,
     node_type: String,
     pool: Option<SharedPool>,
@@ -28,6 +29,7 @@ impl NativeWorkerFactory {
             binary_path,
             node_type,
             pool: Some(pool),
+            buffer_declaration: None,
             input_copies: None,
             limits: Limits::default(),
             startup_timeout: Duration::from_secs(10),
@@ -47,6 +49,7 @@ impl NativeWorkerFactory {
             binary_path,
             node_type,
             pool: None,
+            buffer_declaration: None,
             input_copies: None,
             limits: Limits::default(),
             startup_timeout: Duration::from_secs(10),
@@ -59,6 +62,25 @@ impl NativeWorkerFactory {
     /// Bind a fixed session/node policy scope. Identity is checked before startup.
     pub fn with_input_copies(mut self, copies: WorkerInputCopies) -> Self {
         self.input_copies = Some(copies);
+        self
+    }
+
+    /// Attach a pure declaration covering these exact parameters and every
+    /// execution lane. The callback receives the adapter's actual protocol.
+    /// None remains unknown. Runtime layout, domain and provenance checks still
+    /// apply; declarations do not certify arbitrary node-internal copies.
+    pub fn with_buffer_contract(
+        mut self,
+        declaration: impl Fn(
+                &serde_json::Value,
+                &remotemedia_traits::buffer_contract::BufferProtocol,
+            )
+                -> Result<Option<remotemedia_traits::buffer_contract::BufferContract>, Error>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.buffer_declaration = Some(Arc::new(declaration));
         self
     }
 
@@ -141,6 +163,32 @@ impl NativeWorkerFactory {
     }
 }
 impl StreamingNodeFactory for NativeWorkerFactory {
+    fn try_buffer_contract(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<Option<remotemedia_traits::buffer_contract::BufferContract>, Error> {
+        crate::native_worker::contracts::inspect(
+            self.buffer_declaration.as_ref(),
+            params,
+            crate::native_worker::contracts::protocol(
+                false,
+                &self.snapshot_inputs,
+                &self.snapshot_outputs,
+            ),
+        )
+    }
+
+    fn supports_buffer_protocol(
+        &self,
+        protocol: &remotemedia_traits::buffer_contract::BufferProtocol,
+    ) -> bool {
+        *protocol
+            == crate::native_worker::contracts::protocol(
+                false,
+                &self.snapshot_inputs,
+                &self.snapshot_outputs,
+            )
+    }
     fn is_multi_output_streaming(&self) -> bool {
         true
     }
@@ -165,6 +213,7 @@ impl StreamingNodeFactory for NativeWorkerFactory {
         params: &serde_json::Value,
         session_id: Option<String>,
     ) -> Result<Box<dyn StreamingNode>, Error> {
+        self.try_buffer_contract(params)?;
         let pool = self.pool.clone().ok_or_else(|| {
             Error::ConfigError("native worker factory requires a session pool".into())
         })?;

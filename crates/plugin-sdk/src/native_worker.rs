@@ -12,6 +12,7 @@ use std::{collections::HashMap, sync::Arc};
 
 mod client;
 mod context;
+pub(crate) mod contracts;
 mod host;
 mod input_copies;
 mod launch;
