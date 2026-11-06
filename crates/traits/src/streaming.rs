@@ -758,6 +758,13 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
 
 /// Factory trait for creating streaming node instances.
 pub trait StreamingNodeFactory: Send + Sync {
+    /// Pure declaration for the exact parameters, before create/initialize.
+    /// None means unknown, never implicit support. Must cover every execution
+    /// lane and output port; callers still validate actual payloads at runtime.
+    fn buffer_contract(&self, _params: &Value) -> Option<crate::buffer_contract::BufferContract> {
+        None
+    }
+
     /// Create a new streaming node instance.
     fn create(
         &self,
