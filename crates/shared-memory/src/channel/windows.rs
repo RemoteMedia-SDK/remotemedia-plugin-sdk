@@ -30,11 +30,16 @@ impl Endpoint {
         };
         Ok((self, reader))
     }
-    pub(super) fn spawn(command: &mut Command, job: &ProcessJob) -> io::Result<(Child, Self)> {
+    pub(super) fn spawn(
+        command: &mut Command,
+        job: &ProcessJob,
+        resources: &mut super::ProcessResources,
+    ) -> io::Result<(Child, Self)> {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()?;
+        resources.live = true;
         let endpoint = (|| {
             // Before any host protocol or mapping transfer. Trusted workers must
             // not start descendants before receiving their first host message.
@@ -62,7 +67,7 @@ impl Endpoint {
                 peer_process,
             })
         })();
-        super::finish_spawn(child, endpoint)
+        super::finish_spawn(child, endpoint, resources)
     }
 
     pub(super) fn from_stdio() -> io::Result<Self> {

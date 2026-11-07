@@ -329,9 +329,16 @@ impl StreamingNodeFactory for MappedPythonFactory {
         }
         // SAFETY: the constructor accepts the complete selected Python code's
         // mapping contract. Provisioning verifies the exact installed wheels.
-        let peer =
-            unsafe { worker_command.spawn_peer(pool, self.limits, snapshots, output_copies) }
-                .map_err(|e| Error::Execution(format!("mapped Python worker launch: {e}")))?;
+        let peer = unsafe {
+            worker_command.spawn_peer_with_resources(
+                pool,
+                self.limits,
+                snapshots,
+                output_copies,
+                python.resources(),
+            )
+        }
+        .map_err(|e| Error::Execution(format!("mapped Python worker launch: {e}")))?;
         let node = NativeWorkerNode::from_peer(
             peer,
             identity,

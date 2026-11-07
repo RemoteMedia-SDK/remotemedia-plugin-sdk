@@ -86,14 +86,17 @@ impl Drop for NamespaceLease {
     }
 }
 
-pub(crate) fn spawn(command: &mut NamespaceCommand) -> io::Result<WorkerProcess> {
+pub(crate) fn spawn(
+    command: &mut NamespaceCommand,
+    resources: super::super::ProcessResources,
+) -> io::Result<WorkerProcess> {
     let listener = sys::PrivateListener::new()?;
     let deadline = Instant::now() + command.timeout;
     command
         .command
         .env(LIFELINE, listener.address())
         .env(START_TIMEOUT, command.timeout.as_millis().to_string());
-    let result = WorkerProcess::spawn(&mut command.command);
+    let result = WorkerProcess::spawn_with_resources(&mut command.command, resources);
     command
         .command
         .env_remove(LIFELINE)

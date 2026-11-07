@@ -129,7 +129,7 @@ pub(super) async fn provision(
     let requirements = merge_deps(&config.requirements, &manifest_deps, &extra_deps);
     let manager = PythonEnvManager::new(environment)?;
     let venv = manager
-        .ensure_env_scoped(&requirements, scope.as_deref())
+        .ensure_env_scoped_leased(&requirements, scope.as_deref())
         .await?;
     super::launch::prepare(venv, &client_hash, &buffers_hash, snapshots, output_copies).await
 }

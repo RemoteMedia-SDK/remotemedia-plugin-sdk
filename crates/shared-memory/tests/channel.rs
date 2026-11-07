@@ -26,6 +26,56 @@ fn spawn() -> (WorkerProcess, Sender, Receiver) {
     let (sender, receiver) = child.take_channel().unwrap().split().unwrap();
     (child, sender, receiver)
 }
+
+#[test]
+fn process_resources_follow_confirmed_termination_not_original_child_wait() {
+    use remotemedia_shared_memory::channel::ProcessResources;
+    use std::sync::Arc;
+    for explicit_terminate in [false, true] {
+        let owner = Arc::new(());
+        let mut command = ProcessCommand::new(env!("CARGO_BIN_EXE_shared-memory-test-peer"));
+        command.arg("channel");
+        let mut child =
+            WorkerProcess::spawn_with_resources(&mut command, ProcessResources::new(owner.clone()))
+                .unwrap();
+        let (mut sender, mut receiver) = child.take_channel().unwrap().split().unwrap();
+        send(
+            &mut sender,
+            Command::Hello(SessionId([94; 16]), PeerId(5)),
+            None,
+        );
+        assert!(matches!(receive(&mut receiver), Event::Hello(..)));
+        assert_eq!(Arc::strong_count(&owner), 2);
+        send(&mut sender, Command::Stop, None);
+        assert!(child.wait().unwrap().success());
+        assert_eq!(
+            Arc::strong_count(&owner),
+            2,
+            "wait alone does not confirm contained descendants exited"
+        );
+        if explicit_terminate {
+            child.terminate().unwrap();
+            assert_eq!(Arc::strong_count(&owner), 1);
+        }
+        drop(child);
+        assert_eq!(Arc::strong_count(&owner), 1);
+    }
+}
+
+#[test]
+fn failed_spawn_releases_resources_when_no_process_was_created() {
+    use remotemedia_shared_memory::channel::ProcessResources;
+    use std::sync::Arc;
+    let owner = Arc::new(());
+    let scratch = tempfile::tempdir().unwrap();
+    let mut command = ProcessCommand::new(scratch.path().join("missing-executable"));
+    assert!(WorkerProcess::spawn_with_resources(
+        &mut command,
+        ProcessResources::new(owner.clone())
+    )
+    .is_err());
+    assert_eq!(Arc::strong_count(&owner), 1);
+}
 fn pool() -> SharedPool {
     SharedPool::new(
         SessionId([91; 16]),
@@ -51,6 +101,7 @@ fn supervised_namespace_transfers_real_read_and_write_grants_without_staging() {
     use remotemedia_shared_memory::channel::NamespaceCommand;
     use std::path::Path;
     for audio in [false, true] {
+        let owner = std::sync::Arc::new(());
         let mut command = NamespaceCommand::new(
             Path::new(env!("CARGO_BIN_EXE_remotemedia-worker-supervisor")),
             Path::new("/usr/bin/unshare"),
@@ -58,9 +109,14 @@ fn supervised_namespace_transfers_real_read_and_write_grants_without_staging() {
         )
         .unwrap();
         command.command_mut().arg("channel");
-        let mut process = WorkerProcess::spawn_namespaced(&mut command).unwrap();
+        let mut process = WorkerProcess::spawn_namespaced_with_resources(
+            &mut command,
+            remotemedia_shared_memory::channel::ProcessResources::new(owner.clone()),
+        ).unwrap();
+        assert_eq!(std::sync::Arc::strong_count(&owner), 2);
         let (sender, receiver) = process.take_channel().unwrap().split().unwrap();
         transform_with_worker(audio, (process, sender, receiver));
+        assert_eq!(std::sync::Arc::strong_count(&owner), 1);
     }
 }
 

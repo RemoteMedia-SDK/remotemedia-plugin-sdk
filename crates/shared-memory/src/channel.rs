@@ -240,13 +240,47 @@ fn invalid(message: &'static str) -> io::Error {
 fn finish_spawn(
     mut child: Child,
     endpoint: io::Result<platform::Endpoint>,
+    resources: &mut ProcessResources,
 ) -> io::Result<(Child, platform::Endpoint)> {
     match endpoint {
         Ok(endpoint) => Ok((child, endpoint)),
         Err(error) => {
+            // No host message has been sent yet. The trusted launch contract
+            // forbids descendants at this point, so original-child exit suffices.
             let _ = child.kill();
-            let _ = child.wait();
+            if child.wait().is_ok() {
+                resources.release();
+            }
             Err(error)
+        }
+    }
+}
+
+/// Host resources required by a worker, such as an environment-cache lease.
+/// Once a child exists, release requires confirmed termination. If termination
+/// fails, quarantine resources until host exit rather than invalidating a live
+/// worker. Resource destructors must not reenter the worker's host handle.
+#[derive(Default)]
+pub struct ProcessResources {
+    owners: Vec<Box<dyn Send>>,
+    live: bool,
+}
+impl ProcessResources {
+    pub fn new(owner: impl Send + 'static) -> Self {
+        Self {
+            owners: vec![Box::new(owner)],
+            live: false,
+        }
+    }
+    fn release(&mut self) {
+        self.live = false;
+        self.owners.clear();
+    }
+}
+impl Drop for ProcessResources {
+    fn drop(&mut self) {
+        if self.live {
+            std::mem::forget(std::mem::take(&mut self.owners));
         }
     }
 }
@@ -256,10 +290,11 @@ fn finish_spawn(
 /// host message before spawning descendants. This is not atomic spawn containment.
 /// Plain Linux launches own only the original child; explicit namespaced launches
 /// also own a pidfd for their dedicated namespace init. Drop terminates/reaps owned
-/// processes but does not reclaim leases; that requires the typed connection's
+/// processes but does not reclaim mapped-buffer leases; that requires the typed connection's
 /// separate process-incarnation/non-delegation contract.
 pub struct WorkerProcess {
     child: Child,
+    resources: ProcessResources,
     channel: Option<Channel>,
     #[cfg(windows)]
     job: platform::ProcessJob,
@@ -268,14 +303,22 @@ pub struct WorkerProcess {
 }
 impl WorkerProcess {
     pub fn spawn(command: &mut Command) -> io::Result<Self> {
+        Self::spawn_with_resources(command, ProcessResources::default())
+    }
+    /// Retain host resources from launch through confirmed process termination.
+    pub fn spawn_with_resources(
+        command: &mut Command,
+        mut resources: ProcessResources,
+    ) -> io::Result<Self> {
         #[cfg(windows)]
         let job = platform::ProcessJob::new()?;
         #[cfg(windows)]
-        let (child, endpoint) = platform::Endpoint::spawn(command, &job)?;
+        let (child, endpoint) = platform::Endpoint::spawn(command, &job, &mut resources)?;
         #[cfg(not(windows))]
-        let (child, endpoint) = platform::Endpoint::spawn(command)?;
+        let (child, endpoint) = platform::Endpoint::spawn(command, &mut resources)?;
         Ok(Self {
             child,
+            resources,
             channel: Some(Channel::new(endpoint, Side::Broker)),
             #[cfg(windows)]
             job,
@@ -288,7 +331,15 @@ impl WorkerProcess {
     /// Unsupported namespace/pidfd hosts fail; no uncontained fallback is used.
     #[cfg(all(target_os = "linux", feature = "linux-worker-supervisor"))]
     pub fn spawn_namespaced(command: &mut NamespaceCommand) -> io::Result<Self> {
-        platform::namespace::spawn(command)
+        Self::spawn_namespaced_with_resources(command, ProcessResources::default())
+    }
+    /// Namespace launch retaining resources through confirmed namespace death.
+    #[cfg(all(target_os = "linux", feature = "linux-worker-supervisor"))]
+    pub fn spawn_namespaced_with_resources(
+        command: &mut NamespaceCommand,
+        resources: ProcessResources,
+    ) -> io::Result<Self> {
+        platform::namespace::spawn(command, resources)
     }
     pub fn channel(&mut self) -> &mut Channel {
         self.channel.as_mut().expect("channel not taken")
@@ -314,6 +365,11 @@ impl WorkerProcess {
     /// Linux namespace launches confirm init pidfd readiness. A timeout or query
     /// failure is not evidence that remote buffer owners are gone.
     pub fn terminate(&mut self) -> io::Result<ExitStatus> {
+        let status = self.terminate_owned_processes()?;
+        self.resources.release();
+        Ok(status)
+    }
+    fn terminate_owned_processes(&mut self) -> io::Result<ExitStatus> {
         #[cfg(windows)]
         {
             self.job.terminate(&mut self.child)

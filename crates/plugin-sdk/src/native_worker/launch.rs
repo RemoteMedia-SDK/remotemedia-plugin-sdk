@@ -1,5 +1,6 @@
 //! Preserve command configuration while selecting process ownership explicitly.
 use remotemedia_shared_memory::{
+    channel::{ProcessResources, WorkerProcess},
     peer::{HostHandle, Limits, PeerConnection},
     SharedPool,
 };
@@ -31,36 +32,36 @@ impl WorkerCommand {
     ) -> io::Result<(PeerConnection, HostHandle)> {
         // SAFETY: caller accepted the complete executable ownership contract.
         unsafe {
-            match self {
-                Self::Direct(command) if output_copies => PeerConnection::spawn_with_output_copies(
-                    command,
-                    pool,
-                    limits,
-                    snapshot_protocol,
-                ),
-                Self::Direct(command) => match snapshot_protocol {
-                    0 => PeerConnection::spawn(command, pool, limits),
-                    1 => PeerConnection::spawn_with_snapshots(command, pool, limits),
-                    2 => PeerConnection::spawn_with_snapshot_outputs(command, pool, limits),
-                    _ => Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "unsupported snapshot protocol",
-                    )),
-                },
-                #[cfg(all(target_os = "linux", feature = "linux-worker-supervisor"))]
-                Self::Namespace(command) if output_copies => {
-                    PeerConnection::spawn_namespaced_with_output_copies(
-                        command,
-                        pool,
-                        limits,
-                        snapshot_protocol,
-                    )
-                }
-                #[cfg(all(target_os = "linux", feature = "linux-worker-supervisor"))]
-                Self::Namespace(command) => {
-                    PeerConnection::spawn_namespaced(command, pool, limits, snapshot_protocol)
-                }
+            self.spawn_peer_with_resources(
+                pool,
+                limits,
+                snapshot_protocol,
+                output_copies,
+                ProcessResources::default(),
+            )
+        }
+    }
+
+    /// # Safety
+    /// The complete executable ownership contract of `spawn_peer` applies.
+    pub(crate) unsafe fn spawn_peer_with_resources(
+        &mut self,
+        pool: SharedPool,
+        limits: Limits,
+        snapshot_protocol: u16,
+        output_copies: bool,
+        resources: ProcessResources,
+    ) -> io::Result<(PeerConnection, HostHandle)> {
+        let process = match self {
+            Self::Direct(command) => WorkerProcess::spawn_with_resources(command, resources)?,
+            #[cfg(all(target_os = "linux", feature = "linux-worker-supervisor"))]
+            Self::Namespace(command) => {
+                WorkerProcess::spawn_namespaced_with_resources(command, resources)?
             }
+        };
+        // SAFETY: caller accepted the complete executable ownership contract.
+        unsafe {
+            PeerConnection::from_process(process, pool, limits, snapshot_protocol, output_copies)
         }
     }
 }

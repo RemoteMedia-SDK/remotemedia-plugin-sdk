@@ -23,18 +23,24 @@ impl Endpoint {
         };
         Ok((self, reader))
     }
-    pub(super) fn spawn(command: &mut Command) -> io::Result<(Child, Self)> {
+    pub(super) fn spawn(
+        command: &mut Command,
+        resources: &mut super::ProcessResources,
+    ) -> io::Result<(Child, Self)> {
         let (parent, child) = UnixStream::pair()?;
         command.stdin(Stdio::from(OwnedFd::from(child)));
         let result = command.spawn();
         // Command is reusable and otherwise retains another child-end handle,
         // masking EOF after the child exits. Close it even on spawn failure.
         command.stdin(Stdio::null());
+        let child = result?;
+        resources.live = true;
         super::finish_spawn(
-            result?,
+            child,
             Ok(Self {
                 stream: Some(parent),
             }),
+            resources,
         )
     }
     pub(super) fn from_stdio() -> io::Result<Self> {

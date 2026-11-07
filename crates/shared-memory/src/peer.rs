@@ -143,6 +143,36 @@ impl Drop for ReceivedOutput {
 }
 
 impl PeerConnection {
+    /// Connect a process already launched with the private worker channel.
+    /// Resources owned by the process survive handshake failure and concurrent
+    /// close until termination is confirmed.
+    ///
+    /// # Safety
+    /// The complete executable ownership/non-delegation contract of [`Self::spawn`]
+    /// applies, along with copy reporting when `output_copies` is enabled.
+    pub unsafe fn from_process(
+        process: WorkerProcess,
+        pool: SharedPool,
+        limits: Limits,
+        snapshot_protocol: u16,
+        output_copies: bool,
+    ) -> io::Result<(Self, HostHandle)> {
+        // SAFETY: caller supplies the same complete worker ownership contract.
+        unsafe {
+            Self::spawn_protocol(
+                || Ok(process),
+                pool,
+                limits,
+                snapshot_protocol,
+                if output_copies {
+                    wire::OUTPUT_COPY_PROTOCOL
+                } else {
+                    0
+                },
+            )
+        }
+    }
+
     /// Spawn a runtime worker on a private channel and issue a fresh incarnation.
     /// Call `next_event` to complete the version/capability handshake before work.
     ///

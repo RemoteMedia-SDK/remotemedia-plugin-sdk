@@ -27,6 +27,51 @@ fn spawn(pool: &SharedPool) -> (PeerConnection, HostHandle) {
 }
 
 #[test]
+fn process_resources_release_after_concurrent_close_or_startup_rejection() {
+    use remotemedia_shared_memory::channel::{ProcessResources, WorkerProcess};
+    use std::sync::Arc;
+    for reject_startup in [false, true] {
+        let owner = Arc::new(());
+        let mut command = Command::new(env!("CARGO_BIN_EXE_shared-memory-test-peer"));
+        command.arg("peer");
+        let process =
+            WorkerProcess::spawn_with_resources(&mut command, ProcessResources::new(owner.clone()))
+                .unwrap();
+        let connected = unsafe {
+            PeerConnection::from_process(
+                process,
+                pool(1),
+                Limits::default(),
+                if reject_startup { 99 } else { 0 },
+                false,
+            )
+        };
+        if reject_startup {
+            assert!(connected.is_err());
+        } else {
+            let (mut peer, host) = connected.unwrap();
+            assert!(matches!(
+                peer.next_event().unwrap(),
+                PeerEvent::Ready { .. }
+            ));
+            assert_eq!(Arc::strong_count(&owner), 2);
+            std::thread::scope(|scope| {
+                for _ in 0..8 {
+                    scope.spawn(|| host.close());
+                }
+            });
+            assert_eq!(
+                Arc::strong_count(&owner),
+                1,
+                "closed peer retained process resources"
+            );
+            drop(peer);
+        }
+        assert_eq!(Arc::strong_count(&owner), 1);
+    }
+}
+
+#[test]
 fn returned_input_slices_preserve_exact_host_owner_and_provenance_across_two_workers() {
     use remotemedia_types::{BoundOutputAllocator, ForwardingScope};
     use std::sync::Arc;

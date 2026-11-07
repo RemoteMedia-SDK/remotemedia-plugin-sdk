@@ -1,4 +1,4 @@
-use remotemedia_py_env::VenvInfo;
+use remotemedia_py_env::LeasedVenvInfo;
 use remotemedia_types::{Error, Result};
 use std::{
     path::PathBuf,
@@ -8,10 +8,13 @@ use std::{
 
 pub(super) struct PreparedPython {
     program: PathBuf,
-    venv: VenvInfo,
+    venv: LeasedVenvInfo,
 }
 
 impl PreparedPython {
+    pub(super) fn resources(&self) -> remotemedia_shared_memory::channel::ProcessResources {
+        remotemedia_shared_memory::channel::ProcessResources::new(self.venv.clone())
+    }
     pub(super) fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
         self.configure(&mut command);
@@ -64,7 +67,7 @@ struct Probe {
 }
 
 pub(super) async fn prepare(
-    venv: VenvInfo,
+    venv: LeasedVenvInfo,
     client_hash: &str,
     buffers_hash: &str,
     snapshots: u16,
