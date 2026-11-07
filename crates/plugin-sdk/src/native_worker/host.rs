@@ -10,6 +10,11 @@ use remotemedia_traits::{
 };
 use std::{process::Command, time::Duration};
 
+struct Drained {
+    outputs: usize,
+    source_finished: bool,
+}
+
 /// Host node adapter for a native mapped worker. All blocking channel work runs
 /// on owned OS threads; async calls only wait for their own bounded output stream.
 pub struct NativeWorkerNode {
@@ -262,17 +267,20 @@ impl NativeWorkerNode {
         inputs: Vec<(String, RuntimeData)>,
         resources: CallResources,
         mut callback: F,
-    ) -> Result<usize, Error>
+    ) -> Result<Drained, Error>
     where
         F: FnMut(RuntimeData) -> Result<(), Error> + Send,
     {
         let mut call = self.begin(kind, arguments, inputs, resources).await?;
-        let mut count = 0;
+        let mut outputs = 0;
         while let Some(output) = call.next().await? {
             callback(output.into_data())?;
-            count += 1;
+            outputs += 1;
         }
-        Ok(count)
+        Ok(Drained {
+            outputs,
+            source_finished: call.source_finished,
+        })
     }
     async fn one(
         &self,
@@ -425,6 +433,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
             callback,
         )
         .await
+        .map(|drained| drained.outputs)
     }
     async fn process_streaming_with_ctx<F>(
         &self,
@@ -444,6 +453,7 @@ impl AsyncStreamingNode for NativeWorkerNode {
             callback,
         )
         .await
+        .map(|drained| drained.outputs)
     }
     async fn tick(
         &self,
@@ -452,14 +462,20 @@ impl AsyncStreamingNode for NativeWorkerNode {
         callback: Box<dyn FnMut(RuntimeData) -> Result<(), Error> + Send>,
     ) -> Result<(), Error> {
         self.validate_session(session.as_deref())?;
-        self.drain(
-            CallKind::Tick,
-            serde_json::to_value(TickRequest::from(tick)).map_err(transport_error)?,
-            vec![],
-            CallResources::default(),
-            callback,
-        )
-        .await?;
+        let finished = self
+            .drain(
+                CallKind::Tick,
+                serde_json::to_value(TickRequest::from(tick)).map_err(transport_error)?,
+                vec![],
+                CallResources::default(),
+                callback,
+            )
+            .await?;
+        if finished.source_finished {
+            return Err(Error::Execution(
+                "source completion requires an active host tick context".into(),
+            ));
+        }
         Ok(())
     }
     async fn tick_with_ctx(
@@ -469,14 +485,18 @@ impl AsyncStreamingNode for NativeWorkerNode {
         callback: Box<dyn FnMut(RuntimeData) -> Result<(), Error> + Send>,
     ) -> Result<(), Error> {
         self.validate_context(ctx)?;
-        self.drain(
-            CallKind::Tick,
-            serde_json::to_value(TickRequest::from(tick)).map_err(transport_error)?,
-            vec![],
-            call_resources(ctx),
-            callback,
-        )
-        .await?;
+        let finished = self
+            .drain(
+                CallKind::Tick,
+                serde_json::to_value(TickRequest::from(tick)).map_err(transport_error)?,
+                vec![],
+                call_resources(ctx),
+                callback,
+            )
+            .await?;
+        if finished.source_finished {
+            ctx.finish_source()?;
+        }
         Ok(())
     }
     async fn process_control_message(
@@ -614,7 +634,7 @@ fn negotiate_description(
                 description =
                     Some(serde_json::from_value::<Description>(value).map_err(transport_error)?);
             }
-            PeerEvent::Complete { call, result } if call == describe => {
+            PeerEvent::Complete { call, result, .. } if call == describe => {
                 result.map_err(Error::Execution)?;
                 break;
             }

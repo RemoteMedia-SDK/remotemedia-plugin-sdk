@@ -48,6 +48,7 @@ impl SharedWorker {
                     state.calls.insert(
                         call,
                         Active {
+                            source_finished: false,
                             pending_copies: 0,
                             snapshot_reads: 0,
                             cancelled: Arc::new(AtomicBool::new(false)),

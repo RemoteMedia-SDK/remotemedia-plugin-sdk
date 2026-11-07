@@ -25,6 +25,7 @@ pub(super) fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     channel.send(
         &serde_json::to_vec(&WorkerMessage::Ready {
+            source_completion_protocol: 0,
             version: WIRE_VERSION,
             session,
             peer,
@@ -95,6 +96,7 @@ pub(super) fn run() -> Result<(), Box<dyn std::error::Error>> {
             finished(call, false),
             WorkerMessage::ProducerReleased { allocation },
             WorkerMessage::Complete {
+                source_finished: false,
                 call,
                 result: Ok(()),
             },
@@ -114,6 +116,7 @@ pub(super) fn run() -> Result<(), Box<dyn std::error::Error>> {
         "wrong-call" => finished(call + 1, true),
         "duplicate" => finished(call, true),
         "complete" => WorkerMessage::Complete {
+            source_finished: false,
             call,
             result: Ok(()),
         },

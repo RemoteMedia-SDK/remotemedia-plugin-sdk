@@ -9,6 +9,11 @@ pub const SNAPSHOT_PROTOCOL: u16 = 1;
 pub const SNAPSHOT_OUTPUT_PROTOCOL: u16 = 2;
 /// Opt-in host-authorized materialization into a remote producer grant.
 pub const OUTPUT_COPY_PROTOCOL: u16 = 1;
+/// Explicit finite-source completion after a successful, drained tick.
+pub const SOURCE_COMPLETION_PROTOCOL: u16 = 1;
+fn false_flag(value: &bool) -> bool {
+    !value
+}
 fn absent_protocol(version: &u16) -> bool {
     *version == 0
 }
@@ -101,6 +106,8 @@ pub enum HostMessage {
         snapshot_protocol: u16,
         #[serde(default, skip_serializing_if = "absent_protocol")]
         output_copy_protocol: u16,
+        #[serde(default, skip_serializing_if = "absent_protocol")]
+        source_completion_protocol: u16,
     },
     Begin {
         call: u64,
@@ -155,6 +162,8 @@ pub enum WorkerMessage {
         snapshot_protocol: u16,
         #[serde(default, skip_serializing_if = "absent_protocol")]
         output_copy_protocol: u16,
+        #[serde(default, skip_serializing_if = "absent_protocol")]
+        source_completion_protocol: u16,
     },
     InputAccepted {
         lease: u64,
@@ -195,5 +204,7 @@ pub enum WorkerMessage {
     Complete {
         call: u64,
         result: std::result::Result<(), String>,
+        #[serde(default, skip_serializing_if = "false_flag")]
+        source_finished: bool,
     },
 }

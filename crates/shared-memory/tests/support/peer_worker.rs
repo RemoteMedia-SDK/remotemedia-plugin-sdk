@@ -6,6 +6,7 @@ use std::{
 };
 mod copies;
 mod invalid_copies;
+mod source_completion;
 
 #[derive(Default)]
 struct Fixture {
@@ -15,6 +16,9 @@ struct Fixture {
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(2).as_deref() == Some("source-completion") {
+        return source_completion::run();
+    }
     if std::env::args().nth(2).as_deref() == Some("invalid-copy") {
         return invalid_copies::run();
     }
@@ -62,6 +66,7 @@ fn forged_release() -> Result<(), Box<dyn std::error::Error>> {
             version: WIRE_VERSION,
             snapshot_protocol: 0,
             output_copy_protocol: 0,
+            source_completion_protocol: 0,
             session,
             peer,
             modes: vec![CallKind::Process],

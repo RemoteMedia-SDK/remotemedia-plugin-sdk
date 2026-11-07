@@ -62,6 +62,7 @@ struct Producer {
     copy_failed: bool,
 }
 struct Call {
+    kind: CallKind,
     snapshots: SnapshotInputs,
     copies: Option<CopyContext>,
     output_copies: Option<CopyContext>,
@@ -83,6 +84,7 @@ struct Ledger {
     outputs: HashMap<u64, u64>,
 }
 struct Shared {
+    source_completion_protocol: u16,
     snapshot_protocol: u16,
     output_copy_protocol: u16,
     pool: SharedPool,
@@ -99,6 +101,15 @@ pub struct PeerConnection {
     shared: Arc<Shared>,
     receiver: Receiver,
 }
+
+/// Independently negotiated worker extensions. Disabled extensions retain the
+/// original wire shape; enabling one requires an exact handshake acknowledgement.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Protocols {
+    pub snapshots: u16,
+    pub output_copies: bool,
+    pub source_completion: bool,
+}
 #[derive(Clone)]
 pub struct HostHandle {
     shared: Arc<Shared>,
@@ -112,6 +123,7 @@ pub enum PeerEvent {
     Complete {
         call: u64,
         result: std::result::Result<(), String>,
+        source_finished: bool,
     },
 }
 
@@ -157,15 +169,44 @@ impl PeerConnection {
         snapshot_protocol: u16,
         output_copies: bool,
     ) -> io::Result<(Self, HostHandle)> {
+        unsafe {
+            Self::from_process_with_protocols(
+                process,
+                pool,
+                limits,
+                Protocols {
+                    snapshots: snapshot_protocol,
+                    output_copies,
+                    source_completion: false,
+                },
+            )
+        }
+    }
+
+    /// Connect an owned worker with explicitly selected protocol extensions.
+    /// # Safety
+    /// The complete executable ownership and copy-reporting contracts of
+    /// `from_process` apply to every selected extension.
+    pub unsafe fn from_process_with_protocols(
+        process: WorkerProcess,
+        pool: SharedPool,
+        limits: Limits,
+        protocols: Protocols,
+    ) -> io::Result<(Self, HostHandle)> {
         // SAFETY: caller supplies the same complete worker ownership contract.
         unsafe {
             Self::spawn_protocol(
                 || Ok(process),
                 pool,
                 limits,
-                snapshot_protocol,
-                if output_copies {
+                protocols.snapshots,
+                if protocols.output_copies {
                     wire::OUTPUT_COPY_PROTOCOL
+                } else {
+                    0
+                },
+                if protocols.source_completion {
+                    wire::SOURCE_COMPLETION_PROTOCOL
                 } else {
                     0
                 },
@@ -192,7 +233,7 @@ impl PeerConnection {
         limits: Limits,
     ) -> io::Result<(Self, HostHandle)> {
         // SAFETY: forwarded from the caller's process ownership contract.
-        unsafe { Self::spawn_protocol(|| WorkerProcess::spawn(command), pool, limits, 0, 0) }
+        unsafe { Self::spawn_protocol(|| WorkerProcess::spawn(command), pool, limits, 0, 0, 0) }
     }
 
     /// Require live shared snapshot reads in the worker handshake.
@@ -210,6 +251,7 @@ impl PeerConnection {
                 pool,
                 limits,
                 wire::SNAPSHOT_PROTOCOL,
+                0,
                 0,
             )
         }
@@ -231,6 +273,7 @@ impl PeerConnection {
                 pool,
                 limits,
                 wire::SNAPSHOT_OUTPUT_PROTOCOL,
+                0,
                 0,
             )
         }
@@ -256,6 +299,7 @@ impl PeerConnection {
                 limits,
                 snapshot_protocol,
                 0,
+                0,
             )
         }
     }
@@ -279,6 +323,7 @@ impl PeerConnection {
                 limits,
                 snapshot_protocol,
                 wire::OUTPUT_COPY_PROTOCOL,
+                0,
             )
         }
     }
@@ -302,6 +347,7 @@ impl PeerConnection {
                 limits,
                 snapshot_protocol,
                 wire::OUTPUT_COPY_PROTOCOL,
+                0,
             )
         }
     }
@@ -312,6 +358,7 @@ impl PeerConnection {
         limits: Limits,
         snapshot_protocol: u16,
         output_copy_protocol: u16,
+        source_completion_protocol: u16,
     ) -> io::Result<(Self, HostHandle)> {
         if snapshot_protocol > wire::SNAPSHOT_OUTPUT_PROTOCOL
             || !(1..=64).contains(&limits.calls)
@@ -328,6 +375,7 @@ impl PeerConnection {
         let mut process = launch()?;
         let (sender, receiver) = process.take_channel().unwrap().split()?;
         let shared = Arc::new(Shared {
+            source_completion_protocol,
             snapshot_protocol,
             output_copy_protocol,
             pool,
@@ -351,6 +399,7 @@ impl PeerConnection {
         });
         shared.send(
             &HostMessage::Hello {
+                source_completion_protocol,
                 version: wire::WIRE_VERSION,
                 snapshot_protocol,
                 output_copy_protocol,
@@ -519,6 +568,7 @@ impl HostHandle {
             ledger.calls.insert(
                 id,
                 Call {
+                    kind,
                     snapshots,
                     copies: copies.clone(),
                     output_copies,

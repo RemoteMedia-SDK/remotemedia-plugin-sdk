@@ -41,6 +41,7 @@ struct Fixture {
     unblock: tokio::sync::Notify,
     gain: f32,
     source: bool,
+    finite_source: bool,
     reactive: bool,
     multi_input: bool,
     transform_stream: bool,
@@ -256,6 +257,14 @@ impl StreamingNode for Fixture {
             return cb(snapshot(ctx)?.value.clone());
         }
         assert_eq!(tick.clock_id, "wall:40");
+        if self.finite_source {
+            if tick.frame_idx == 0 {
+                return Ok(());
+            }
+            if tick.frame_idx == 3 {
+                ctx.finish_source()?;
+            }
+        }
         if !self.source {
             assert_eq!(tick.frame_idx, 9);
             assert_eq!(tick.deadline_us, 400);
@@ -376,6 +385,7 @@ fn main() -> Result<(), Error> {
             unblock: tokio::sync::Notify::new(),
             gain: params["gain"].as_f64().unwrap_or(3.0) as f32,
             source: params["source"].as_bool().unwrap_or(false),
+            finite_source: params["finite_source"].as_bool().unwrap_or(false),
             reactive: params["reactive"].as_bool().unwrap_or(false),
             multi_input: params["multi_input"].as_bool().unwrap_or(true),
             transform_stream: params["transform_stream"].as_bool().unwrap_or(false),

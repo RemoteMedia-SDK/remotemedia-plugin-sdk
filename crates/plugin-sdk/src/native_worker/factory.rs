@@ -13,6 +13,7 @@ pub struct NativeWorkerFactory {
     pool: Option<SharedPool>,
     input_copies: Option<WorkerInputCopies>,
     output_copies: bool,
+    source_completion: bool,
     limits: Limits,
     startup_timeout: Duration,
     snapshot_inputs: Vec<String>,
@@ -33,6 +34,7 @@ impl NativeWorkerFactory {
             buffer_declaration: None,
             input_copies: None,
             output_copies: false,
+            source_completion: false,
             limits: Limits::default(),
             startup_timeout: Duration::from_secs(10),
             snapshot_inputs: vec![],
@@ -54,6 +56,7 @@ impl NativeWorkerFactory {
             buffer_declaration: None,
             input_copies: None,
             output_copies: false,
+            source_completion: false,
             limits: Limits::default(),
             startup_timeout: Duration::from_secs(10),
             snapshot_inputs: vec![],
@@ -72,6 +75,13 @@ impl NativeWorkerFactory {
     /// host context; enabling negotiation never grants permission to copy.
     pub fn with_output_copies(mut self) -> Self {
         self.output_copies = true;
+        self
+    }
+
+    /// Require the finite-source extension. Old workers reject the handshake;
+    /// source completion is applied only through an active host tick context.
+    pub fn with_source_completion(mut self) -> Self {
+        self.source_completion = true;
         self
     }
 
@@ -253,9 +263,18 @@ impl StreamingNodeFactory for NativeWorkerFactory {
         } else {
             SnapshotMode::Inputs
         };
-        let peer =
-            unsafe { command.spawn_peer(pool, self.limits, mode.protocol(), self.output_copies) }
-                .map_err(transport_error)?;
+        let peer = unsafe {
+            command.spawn_peer(
+                pool,
+                self.limits,
+                remotemedia_shared_memory::peer::Protocols {
+                    snapshots: mode.protocol(),
+                    output_copies: self.output_copies,
+                    source_completion: self.source_completion,
+                },
+            )
+        }
+        .map_err(transport_error)?;
         let node = NativeWorkerNode::from_peer(
             peer,
             identity,

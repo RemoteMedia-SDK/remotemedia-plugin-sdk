@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 
 enum Frame {
     Output(Output),
-    Complete(Result<(), String>),
+    Complete(Result<(), String>, bool),
 }
 struct Permit(Arc<AtomicUsize>);
 impl Drop for Permit {
@@ -58,6 +58,7 @@ pub(super) struct Call {
     receiver: mpsc::UnboundedReceiver<Frame>,
     commands: blocking::Sender<Command>,
     completed: bool,
+    pub(super) source_finished: bool,
 }
 pub(super) struct Output {
     guard: Option<ReceivedOutput>,
@@ -81,9 +82,10 @@ impl Call {
     pub(super) async fn next(&mut self) -> Result<Option<Output>, Error> {
         match self.receiver.recv().await {
             Some(Frame::Output(output)) => Ok(Some(output)),
-            Some(Frame::Complete(result)) => {
+            Some(Frame::Complete(result, source_finished)) => {
                 self.completed = true;
                 result.map_err(Error::Execution)?;
+                self.source_finished = source_finished;
                 Ok(None)
             }
             None => Err(Error::Execution(
@@ -180,11 +182,15 @@ impl Client {
                                 let _ = sender.send(Frame::Output(output));
                             }
                         }
-                        Ok(PeerEvent::Complete { call, result }) => {
+                        Ok(PeerEvent::Complete {
+                            call,
+                            result,
+                            source_finished,
+                        }) => {
                             let pending = receive.routing.lock().unwrap().calls.remove(&call);
                             if let Some(Pending { sender, _permit }) = pending {
                                 drop(_permit);
-                                let _ = sender.send(Frame::Complete(result));
+                                let _ = sender.send(Frame::Complete(result, source_finished));
                             }
                         }
                         Ok(PeerEvent::Ready { .. }) => {
@@ -285,6 +291,7 @@ impl State {
             receiver,
             commands,
             completed: false,
+            source_finished: false,
         })
     }
     fn fail(&self, error: String) {
@@ -295,7 +302,7 @@ impl State {
             std::mem::take(&mut routing.calls)
         };
         for (_, call) in pending {
-            let _ = call.sender.send(Frame::Complete(Err(error.clone())));
+            let _ = call.sender.send(Frame::Complete(Err(error.clone()), false));
         }
     }
 }

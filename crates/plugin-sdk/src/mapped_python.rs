@@ -337,8 +337,11 @@ impl StreamingNodeFactory for MappedPythonFactory {
             worker_command.spawn_peer_with_resources(
                 pool,
                 self.limits,
-                snapshots,
-                output_copies,
+                remotemedia_shared_memory::peer::Protocols {
+                    snapshots,
+                    output_copies,
+                    source_completion: false,
+                },
                 python.resources(),
             )
         }

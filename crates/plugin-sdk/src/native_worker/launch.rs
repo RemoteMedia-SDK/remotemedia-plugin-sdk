@@ -1,7 +1,7 @@
 //! Preserve command configuration while selecting process ownership explicitly.
 use remotemedia_shared_memory::{
     channel::{ProcessResources, WorkerProcess},
-    peer::{HostHandle, Limits, PeerConnection},
+    peer::{HostHandle, Limits, PeerConnection, Protocols},
     SharedPool,
 };
 use std::{io, process::Command};
@@ -27,18 +27,11 @@ impl WorkerCommand {
         &mut self,
         pool: SharedPool,
         limits: Limits,
-        snapshot_protocol: u16,
-        output_copies: bool,
+        protocols: Protocols,
     ) -> io::Result<(PeerConnection, HostHandle)> {
         // SAFETY: caller accepted the complete executable ownership contract.
         unsafe {
-            self.spawn_peer_with_resources(
-                pool,
-                limits,
-                snapshot_protocol,
-                output_copies,
-                ProcessResources::default(),
-            )
+            self.spawn_peer_with_resources(pool, limits, protocols, ProcessResources::default())
         }
     }
 
@@ -48,8 +41,7 @@ impl WorkerCommand {
         &mut self,
         pool: SharedPool,
         limits: Limits,
-        snapshot_protocol: u16,
-        output_copies: bool,
+        protocols: Protocols,
         resources: ProcessResources,
     ) -> io::Result<(PeerConnection, HostHandle)> {
         let process = match self {
@@ -60,9 +52,7 @@ impl WorkerCommand {
             }
         };
         // SAFETY: caller accepted the complete executable ownership contract.
-        unsafe {
-            PeerConnection::from_process(process, pool, limits, snapshot_protocol, output_copies)
-        }
+        unsafe { PeerConnection::from_process_with_protocols(process, pool, limits, protocols) }
     }
 }
 

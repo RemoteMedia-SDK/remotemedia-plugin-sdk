@@ -44,6 +44,7 @@ struct PendingOutput {
     reply: mpsc::SyncSender<io::Result<()>>,
 }
 struct Active {
+    source_finished: bool,
     pending_copies: usize,
     snapshot_reads: usize,
     cancelled: Arc<AtomicBool>,
@@ -84,6 +85,7 @@ impl Outbound {
     }
 }
 struct SharedWorker {
+    source_completion_protocol: u16,
     snapshot_protocol: u16,
     output_copy_protocol: u16,
     session: SessionId,
@@ -150,6 +152,7 @@ impl WorkerEndpoint {
             limits,
             snapshot_protocol,
             output_copy_protocol,
+            source_completion_protocol,
         } = serde_json::from_slice(&frame.metadata).map_err(other)?
         else {
             return Err(invalid("worker expected initial hello"));
@@ -159,6 +162,7 @@ impl WorkerEndpoint {
             || version != WIRE_VERSION
             || ![0, SNAPSHOT_PROTOCOL, SNAPSHOT_OUTPUT_PROTOCOL].contains(&snapshot_protocol)
             || ![0, OUTPUT_COPY_PROTOCOL].contains(&output_copy_protocol)
+            || ![0, SOURCE_COMPLETION_PROTOCOL].contains(&source_completion_protocol)
             || !(1..=64).contains(&limits.calls)
             || !(1..=64).contains(&limits.inputs_per_call)
             || !(1..=16).contains(&limits.outputs_per_call)
@@ -175,6 +179,7 @@ impl WorkerEndpoint {
         }
         let (wire_send, wire_receive) = mpsc::channel();
         let shared = Arc::new(SharedWorker {
+            source_completion_protocol,
             snapshot_protocol,
             output_copy_protocol,
             session,
@@ -218,6 +223,7 @@ impl WorkerEndpoint {
                 }
             })?;
         shared.send(&WorkerMessage::Ready {
+            source_completion_protocol,
             snapshot_protocol,
             output_copy_protocol,
             version: WIRE_VERSION,
@@ -355,11 +361,31 @@ impl WorkerRequest {
         }
         result
     }
-    pub fn complete(&self, result: std::result::Result<(), String>) -> io::Result<()> {
+    /// Request EOS for this active tick. Completion still waits for every
+    /// outstanding output, allocation, snapshot and copy operation.
+    pub fn finish_source(&self) -> io::Result<()> {
+        if self.shared.source_completion_protocol != SOURCE_COMPLETION_PROTOCOL
+            || self.kind != CallKind::Tick
+        {
+            return Err(invalid("source completion requires a negotiated tick call"));
+        }
+        let mut state = self.shared.state.lock().unwrap();
+        let active = state
+            .calls
+            .get_mut(&self.call)
+            .ok_or_else(|| invalid("source tick context is closed"))?;
+        if active.cancelled.load(Ordering::Acquire) || self.shared.closed.load(Ordering::Acquire) {
+            return Err(invalid("source tick is cancelled or disconnected"));
+        }
+        active.source_finished = true;
+        Ok(())
+    }
+
+    pub fn complete(&self, mut result: std::result::Result<(), String>) -> io::Result<()> {
         if self.completed.load(Ordering::Acquire) {
             return Err(invalid("duplicate worker call completion"));
         }
-        {
+        let source_finished = {
             let mut state = self.shared.state.lock().unwrap();
             let active = state
                 .calls
@@ -375,12 +401,18 @@ impl WorkerRequest {
                     "worker call still has pending operations",
                 ));
             }
+            let requested = active.source_finished;
+            if requested && active.cancelled.load(Ordering::Acquire) {
+                result = Err("source tick cancelled".into());
+            }
             state.calls.remove(&self.call);
-        }
+            requested && result.is_ok()
+        };
         self.completed.store(true, Ordering::Release);
         self.shared.send(&WorkerMessage::Complete {
             call: self.call,
             result,
+            source_finished,
         })
     }
 }

@@ -38,6 +38,7 @@ fn complete(peer: &mut PeerConnection, call: u64) -> Result<(), String> {
         PeerEvent::Complete {
             call: actual,
             result,
+            ..
         } => {
             assert_eq!(call, actual);
             result
@@ -298,7 +299,7 @@ fn native_async_control_runs_during_media_and_end_of_input_reaches_the_node_hook
                 assert!(matches!(output.into_data(), RuntimeData::Json(v) if v == true));
                 handled = true;
             }
-            PeerEvent::Complete { call, result } => {
+            PeerEvent::Complete { call, result, .. } => {
                 result.unwrap();
                 completed.push(call);
             }
@@ -356,7 +357,7 @@ fn escaped_pending_callback_fails_connection_without_invalidating_host_output() 
                 assert_eq!(output.call(), control);
                 drop(output);
             }
-            Ok(PeerEvent::Complete { call, result }) => {
+            Ok(PeerEvent::Complete { call, result, .. }) => {
                 assert_eq!(call, control);
                 result.unwrap();
             }

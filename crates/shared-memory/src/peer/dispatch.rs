@@ -18,6 +18,7 @@ impl Shared {
                 modes,
                 snapshot_protocol,
                 output_copy_protocol,
+                source_completion_protocol,
             } => {
                 let mut ledger = self.ledger.lock().unwrap();
                 self.check_open()?;
@@ -26,6 +27,7 @@ impl Shared {
                     || version != wire::WIRE_VERSION
                     || snapshot_protocol != self.snapshot_protocol
                     || output_copy_protocol != self.output_copy_protocol
+                    || source_completion_protocol != self.source_completion_protocol
                     || session != self.pool.session_id()
                     || peer != self.peer
                     || modes.is_empty()
@@ -122,27 +124,53 @@ impl Shared {
                 sequence,
                 message,
             } => self.output(call, sequence, message),
-            WorkerMessage::Complete { call, result } => {
-                let mut ledger = self.ledger.lock().unwrap();
-                self.check_open()?;
-                let active = ledger
-                    .calls
-                    .get(&call)
-                    .ok_or_else(|| invalid("unknown or duplicate call completion"))?;
-                if active.outstanding != 0
-                    || active.snapshot_reads != 0
-                    || active.pending_copies != 0
-                {
-                    return Err(invalid(
-                        "worker completed before pending operation acknowledgement",
-                    ));
-                }
-                let completed = ledger.calls.remove(&call);
-                drop(ledger);
-                drop(completed);
-                Ok(Some(PeerEvent::Complete { call, result }))
+            WorkerMessage::Complete {
+                call,
+                result,
+                source_finished,
+            } => self.complete_call(call, result, source_finished).map(Some),
+        }
+    }
+
+    fn complete_call(
+        &self,
+        call: u64,
+        mut result: std::result::Result<(), String>,
+        mut source_finished: bool,
+    ) -> io::Result<PeerEvent> {
+        let mut ledger = self.ledger.lock().unwrap();
+        self.check_open()?;
+        let active = ledger
+            .calls
+            .get(&call)
+            .ok_or_else(|| invalid("unknown or duplicate call completion"))?;
+        if source_finished {
+            if self.source_completion_protocol != wire::SOURCE_COMPLETION_PROTOCOL
+                || active.kind != CallKind::Tick
+                || result.is_err()
+            {
+                return Err(invalid("invalid source completion"));
+            }
+            // Cancellation and completion can cross on opposite pipes.
+            // Preserve this call's cancellation without killing peers.
+            if active.cancelled {
+                source_finished = false;
+                result = Err("source tick cancelled".into());
             }
         }
+        if active.outstanding != 0 || active.snapshot_reads != 0 || active.pending_copies != 0 {
+            return Err(invalid(
+                "worker completed before pending operation acknowledgement",
+            ));
+        }
+        let completed = ledger.calls.remove(&call);
+        drop(ledger);
+        drop(completed);
+        Ok(PeerEvent::Complete {
+            call,
+            result,
+            source_finished,
+        })
     }
 
     fn output(

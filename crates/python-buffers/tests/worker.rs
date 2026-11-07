@@ -91,7 +91,7 @@ impl Worker {
     }
     fn complete(&mut self, expected: u64) -> Result<(), String> {
         match self.peer.next_event().unwrap() {
-            PeerEvent::Complete { call, result } => {
+            PeerEvent::Complete { call, result, .. } => {
                 assert_eq!(call, expected);
                 result
             }

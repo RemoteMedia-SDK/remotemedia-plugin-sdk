@@ -10,6 +10,8 @@ use std::process::Command;
 mod output_copies;
 #[path = "support/selected_allocator.rs"]
 mod selected_allocator;
+#[path = "support/source_completion.rs"]
+mod source_completion;
 
 fn pool(slots: usize) -> SharedPool {
     SharedPool::new(
@@ -401,6 +403,7 @@ fn complete(peer: &mut PeerConnection, call: u64) -> Result<(), String> {
         PeerEvent::Complete {
             call: actual,
             result,
+            ..
         } => {
             assert_eq!(actual, call);
             result
@@ -724,7 +727,7 @@ fn cancellation_reaches_running_call_without_blocking_other_calls() {
     let mut completed = Vec::new();
     for _ in 0..2 {
         match peer.next_event().unwrap() {
-            PeerEvent::Complete { call, result } => {
+            PeerEvent::Complete { call, result, .. } => {
                 result.unwrap();
                 completed.push(call);
             }
@@ -784,7 +787,7 @@ fn private_buffers_are_rejected_without_poisoning_connection_and_concurrent_call
     let mut received = Vec::new();
     for _ in 0..12 {
         match peer.next_event().unwrap() {
-            PeerEvent::Complete { call, result } => {
+            PeerEvent::Complete { call, result, .. } => {
                 result.unwrap();
                 received.push(call);
             }
@@ -867,7 +870,7 @@ fn full_duplex_large_metadata_cannot_deadlock_input_acknowledgements() {
                     );
                     saw_output = true;
                 }
-                PeerEvent::Complete { call, result } => {
+                PeerEvent::Complete { call, result, .. } => {
                     result.unwrap();
                     completed.push(call);
                 }
@@ -973,7 +976,7 @@ fn cancelled_call_cannot_read_snapshots_and_other_calls_remain_live() {
     let mut completions = vec![];
     for _ in 0..2 {
         match peer.next_event().unwrap() {
-            PeerEvent::Complete { call, result } => {
+            PeerEvent::Complete { call, result, .. } => {
                 result.unwrap();
                 completions.push(call);
             }
@@ -1084,6 +1087,7 @@ fn blocked_snapshot_reader_does_not_stall_control_or_cancellation() {
             PeerEvent::Complete {
                 call: actual,
                 result,
+                ..
             } => {
                 assert_eq!(actual, control);
                 result.unwrap();
@@ -1105,6 +1109,7 @@ fn blocked_snapshot_reader_does_not_stall_control_or_cancellation() {
             PeerEvent::Complete {
                 call: actual,
                 result,
+                ..
             } => {
                 assert_eq!(actual, call);
                 assert_eq!(result.is_err(), cancelled);

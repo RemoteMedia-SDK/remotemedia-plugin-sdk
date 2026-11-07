@@ -115,6 +115,7 @@ fn legacy_handshake_serialization_omits_the_optional_output_copy_extension() {
         limits: Limits::default(),
         snapshot_protocol: 0,
         output_copy_protocol: 0,
+        source_completion_protocol: 0,
     };
     let ready = WorkerMessage::Ready {
         version: WIRE_VERSION,
@@ -123,6 +124,7 @@ fn legacy_handshake_serialization_omits_the_optional_output_copy_extension() {
         modes: vec![CallKind::Process],
         snapshot_protocol: 0,
         output_copy_protocol: 0,
+        source_completion_protocol: 0,
     };
     let hello = serde_json::to_value(hello).unwrap();
     let ready = serde_json::to_value(ready).unwrap();
@@ -138,6 +140,7 @@ fn legacy_handshake_serialization_omits_the_optional_output_copy_extension() {
         serde_json::from_value::<HostMessage>(hello).unwrap(),
         HostMessage::Hello {
             output_copy_protocol: 0,
+            source_completion_protocol: 0,
             ..
         }
     ));
@@ -145,6 +148,7 @@ fn legacy_handshake_serialization_omits_the_optional_output_copy_extension() {
         serde_json::from_value::<WorkerMessage>(ready).unwrap(),
         WorkerMessage::Ready {
             output_copy_protocol: 0,
+            source_completion_protocol: 0,
             ..
         }
     ));
@@ -432,6 +436,7 @@ fn cancellation_during_copy_retains_storage_until_the_callback_exits() {
             PeerEvent::Complete {
                 call: finished,
                 result,
+                ..
             } => {
                 if finished == call {
                     assert!(result.unwrap_err().contains("copy callback cancelled"));

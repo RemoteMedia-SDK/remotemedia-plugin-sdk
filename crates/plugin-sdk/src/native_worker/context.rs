@@ -57,6 +57,9 @@ impl WorkerContext {
     }
 }
 impl NodeRuntimeContextRead for WorkerContext {
+    fn finish_source(&self) -> Result<(), Error> {
+        self.request.finish_source().map_err(transport_error)
+    }
     fn session_id(&self) -> &str {
         self.request.context.session_id.as_deref().unwrap_or("")
     }
