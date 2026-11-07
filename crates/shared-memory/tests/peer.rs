@@ -12,6 +12,8 @@ mod output_copies;
 mod selected_allocator;
 #[path = "support/source_completion.rs"]
 mod source_completion;
+#[path = "support/pressure.rs"]
+mod pressure;
 
 fn pool(slots: usize) -> SharedPool {
     SharedPool::new(
