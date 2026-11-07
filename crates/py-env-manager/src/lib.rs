@@ -304,6 +304,9 @@ pub struct VenvInfo {
     pub cache_key: String,
 }
 
+mod cache_lease;
+pub use cache_lease::LeasedVenvInfo;
+
 // ---------------------------------------------------------------------------
 // EnvBackend trait
 // ---------------------------------------------------------------------------
@@ -357,6 +360,9 @@ struct VenvMetadata {
 }
 
 const METADATA_FILENAME: &str = "remotemedia-env.json";
+
+#[cfg(test)]
+mod cache_tests;
 
 /// Cache of virtual environments on disk.
 ///
@@ -412,12 +418,14 @@ impl VenvCache {
         python_version: &str,
         scope_context: Option<&str>,
         backend: &dyn EnvBackend,
-    ) -> Result<VenvInfo> {
+    ) -> Result<LeasedVenvInfo> {
         let global_lock = GLOBAL_VENV_CACHE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
         let _global_guard = global_lock.lock().await;
         let _guard = self.lock.lock().await;
+        let _transaction = cache_lease::transaction(&self.cache_dir).await?;
 
         let key = Self::cache_key(python_version, deps, scope_context);
+        let lease = cache_lease::open_lock(&self.cache_dir, &key)?;
         let venv_dir = self.cache_dir.join(&key);
         let meta_path = venv_dir.join(METADATA_FILENAME);
 
@@ -442,11 +450,11 @@ impl VenvCache {
                             cache_key = %key,
                             "Reusing cached Python environment"
                         );
-                        return Ok(VenvInfo {
+                        return LeasedVenvInfo::new(VenvInfo {
                             path: venv_dir,
                             python_executable,
                             cache_key: key,
-                        });
+                        }, lease);
                     }
                 }
             }
@@ -459,6 +467,11 @@ impl VenvCache {
             "Creating new Python environment"
         );
 
+        if !cache_lease::try_exclusive(&lease)? {
+            return Err(Error::Execution(format!(
+                "Cannot replace Python environment {key} while it is leased"
+            )));
+        }
         let python = backend.ensure_python(python_version).await?;
 
         // Remove stale directory if it exists
@@ -507,14 +520,24 @@ impl VenvCache {
             let _ = std::fs::write(venv_dir.join(METADATA_FILENAME), json);
         }
 
-        // Evict old environments if over limit
-        self.evict_lru().ok();
+        // Transition to shared ownership while the transaction still excludes
+        // provisioning/eviction. Do not rely on platform-specific lock upgrades.
+        fs2::FileExt::unlock(&lease).map_err(cache_lease::lock_error)?;
+        let venv_info = LeasedVenvInfo::new(venv_info, lease)?;
+        self.evict_lru_locked().ok();
 
         Ok(venv_info)
     }
 
     /// Evict least-recently-used environments when cache exceeds max size.
-    fn evict_lru(&self) -> Result<()> {
+    #[cfg(test)]
+    async fn evict_lru(&self) -> Result<()> {
+        let _transaction = cache_lease::transaction(&self.cache_dir).await?;
+        self.evict_lru_locked()
+    }
+
+    /// Caller holds the cross-process transaction lock.
+    fn evict_lru_locked(&self) -> Result<()> {
         let entries = std::fs::read_dir(&self.cache_dir).map_err(|e| {
             Error::Execution(format!(
                 "Failed to read cache directory {}: {}",
@@ -523,20 +546,12 @@ impl VenvCache {
             ))
         })?;
 
-        let mut envs: Vec<(PathBuf, String)> = Vec::new();
-
-        for entry in entries.flatten() {
+        let mut envs: Vec<(PathBuf, String)> = entries.flatten().filter_map(|entry| {
             let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let meta_path = path.join(METADATA_FILENAME);
-            if let Ok(contents) = std::fs::read_to_string(&meta_path) {
-                if let Ok(meta) = serde_json::from_str::<VenvMetadata>(&contents) {
-                    envs.push((path, meta.last_used_at));
-                }
-            }
-        }
+            let contents = std::fs::read_to_string(path.join(METADATA_FILENAME)).ok()?;
+            let meta = serde_json::from_str::<VenvMetadata>(&contents).ok()?;
+            Some((path, meta.last_used_at))
+        }).collect();
 
         if envs.len() <= self.max_cached_envs {
             return Ok(());
@@ -545,8 +560,16 @@ impl VenvCache {
         // Sort by last_used_at ascending (oldest first)
         envs.sort_by(|a, b| a.1.cmp(&b.1));
 
-        let to_remove = envs.len() - self.max_cached_envs;
-        for (path, _) in envs.into_iter().take(to_remove) {
+        let mut to_remove = envs.len() - self.max_cached_envs;
+        for (path, _) in envs {
+            if to_remove == 0 {
+                break;
+            }
+            let Some(key) = path.file_name().and_then(|name| name.to_str()) else { continue };
+            let lease = cache_lease::open_lock(&self.cache_dir, key)?;
+            if !cache_lease::try_exclusive(&lease)? {
+                continue;
+            }
             tracing::info!(
                 path = %path.display(),
                 "Evicting least-recently-used Python environment"
@@ -557,6 +580,8 @@ impl VenvCache {
                     error = %e,
                     "Failed to evict cached environment"
                 );
+            } else {
+                to_remove -= 1;
             }
         }
 
@@ -816,6 +841,9 @@ impl PythonEnvManager {
     /// 1. Compute a cache key from the python version + sorted deps
     /// 2. Return a cached environment if one matches
     /// 3. Otherwise create a new venv, install deps, and cache it
+    ///
+    /// The returned metadata does not prevent subsequent eviction. Worker
+    /// launchers should use [`Self::ensure_env_leased`] and retain that owner.
     pub async fn ensure_env(&self, deps: &[String]) -> Result<VenvInfo> {
         self.ensure_env_scoped(deps, None).await
     }
@@ -824,11 +852,29 @@ impl PythonEnvManager {
     ///
     /// `scope_context` is not user-facing. Callers derive it from manifest
     /// scope policy plus runtime identity, such as session or node identity.
+    /// This metadata-only API does not retain a lease after returning; use
+    /// [`Self::ensure_env_scoped_leased`] when launching a long-lived worker.
     pub async fn ensure_env_scoped(
         &self,
         deps: &[String],
         scope_context: Option<&str>,
     ) -> Result<VenvInfo> {
+        Ok((*self.ensure_env_scoped_leased(deps, scope_context).await?).clone())
+    }
+
+    /// Ensure an environment and protect it from cache eviction until the last
+    /// returned owner is dropped. Retain it through worker shutdown.
+    pub async fn ensure_env_leased(&self, deps: &[String]) -> Result<LeasedVenvInfo> {
+        self.ensure_env_scoped_leased(deps, None).await
+    }
+
+    /// Scoped provisioning with a cross-process cache lease. The cache limit is
+    /// soft while environments are leased; idle entries remain evictable.
+    pub async fn ensure_env_scoped_leased(
+        &self,
+        deps: &[String],
+        scope_context: Option<&str>,
+    ) -> Result<LeasedVenvInfo> {
         // Prepend `base_deps` — e.g. the `remotemedia` client itself —
         // so every provisioned venv can import the package that defines
         // the multiprocess nodes. Different `base_deps` values produce
