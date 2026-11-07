@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const BUFFER_CONTRACT_VERSION: u16 = 1;
+/// Owning views and call-selected allocation for synchronous in-process Python.
+pub const INPROCESS_PYTHON_BUFFER_VERSION: u16 = 1;
 
 mod validation;
 
@@ -35,6 +37,7 @@ pub enum BufferLayout {
 #[serde(rename_all = "snake_case")]
 pub enum BufferProtocol {
     RustOwners,
+    InProcessPython { buffers: u16 },
     NativeAbi { abi: String, buffers: u16 },
     MappedNative { wire: u16, snapshots: u16 },
     MappedPython { wire: u16, snapshots: u16 },

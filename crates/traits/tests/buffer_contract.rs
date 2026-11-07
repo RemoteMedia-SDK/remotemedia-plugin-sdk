@@ -10,28 +10,35 @@ fn metadata_only_factory_contract_has_explicit_zero_bulk_bounds() {
     use remotemedia_traits::buffer_contract::{
         BufferContract, BufferProduction, BufferProtocol, BufferRetention,
     };
-    let contract = BufferContract::metadata_only(BufferProtocol::RustOwners);
-    assert_eq!(contract.production, BufferProduction::ForwardInput);
-    assert_eq!(
-        contract.retention,
-        Some(BufferRetention {
-            owners: 0,
-            bytes: 0
-        })
-    );
-    assert_eq!(contract.inputs.len(), 1);
-    assert_eq!(contract.outputs.len(), 1);
-    for port in contract.inputs.values().chain(contract.outputs.values()) {
-        port.validate_definition().unwrap();
-        port.validate_payload(&RuntimeData::Text("hello".into()))
-            .unwrap();
-        assert!(port
-            .validate_payload(&RuntimeData::Binary(Vec::<u8>::new().into()))
-            .is_err());
+    for protocol in [
+        BufferProtocol::RustOwners,
+        BufferProtocol::InProcessPython {
+            buffers: remotemedia_traits::buffer_contract::INPROCESS_PYTHON_BUFFER_VERSION,
+        },
+    ] {
+        let contract = BufferContract::metadata_only(protocol);
+        assert_eq!(contract.production, BufferProduction::ForwardInput);
+        assert_eq!(
+            contract.retention,
+            Some(BufferRetention {
+                owners: 0,
+                bytes: 0
+            })
+        );
+        assert_eq!(contract.inputs.len(), 1);
+        assert_eq!(contract.outputs.len(), 1);
+        for port in contract.inputs.values().chain(contract.outputs.values()) {
+            port.validate_definition().unwrap();
+            port.validate_payload(&RuntimeData::Text("hello".into()))
+                .unwrap();
+            assert!(port
+                .validate_payload(&RuntimeData::Binary(Vec::<u8>::new().into()))
+                .is_err());
+        }
+        let decoded: BufferContract =
+            serde_json::from_value(serde_json::to_value(&contract).unwrap()).unwrap();
+        assert_eq!(decoded, contract);
     }
-    let decoded: BufferContract =
-        serde_json::from_value(serde_json::to_value(&contract).unwrap()).unwrap();
-    assert_eq!(decoded, contract);
 }
 
 thread_local! {
