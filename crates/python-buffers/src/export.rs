@@ -274,10 +274,25 @@ impl OutputLoan {
 #[pyclass(frozen, module = "_remotemedia_buffers")]
 pub struct OutputAllocator {
     allocator: Arc<dyn remotemedia_types::OutputAllocator>,
+    #[pyo3(get)]
+    session_id: Option<String>,
+    #[pyo3(get)]
+    node_id: Option<String>,
 }
 impl OutputAllocator {
     pub fn new(allocator: Arc<dyn remotemedia_types::OutputAllocator>) -> Self {
-        Self { allocator }
+        Self {
+            allocator,
+            session_id: None,
+            node_id: None,
+        }
+    }
+
+    /// Attach host-owned call identity without changing the selected provider.
+    pub fn with_identity(mut self, session_id: &str, node_id: &str) -> Self {
+        self.session_id = Some(session_id.to_owned());
+        self.node_id = Some(node_id.to_owned());
+        self
     }
 }
 #[pymethods]

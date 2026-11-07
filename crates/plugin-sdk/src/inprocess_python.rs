@@ -93,15 +93,82 @@ mod inner {
             input: RuntimeData,
             allocator: Arc<dyn remotemedia_types::OutputAllocator>,
         ) -> PyResult<RuntimeData> {
-            let input = validate_shared(input)?;
+            self.process_shared_context(input, PythonAllocator::new(allocator))
+        }
+
+        fn process_shared_context(
+            &self,
+            input: RuntimeData,
+            context: PythonAllocator,
+        ) -> PyResult<RuntimeData> {
             Python::attach(|py| {
-                let data = runtime_data_to_python(py, &input, true)?;
-                let context = Py::new(py, PythonAllocator::new(allocator))?;
-                let output = self
-                    .instance
-                    .bind(py)
-                    .call_method1("process_shared", (data, context))?;
+                let output = self.invoke_shared(py, input, context, "process_shared")?;
                 validate_shared(python_to_runtime_data(py, &output, true)?)
+            })
+        }
+
+        fn invoke_shared<'py>(
+            &self,
+            py: Python<'py>,
+            input: RuntimeData,
+            context: PythonAllocator,
+            method: &str,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let input = validate_shared(input)?;
+            let data = runtime_data_to_python(py, &input, true)?;
+            let context = Py::new(py, context)?;
+            self.instance.bind(py).call_method1(method, (data, context))
+        }
+
+        /// Runtime entrypoint: require the call-selected provider and preserve
+        /// session/node identity. No implicit heap or copying fallback.
+        pub fn process_shared_with_ctx(
+            &self,
+            input: RuntimeData,
+            ctx: &dyn remotemedia_traits::runtime_context::NodeRuntimeContextRead,
+        ) -> remotemedia_types::Result<RuntimeData> {
+            self.process_shared_context(input, shared_context(ctx)?)
+                .map_err(shared_error)
+        }
+
+        /// Deliver each yield before advancing Python again. A rejected output
+        /// stops iteration and closes generators, running their finally blocks.
+        /// Calls are synchronous: no detached task can outlive this invocation.
+        pub fn process_streaming_shared_with_ctx<F>(
+            &self,
+            input: RuntimeData,
+            ctx: &dyn remotemedia_traits::runtime_context::NodeRuntimeContextRead,
+            mut callback: F,
+        ) -> remotemedia_types::Result<usize>
+        where
+            F: FnMut(RuntimeData) -> remotemedia_types::Result<()> + Send,
+        {
+            let context = shared_context(ctx)?;
+            Python::attach(|py| {
+                let output = self
+                    .invoke_shared(py, input, context, "process_streaming_shared")
+                    .map_err(shared_error)?;
+                let result = (|| {
+                    let mut count = 0;
+                    for item in output.try_iter().map_err(shared_error)? {
+                        let item = item.map_err(shared_error)?;
+                        let data = python_to_runtime_data(py, &item, true)
+                            .and_then(validate_shared)
+                            .map_err(shared_error)?;
+                        py.detach(|| callback(data))?;
+                        count += 1;
+                    }
+                    Ok(count)
+                })();
+                if result.is_err() && output.hasattr("close").map_err(shared_error)? {
+                    if let Err(close) = output.call_method0("close") {
+                        return Err(remotemedia_types::Error::Execution(format!(
+                            "{}; Python generator close failed: {close}",
+                            result.unwrap_err()
+                        )));
+                    }
+                }
+                result
             })
         }
 
@@ -111,14 +178,13 @@ mod inner {
             input: RuntimeData,
             allocator: Arc<dyn remotemedia_types::OutputAllocator>,
         ) -> PyResult<Vec<RuntimeData>> {
-            let input = validate_shared(input)?;
             Python::attach(|py| {
-                let data = runtime_data_to_python(py, &input, true)?;
-                let context = Py::new(py, PythonAllocator::new(allocator))?;
-                let output = self
-                    .instance
-                    .bind(py)
-                    .call_method1("process_streaming_shared", (data, context))?;
+                let output = self.invoke_shared(
+                    py,
+                    input,
+                    PythonAllocator::new(allocator),
+                    "process_streaming_shared",
+                )?;
                 output
                     .try_iter()?
                     .map(|item| validate_shared(python_to_runtime_data(py, &item?, true)?))
@@ -134,6 +200,21 @@ mod inner {
                 Ok(())
             })
         }
+    }
+
+    fn shared_error(error: PyErr) -> remotemedia_types::Error {
+        remotemedia_types::Error::Execution(format!("Python shared-buffer call failed: {error}"))
+    }
+
+    fn shared_context(
+        ctx: &dyn remotemedia_traits::runtime_context::NodeRuntimeContextRead,
+    ) -> remotemedia_types::Result<PythonAllocator> {
+        let allocator = ctx.output_allocator().ok_or_else(|| {
+            remotemedia_types::Error::Execution(
+                "Python shared-buffer call requires an output allocator".into(),
+            )
+        })?;
+        Ok(PythonAllocator::new(allocator).with_identity(ctx.session_id(), ctx.node_id()))
     }
 
     fn dict_from_json(
