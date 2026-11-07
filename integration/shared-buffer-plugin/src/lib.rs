@@ -231,9 +231,8 @@ impl Fixture {
                 }
                 Ok(RuntimeData::Binary(loan.freeze()))
             }
-            _ => Err(Error::Execution(
-                "gain fixture needs audio or binary".into(),
-            )),
+            // Metadata-only frames follow the same stream without sample work.
+            other => Ok(other),
         }
     }
 }
