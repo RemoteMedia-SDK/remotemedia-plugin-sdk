@@ -16,6 +16,38 @@ fn counts(context: &CopyContext, reason: CopyReason) -> CopyCounts {
 }
 
 #[test]
+fn device_transfer_abi_preserves_partial_completion_and_retained_authority() {
+    let host = CopyContext::new(CopyPolicy::AllowCopies, "device/partial");
+    let imported = import(export(host.clone()));
+    let operation = imported.begin(CopyReason::DeviceTransfer, 64).unwrap();
+    let cancelled = imported.begin(CopyReason::DeviceTransfer, 32).unwrap();
+    drop(imported);
+    std::thread::spawn(move || {
+        operation.complete_bytes(12).unwrap();
+        drop(cancelled);
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        counts(&host, CopyReason::DeviceTransfer),
+        CopyCounts {
+            completed: 1,
+            copied_bytes: 12,
+            failed: 1,
+            failed_requested_bytes: 32,
+            ..Default::default()
+        }
+    );
+    assert!(host.report().entries[..8]
+        .iter()
+        .all(|(_, count)| *count == Default::default()));
+    assert_eq!(
+        import(export(host.clone())).report().entries,
+        host.report().entries
+    );
+}
+
+#[test]
 fn strict_bridge_rejects_all_reasons_before_operation_and_preserves_identity() {
     let host = CopyContext::new(
         CopyPolicy::RequireZeroCopy,

@@ -30,8 +30,12 @@ pub enum CopyReason {
     /// metadata, codec scratch storage and Vec growth. Strict rejection reports
     /// the first attempted element, not an inferred unread sequence length.
     PortableDeserialization,
+    /// Logical payload bytes copied across a device boundary that cannot share
+    /// the source allocation (for example, filling a borrowed CPAL output slice).
+    /// Excludes silence generation and unobserved driver/kernel transfers.
+    DeviceTransfer,
 }
-const REASONS: [CopyReason; 8] = [
+const REASONS: [CopyReason; 9] = [
     CopyReason::VecMaterialization,
     CopyReason::ArcMaterialization,
     CopyReason::LegacyAudioClone,
@@ -40,11 +44,12 @@ const REASONS: [CopyReason; 8] = [
     CopyReason::ForeignPoolIngress,
     CopyReason::PortableSerialization,
     CopyReason::PortableDeserialization,
+    CopyReason::DeviceTransfer,
 ];
 
 /// Fixed order used by owning accounting adapters. Changing it requires an ABI
 /// revision in adapters that expose these counters across a library boundary.
-pub const COPY_REASONS: [CopyReason; 8] = REASONS;
+pub const COPY_REASONS: [CopyReason; 9] = REASONS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyEvent {

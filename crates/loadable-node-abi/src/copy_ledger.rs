@@ -23,6 +23,7 @@ pub enum CopyReason {
     ForeignPoolIngress,
     PortableSerialization,
     PortableDeserialization,
+    DeviceTransfer,
 }
 
 #[repr(u8)]
@@ -52,7 +53,7 @@ pub struct CopyCounts {
 /// follows the Rust CopyLedger contract. The loader keeps provider code mapped.
 #[sabi_trait]
 pub trait CopyLedger: Clone + Send + Sync + 'static {
-    fn counts(&self) -> [CopyCounts; 8];
+    fn counts(&self) -> [CopyCounts; 9];
     fn record(&self, reason: CopyReason, event: CopyEvent);
 }
 pub type CopyLedgerArc = CopyLedger_TO<RArc<()>>;
@@ -75,7 +76,7 @@ pub mod runtime {
     #[derive(Clone)]
     struct Exported(rust::CopyContext);
     impl CopyLedger for Exported {
-        fn counts(&self) -> [CopyCounts; 8] {
+        fn counts(&self) -> [CopyCounts; 9] {
             self.0.counts().map(Into::into)
         }
         fn record(&self, reason: CopyReason, event: CopyEvent) {
@@ -84,7 +85,7 @@ pub mod runtime {
     }
     struct Imported(CopyLedgerArc);
     impl rust::CopyLedger for Imported {
-        fn counts(&self) -> [rust::CopyCounts; 8] {
+        fn counts(&self) -> [rust::CopyCounts; 9] {
             self.0.counts().map(Into::into)
         }
         fn record(&self, reason: rust::CopyReason, event: rust::CopyEvent) {
@@ -158,6 +159,7 @@ pub mod runtime {
                 rust::CopyReason::ForeignPoolIngress => Self::ForeignPoolIngress,
                 rust::CopyReason::PortableSerialization => Self::PortableSerialization,
                 rust::CopyReason::PortableDeserialization => Self::PortableDeserialization,
+                rust::CopyReason::DeviceTransfer => Self::DeviceTransfer,
             }
         }
     }
@@ -172,6 +174,7 @@ pub mod runtime {
                 CopyReason::ForeignPoolIngress => Self::ForeignPoolIngress,
                 CopyReason::PortableSerialization => Self::PortableSerialization,
                 CopyReason::PortableDeserialization => Self::PortableDeserialization,
+                CopyReason::DeviceTransfer => Self::DeviceTransfer,
             }
         }
     }

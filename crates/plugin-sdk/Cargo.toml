@@ -9,6 +9,7 @@ description = "Author-facing umbrella for RemoteMedia SDK loadable plugins — r
 # pinning here keeps the SemVer signal where it matters.
 #
 # History:
+#   0.11.0  re-exports loadable-node-abi 0.9.0 (device-transfer copy accounting).
 #   0.10.0  re-exports loadable-node-abi 0.8.0 (fallible factory buffer contracts).
 #   0.9.0   re-exports loadable-node-abi 0.7.0 (owning copy policy and ledger).
 #   0.8.0   re-exports loadable-node-abi 0.6.0 (shared media and output allocation).
@@ -20,7 +21,7 @@ description = "Author-facing umbrella for RemoteMedia SDK loadable plugins — r
 #           that linked plugin-sdk ≤ 0.4 fail abi_stable's load-time
 #           layout check; plugin authors must bump their dep to
 #           `remotemedia-plugin-sdk = "0.5"` and rebuild.
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 rust-version.workspace = true
 authors = ["RemoteMedia SDK Contributors"]
@@ -56,7 +57,7 @@ bundled-uv-embedded = ["bundled-uv", "remotemedia-py-env/bundled-uv-embedded"]
 remotemedia-types = { path = "../types", version = "0.4.0" }
 remotemedia-traits = { path = "../traits", version = "0.4.0" }
 remotemedia-shared-memory = { path = "../shared-memory", optional = true }
-loadable-node-abi = { path = "../loadable-node-abi", version = "0.8.0", features = ["runtime"] }
+loadable-node-abi = { path = "../loadable-node-abi", version = "0.9.0", features = ["runtime"] }
 abi_stable = "0.11"
 async-ffi = { version = "0.5", features = ["abi_stable"] }
 rmp-serde = "1"

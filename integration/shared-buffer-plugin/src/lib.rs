@@ -169,8 +169,18 @@ fn copy_probe(ctx: &dyn NodeRuntimeContextRead, lane: &str) -> Result<RuntimeDat
         .ok_or_else(|| Error::Execution("missing copy context".into()))?;
     let source: remotemedia_plugin_sdk::types::SharedBuffer<u8> = vec![1, 2, 3, 4].into();
     let copied = source.clone().try_into_vec(&copies).is_ok();
+    // A stack output slice models a borrowed device destination without opening
+    // hardware. This verifies the distinct transfer reason across the real ABI.
+    let mut device_output = [0u8; 4];
+    let device_copied = copies
+        .materialize(
+            remotemedia_plugin_sdk::types::CopyReason::DeviceTransfer,
+            source.len() as u64,
+            || device_output.copy_from_slice(&source),
+        )
+        .is_ok();
     Ok(RuntimeData::Json(
-        serde_json::json!({"copied":copied,"lane":lane,"boundary":copies.report().boundary,"session":ctx.session_id(),"node":ctx.node_id()}),
+        serde_json::json!({"copied":copied,"device_copied":device_copied,"device_output":device_output,"lane":lane,"boundary":copies.report().boundary,"session":ctx.session_id(),"node":ctx.node_id()}),
     ))
 }
 impl AsRef<[u8]> for PrivateOwner {

@@ -19,9 +19,9 @@ The contract is enforced at these layers:
 If a plugin makes it past these checks, the host can call into it
 safely.
 
-## Shared media contract (ABI 0.8 / plugin-sdk 0.10)
+## Shared media contract (ABI 0.9 / plugin-sdk 0.11)
 
-Rebuild host and plugins together for this ABI. A compiled ABI 0.7 or older library is
+Rebuild host and plugins together for this ABI. A compiled ABI 0.8 or older library is
 rejected at load time; default methods preserve source compatibility only.
 A rebuilt plugin returning `shared_buffer_protocol() == 0` explicitly selects
 legacy MessagePack media. The SDK adapter advertises protocol 2. Unknown versions
@@ -58,9 +58,17 @@ invented permission to copy. Started operations end as completed or failed,
 including local unwinding; strict rejection is recorded before invoking the copy.
 Reason order and counter layout are versioned parts of this ABI.
 
+ABI 0.9 appends `DeviceTransfer` at index 8 and expands `CopyLedger::counts` from
+eight to nine entries. Indices 0 through 7 retain their existing meanings. The new
+reason counts logical bytes explicitly copied across a device boundary that cannot
+share the source allocation, such as writing a borrowed device output slice. It
+does not count silence generation or infer driver/kernel transfers. Strict policy
+rejects a nonzero transfer before the operation; deferred partial completion uses
+the actual copied prefix. Device adapters must still wire and validate these calls.
+
 This governs explicit CopyContext operations only. Arbitrary plugin allocations,
 legacy hooks, worker processes and whole-graph negotiation need their own policy
-coverage. Rebuild plugins with `remotemedia-plugin-sdk = "0.10"` for this host.
+coverage. Rebuild plugins with `remotemedia-plugin-sdk = "0.11"` for this host.
 
 ### Factory buffer declarations
 

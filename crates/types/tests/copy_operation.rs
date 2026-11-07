@@ -1,6 +1,41 @@
 use remotemedia_types::{CopyContext, CopyPolicy, CopyReason};
 
 #[test]
+fn device_transfer_has_separate_counts_and_strict_policy_precedes_output_writes() {
+    assert_eq!(CopyReason::PortableDeserialization as usize, 7);
+    assert_eq!(CopyReason::DeviceTransfer as usize, 8);
+    assert_eq!(
+        serde_json::to_string(&CopyReason::DeviceTransfer).unwrap(),
+        "\"device_transfer\""
+    );
+    for policy in [CopyPolicy::AllowCopies, CopyPolicy::RequireZeroCopy] {
+        let copies = CopyContext::new(policy, "device/output");
+        let mut output = [0u8; 8];
+        let result = copies.materialize(CopyReason::DeviceTransfer, 8, || {
+            output.copy_from_slice(&[3; 8])
+        });
+        let report = copies.report();
+        let count = report.entries[8].1;
+        assert_eq!(report.entries.len(), 9);
+        assert!(report.entries[..8]
+            .iter()
+            .all(|(_, counts)| *counts == Default::default()));
+        if policy == CopyPolicy::AllowCopies {
+            assert!(result.is_ok());
+            assert_eq!(output, [3; 8]);
+            assert_eq!(count.copied_bytes, 8);
+            assert_eq!(count.completed, 1);
+        } else {
+            assert!(result.is_err());
+            assert_eq!(output, [0; 8]);
+            assert_eq!(count.rejected_bytes, 8);
+            assert_eq!(count.copied_bytes, 0);
+        }
+        assert_eq!(count.in_flight, 0);
+    }
+}
+
+#[test]
 fn owning_operation_retains_ledger_and_accounts_completion_failure_and_unwind() {
     let context = CopyContext::new(CopyPolicy::AllowCopies, "worker/output");
     let success = context.begin(CopyReason::BorrowedInput, 16).unwrap();
