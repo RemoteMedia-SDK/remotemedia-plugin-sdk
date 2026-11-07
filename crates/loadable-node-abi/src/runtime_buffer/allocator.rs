@@ -96,6 +96,10 @@ pub fn export_allocator(allocator: Arc<dyn Allocator>) -> OutputAllocatorArc {
 
 /// A provider imported from another module. Its loans retain their own ownership
 /// independently of the caller, provider wrapper, node or session lifetime.
+/// Allocation validates and caches the foreign mutable view. Subsequent Rust
+/// slice access and Rust loan freeze do not call foreign code. Exporting that
+/// frozen loan as an ABI message performs the deferred foreign publication and
+/// may lock, allocate or free: keep message export off a real-time callback.
 pub fn import_allocator(allocator: OutputAllocatorArc) -> Arc<dyn Allocator> {
     Arc::new(ImportedAllocator(allocator))
 }
@@ -162,6 +166,8 @@ pub(super) struct ImportedLoan<T> {
 }
 
 impl<T: Element> ImportedLoan<T> {
+    // Non-real-time: consuming the foreign ABI loan may free its boxed header or
+    // execute arbitrary provider code, even though sample storage never moves.
     pub(super) fn publish(&self) -> &BufferOwnerArc {
         self.frozen.get_or_init(|| {
             self.loan

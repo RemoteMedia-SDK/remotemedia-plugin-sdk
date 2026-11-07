@@ -1,5 +1,7 @@
 //! Real dynamic-library acceptance fixture. Uses the public author-facing SDK;
 //! it does not share Rust static state or cast host types across the DLL boundary.
+#[cfg(feature = "rt-allocation-probe")]
+mod rt_probe;
 use async_trait::async_trait;
 use remotemedia_plugin_sdk::snapshot as snapshot_abi;
 use remotemedia_plugin_sdk::{
