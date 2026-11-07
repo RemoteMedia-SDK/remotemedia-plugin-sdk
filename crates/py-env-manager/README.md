@@ -106,10 +106,17 @@ graceful release run on Windows and Linux. These checks do not establish every
 installer phase, automatic crash recovery, or the full pipeline acceptance scope.
 
 The strengthened Windows installer fixture retains original process handles and
-requires them to be signaled immediately when cancellation returns. Current pip
-cases fail this check even though the process owner's Job Object accounting has
-reached zero. The cause and complete exit ordering remain under investigation;
-the test is not ignored beyond the matrix's explicit external-tool requirement.
-After handle-confirmed exit, the fixture separately allows bounded asynchronous
-file-lock cleanup. Earlier passing lock/write-gate tests did not establish this
-stronger original-handle exit proof.
+requires them to be signaled immediately when cancellation returns. Earlier pip
+cases failed while Job Object active accounting had reached zero. The owner now
+seals the job against new assignments, verifies that retained original identities
+cover its lifetime process count, and waits on every handle before releasing
+resources. The pip/uv matrix passes this stronger check. After handle-confirmed
+exit, the fixture separately allows bounded asynchronous file-lock cleanup.
+
+Windows observation polls every 5 ms to collect identities, but polling does not
+prove completeness. A missing identity, more than 4096 distinct lifetime members,
+failed query or unsignaled handle causes shutdown failure and quarantine. Rapid
+short-lived helpers can therefore cause explicit failure rather than unsafe
+success. Guaranteed registration, large-tree/stress behavior and automatic
+quarantine recovery remain follow-up work. Identity comparison uses
+`CompareObjectHandles` (Windows 10 / Server 2016 or later).

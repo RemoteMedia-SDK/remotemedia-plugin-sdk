@@ -446,7 +446,9 @@ impl WorkerProcess {
     pub fn wait(&mut self) -> io::Result<ExitStatus> {
         self.child.wait()
     }
-    /// Windows success additionally confirms zero active job members; explicit
+    /// Windows success seals job membership, accounts for every lifetime member,
+    /// and waits on its original process handle. Missing identities quarantine
+    /// resources rather than treating an empty active list as exit proof. Explicit
     /// Linux namespace launches confirm init pidfd readiness. A timeout or query
     /// failure is not evidence that remote buffer owners are gone.
     pub fn terminate(&mut self) -> io::Result<ExitStatus> {

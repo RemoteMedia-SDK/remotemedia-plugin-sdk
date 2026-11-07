@@ -60,7 +60,7 @@ fn captured_commands_own_immediate_descendants_before_any_host_message() {
         drop(process);
         for descendant in descendants {
             assert_eq!(
-                unsafe { WaitForSingleObject(descendant.as_raw_handle(), 5000) },
+                unsafe { WaitForSingleObject(descendant.as_raw_handle(), 0) },
                 WAIT_OBJECT_0,
                 "{mode}"
             );
@@ -125,7 +125,7 @@ fn captured_tree_lifetime(normal_exit: bool) {
     }
     for process in original_handles {
         assert_eq!(
-            unsafe { WaitForSingleObject(process.as_raw_handle(), 5000) },
+            unsafe { WaitForSingleObject(process.as_raw_handle(), 0) },
             WAIT_OBJECT_0
         );
     }
@@ -184,7 +184,7 @@ fn terminate_and_drop_reap_worker_children_and_grandchildren_even_after_parent_e
         drop(process);
         for process in processes {
             assert_eq!(
-                unsafe { WaitForSingleObject(process.as_raw_handle(), 5000) },
+                unsafe { WaitForSingleObject(process.as_raw_handle(), 0) },
                 WAIT_OBJECT_0,
                 "{mode}: tracked descendant survived teardown"
             );
