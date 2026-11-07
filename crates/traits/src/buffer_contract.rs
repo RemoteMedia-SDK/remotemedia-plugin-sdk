@@ -86,3 +86,27 @@ pub struct BufferContract {
     /// None is unbounded/undeclared, never zero retention.
     pub retention: Option<BufferRetention>,
 }
+
+impl BufferContract {
+    /// Declare default input/output ports that carry metadata but no bulk payloads.
+    /// The host rejects bulk inputs and outputs; this does not bound text/JSON
+    /// storage or prove anything about allocations inside the node.
+    pub fn metadata_only(protocol: BufferProtocol) -> Self {
+        let port = BufferPortContract {
+            layouts: Vec::new(),
+            domains: Vec::new(),
+            max_payload_bytes: 0,
+        };
+        Self {
+            version: BUFFER_CONTRACT_VERSION,
+            protocol,
+            inputs: BTreeMap::from([(String::new(), port.clone())]),
+            outputs: BTreeMap::from([(String::new(), port)]),
+            production: BufferProduction::ForwardInput,
+            retention: Some(BufferRetention {
+                owners: 0,
+                bytes: 0,
+            }),
+        }
+    }
+}
