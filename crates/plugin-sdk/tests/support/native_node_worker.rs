@@ -13,6 +13,27 @@ use std::{
 use traits::rpc::{RpcMethod, RpcMode, RpcRequest, RpcResponder};
 mod native_worker_profile;
 
+fn forward_probe(data: RuntimeData, copy: bool) -> Result<RuntimeData, Error> {
+    if copy {
+        // Preserve the original owner on return: identity and framework copy
+        // ledgers alone cannot detect this deliberate materialization.
+        let (_, storage) = data
+            .clone()
+            .into_shared_parts(TensorEncoding::Runtime)
+            .map_err(|e| Error::Execution(e.to_string()))?;
+        match storage {
+            PayloadStorage::Audio(data) => {
+                std::hint::black_box(data.into_vec());
+            }
+            PayloadStorage::Bytes(data) => {
+                std::hint::black_box(data.into_vec());
+            }
+            PayloadStorage::None => {}
+        }
+    }
+    Ok(data)
+}
+
 struct Fixture {
     profile: Option<native_worker_profile::Profile>,
     unblock: tokio::sync::Notify,
@@ -21,6 +42,8 @@ struct Fixture {
     reactive: bool,
     multi_input: bool,
     transform_stream: bool,
+    forward: bool,
+    probe_copy: bool,
     publish_snapshots: bool,
     unsupported_snapshots: bool,
     snapshot_out: traits::ports::OutputPort<RuntimeData>,
@@ -86,6 +109,9 @@ impl StreamingNode for Fixture {
         data: RuntimeData,
         ctx: &dyn NodeRuntimeContextRead,
     ) -> Result<RuntimeData, Error> {
+        if self.forward {
+            return forward_probe(data, self.probe_copy);
+        }
         if matches!(&data, RuntimeData::Text(value) if value == "snapshot") {
             return Ok(snapshot(ctx)?.value.clone());
         }
@@ -349,6 +375,8 @@ fn main() -> Result<(), Error> {
             reactive: params["reactive"].as_bool().unwrap_or(false),
             multi_input: params["multi_input"].as_bool().unwrap_or(true),
             transform_stream: params["transform_stream"].as_bool().unwrap_or(false),
+            forward: params["forward"].as_bool().unwrap_or(false),
+            probe_copy: params["probe_copy"].as_bool().unwrap_or(false),
             publish_snapshots: params["publish_snapshots"].as_bool().unwrap_or(false),
             unsupported_snapshots: params["unsupported_snapshots"].as_bool().unwrap_or(false),
             snapshot_out: traits::ports::OutputPort::empty(),
