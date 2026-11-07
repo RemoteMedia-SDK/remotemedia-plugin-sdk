@@ -1,4 +1,6 @@
 //! Broker-owned, noninheritable job for workers and ordinary descendants.
+#[path = "job/launch.rs"]
+mod launch;
 use std::{
     io, mem,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},

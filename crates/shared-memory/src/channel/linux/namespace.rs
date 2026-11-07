@@ -90,13 +90,32 @@ pub(crate) fn spawn(
     command: &mut NamespaceCommand,
     resources: super::super::ProcessResources,
 ) -> io::Result<WorkerProcess> {
+    spawn_inner(command, resources, false)
+}
+
+pub(crate) fn spawn_captured(
+    command: &mut NamespaceCommand,
+    resources: super::super::ProcessResources,
+) -> io::Result<WorkerProcess> {
+    spawn_inner(command, resources, true)
+}
+
+fn spawn_inner(
+    command: &mut NamespaceCommand,
+    resources: super::super::ProcessResources,
+    captured: bool,
+) -> io::Result<WorkerProcess> {
     let listener = sys::PrivateListener::new()?;
     let deadline = Instant::now() + command.timeout;
     command
         .command
         .env(LIFELINE, listener.address())
         .env(START_TIMEOUT, command.timeout.as_millis().to_string());
-    let result = WorkerProcess::spawn_with_resources(&mut command.command, resources);
+    let result = if captured {
+        WorkerProcess::spawn_capture_bootstrap(&mut command.command, resources)
+    } else {
+        WorkerProcess::spawn_with_resources(&mut command.command, resources)
+    };
     command
         .command
         .env_remove(LIFELINE)

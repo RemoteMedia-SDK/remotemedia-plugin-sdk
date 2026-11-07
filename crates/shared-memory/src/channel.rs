@@ -302,6 +302,80 @@ pub struct WorkerProcess {
     namespace: Option<platform::namespace::NamespaceLease>,
 }
 impl WorkerProcess {
+    /// Drain both captured output pipes on owned threads. Dropping the returned
+    /// future requests termination and joins the process owner before returning.
+    /// Pass all resources requiring confirmed lifetime in `ProcessResources` at
+    /// launch; unknown termination quarantines those resources rather than
+    /// authorizing their reuse. Output capture itself does not impose a timeout.
+    pub fn capture_output(self) -> io::Result<CapturedOutput> {
+        capture::begin(self)
+    }
+    /// Launch a noninteractive command with captured stdout/stderr and no worker
+    /// protocol. Windows assigns a job before resuming its primary thread.
+    /// Linux callers must select `spawn_namespaced_captured`; there is no silent
+    /// process-group or original-child-only containment fallback.
+    ///
+    /// Captured commands use null stdin. On Windows this selects hidden suspended
+    /// launch flags. Drain both output pipes concurrently while the process runs.
+    pub fn spawn_captured(command: &mut Command, resources: ProcessResources) -> io::Result<Self> {
+        #[cfg(windows)]
+        {
+            Self::spawn_capture_bootstrap(command, resources)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (command, resources);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "captured commands require explicit namespace containment on Linux",
+            ))
+        }
+    }
+
+    fn spawn_capture_bootstrap(
+        command: &mut Command,
+        mut resources: ProcessResources,
+    ) -> io::Result<Self> {
+        use std::process::Stdio;
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        let job = platform::ProcessJob::new()?;
+        #[cfg(windows)]
+        let child = job.spawn_captured(command, &mut resources)?;
+        #[cfg(not(windows))]
+        let child = command.spawn()?;
+        resources.live = true;
+        Ok(Self {
+            child,
+            resources,
+            channel: None,
+            #[cfg(windows)]
+            job,
+            #[cfg(all(target_os = "linux", feature = "linux-worker-supervisor"))]
+            namespace: None,
+        })
+    }
+
+    /// Capture a command inside the explicitly selected Linux namespace. The
+    /// supervisor's existing lifeline/init-pidfd handshake completes before return.
+    #[cfg(all(target_os = "linux", feature = "linux-worker-supervisor"))]
+    pub fn spawn_namespaced_captured(
+        command: &mut NamespaceCommand,
+        resources: ProcessResources,
+    ) -> io::Result<Self> {
+        platform::namespace::spawn_captured(command, resources)
+    }
+
+    pub fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.child.stdout.take()
+    }
+    pub fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.child.stderr.take()
+    }
+
     pub fn spawn(command: &mut Command) -> io::Result<Self> {
         Self::spawn_with_resources(command, ProcessResources::default())
     }
@@ -390,6 +464,9 @@ impl WorkerProcess {
         }
     }
 }
+
+mod capture;
+pub use capture::CapturedOutput;
 impl Drop for WorkerProcess {
     fn drop(&mut self) {
         let _ = self.terminate();

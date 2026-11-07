@@ -1980,6 +1980,7 @@ dependencies = [
 name = "remotemedia-shared-memory"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "libc",
  "memmap2",
  "remotemedia-traits",

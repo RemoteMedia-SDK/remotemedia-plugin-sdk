@@ -27,6 +27,9 @@ fn backing_handle() -> io::Result<File> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(1).as_deref() == Some("captured-output") {
+        return captured_output();
+    }
     #[cfg(windows)]
     if std::env::args().nth(1).as_deref() == Some("tree-broker") {
         return process_tree::broker();
@@ -59,6 +62,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ElementType::F32Le => read::<f32>(descriptor, &mut commands, |i| i as f32 * 0.5),
         ElementType::Bytes => read::<u8>(descriptor, &mut commands, |i| (i % 251) as u8),
     }
+}
+
+fn captured_output() -> Result<(), Box<dyn std::error::Error>> {
+    use std::{
+        io::{Read, Write},
+        time::Duration,
+    };
+    // Fail-safe makes a pipe-draining regression fail rather than hang the suite.
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(10));
+        std::process::exit(125);
+    });
+    let marker = std::env::args_os().nth(2).ok_or("missing marker")?;
+    let mut input = Vec::new();
+    std::io::stdin().read_to_end(&mut input)?;
+    assert!(input.is_empty(), "captured command stdin must be null");
+    std::io::stdout().write_all(&vec![17; 256 * 1024])?;
+    std::io::stderr().write_all(&vec![29; 256 * 1024])?;
+    std::fs::write(marker, std::env::var("RM_CAPTURE_TAG")?)?;
+    if std::env::args().nth(3).as_deref() == Some("linger") {
+        std::thread::sleep(Duration::from_secs(30));
+    }
+    Ok(())
 }
 
 fn produce(

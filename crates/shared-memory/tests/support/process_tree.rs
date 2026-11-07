@@ -28,6 +28,7 @@ fn spawn_leaf(depth: u32) -> Result<Vec<u32>, Box<dyn std::error::Error>> {
     let mut child = Command::new(std::env::current_exe()?)
         .arg("tree-leaf")
         .arg(depth.to_string())
+        .env_remove("RM_CAPTURE_TREE_READY")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -49,6 +50,22 @@ pub(super) fn leaf() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("{}", serde_json::to_string(&ids)?);
     std::io::stdout().flush()?;
+    if let Some(path) = std::env::var_os("RM_CAPTURE_TREE_READY") {
+        std::fs::write(path, serde_json::to_vec(&ids)?)?;
+    }
+    if std::env::args().nth(3).as_deref() == Some("exit-parent") {
+        if let Some(gate) = std::env::var_os("RM_CAPTURE_TREE_EXIT_GATE") {
+            let gate = std::path::PathBuf::from(gate);
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !gate.exists() {
+                if std::time::Instant::now() >= deadline {
+                    return Err("exit gate timed out".into());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        return Ok(());
+    }
     // Test-only fail-safe prevents an orphan from living indefinitely.
     std::thread::sleep(Duration::from_secs(30));
     Ok(())

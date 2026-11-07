@@ -53,6 +53,7 @@ mod linux {
         command
             .arg("leaf")
             .arg(depth.to_string())
+            .env_remove("RM_CAPTURE_TREE_READY")
             .stdin(Stdio::null())
             .stdout(Stdio::piped());
         // Deliberately detach each descendant from its parent's process group:
@@ -93,6 +94,22 @@ mod linux {
             ids.extend(spawn_leaf(depth - 1)?);
         }
         report(&ids)?;
+        if let Some(path) = std::env::var_os("RM_CAPTURE_TREE_READY") {
+            std::fs::write(path, serde_json::to_vec(&ids)?)?;
+        }
+        if std::env::args().nth(3).as_deref() == Some("exit-parent") {
+            let gate = std::path::PathBuf::from(
+                std::env::var_os("RM_CAPTURE_TREE_EXIT_GATE").ok_or("missing exit gate")?,
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !gate.exists() {
+                if std::time::Instant::now() >= deadline {
+                    return Err("exit gate timed out".into());
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            return Ok(());
+        }
         // Fail-safe only; assertions require death within five seconds.
         std::thread::sleep(Duration::from_secs(30));
         Ok(())

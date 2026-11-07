@@ -28,6 +28,111 @@ fn handles(ids: &[u32]) -> Vec<OwnedHandle> {
 }
 
 #[test]
+fn captured_commands_own_immediate_descendants_before_any_host_message() {
+    use remotemedia_shared_memory::channel::ProcessResources;
+    use std::sync::Arc;
+    for mode in ["terminate", "drop", "already-exited"] {
+        let owner = Arc::new(());
+        let mut command = Command::new(env!("CARGO_BIN_EXE_shared-memory-test-peer"));
+        command.args(["tree-leaf", "2"]);
+        if mode == "already-exited" {
+            command.arg("exit-parent");
+        }
+        let mut process =
+            WorkerProcess::spawn_captured(&mut command, ProcessResources::new(owner.clone()))
+                .unwrap();
+        assert!(process.take_channel().is_none());
+        let mut line = String::new();
+        std::io::BufReader::new(process.take_stdout().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let ids: Vec<u32> = serde_json::from_str(&line).unwrap();
+        assert_eq!(ids[0], process.id());
+        assert_eq!(ids.len(), 3);
+        let descendants = handles(&ids[1..]);
+        assert_eq!(Arc::strong_count(&owner), 2);
+        if mode == "already-exited" {
+            assert!(process.wait().unwrap().success());
+        }
+        if mode != "drop" {
+            process.terminate().unwrap();
+        }
+        drop(process);
+        for descendant in descendants {
+            assert_eq!(
+                unsafe { WaitForSingleObject(descendant.as_raw_handle(), 5000) },
+                WAIT_OBJECT_0,
+                "{mode}"
+            );
+        }
+        assert_eq!(Arc::strong_count(&owner), 1);
+    }
+}
+
+#[test]
+fn dropping_output_future_joins_child_and_grandchild_shutdown() {
+    captured_tree_lifetime(false);
+}
+
+#[test]
+fn successful_output_future_joins_descendants_after_main_process_exits() {
+    captured_tree_lifetime(true);
+}
+
+fn captured_tree_lifetime(normal_exit: bool) {
+    use remotemedia_shared_memory::channel::ProcessResources;
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let ready = scratch.path().join("tree.json");
+    let exit_gate = scratch.path().join("exit");
+    let owner = Arc::new(());
+    let mut command = Command::new(env!("CARGO_BIN_EXE_shared-memory-test-peer"));
+    command
+        .args(["tree-leaf", "2"])
+        .env("RM_CAPTURE_TREE_READY", &ready);
+    if normal_exit {
+        command
+            .arg("exit-parent")
+            .env("RM_CAPTURE_TREE_EXIT_GATE", &exit_gate);
+    }
+    let capture = WorkerProcess::spawn_captured(&mut command, ProcessResources::new(owner.clone()))
+        .unwrap()
+        .capture_output()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let ids: Vec<u32> = loop {
+        if let Ok(bytes) = std::fs::read(&ready) {
+            if let Ok(ids) = serde_json::from_slice(&bytes) {
+                break ids;
+            }
+        }
+        assert!(Instant::now() < deadline, "tree startup timed out");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(ids.len(), 3);
+    let original_handles = handles(&ids);
+    if normal_exit {
+        std::fs::write(exit_gate, b"exit").unwrap();
+        assert!(futures::executor::block_on(capture)
+            .unwrap()
+            .status
+            .success());
+    } else {
+        drop(capture);
+    }
+    for process in original_handles {
+        assert_eq!(
+            unsafe { WaitForSingleObject(process.as_raw_handle(), 5000) },
+            WAIT_OBJECT_0
+        );
+    }
+    assert_eq!(Arc::strong_count(&owner), 1);
+}
+
+#[test]
 fn abrupt_broker_exit_closes_the_only_job_handle_and_kills_the_entire_tree() {
     let mut broker = Command::new(env!("CARGO_BIN_EXE_shared-memory-test-peer"))
         .arg("tree-broker")
