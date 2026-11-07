@@ -423,6 +423,17 @@ impl WorkerProcess {
     pub fn id(&self) -> u32 {
         self.child.id()
     }
+    /// PID observed by the launched executable itself. For namespaced commands
+    /// this is the namespace-local child ID reported by the trusted init, not
+    /// the host guardian ID. This value is for identity comparison only; it must
+    /// never be used to signal processes or establish lifetime/exit proof.
+    pub fn execution_pid(&self) -> u32 {
+        #[cfg(all(target_os = "linux", feature = "linux-worker-supervisor"))]
+        if let Some(namespace) = &self.namespace {
+            return namespace.execution_pid();
+        }
+        self.child.id()
+    }
     /// Move I/O to a dedicated task without transferring process authority.
     pub fn take_channel(&mut self) -> Option<Channel> {
         self.channel.take()

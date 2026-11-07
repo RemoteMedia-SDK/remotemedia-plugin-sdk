@@ -44,8 +44,8 @@ pub unsafe fn run_namespace_supervisor() -> io::Result<i32> {
     }
     let deadline = Instant::now() + Duration::from_millis(timeout);
     match mode.to_str() {
-        Some("supervise-v1") => unsafe { supervise(args.collect(), deadline) },
-        Some("init-v1") => unsafe { init(args.collect(), deadline) },
+        Some("supervise-v2") => unsafe { supervise(args.collect(), deadline) },
+        Some("init-v2") => unsafe { init(args.collect(), deadline) },
         _ => Err(sys::invalid("incompatible supervisor mode")),
     }
 }
@@ -65,7 +65,7 @@ unsafe fn launch_namespace(
             "--",
         ])
         .arg(std::env::current_exe()?)
-        .arg("init-v1")
+        .arg("init-v2")
         .args(&args[1..])
         .env(INIT_SOCKET, listener.address())
         .stdin(Stdio::from(io::stdin().as_fd().try_clone_to_owned()?));
@@ -107,7 +107,9 @@ unsafe fn supervise(args: Vec<OsString>, deadline: Instant) -> io::Result<i32> {
     sys::receive(&lifeline, RUN, false, None, deadline)?;
     sys::send(&init_channel, RUN, None)?;
     sys::receive(&init_channel, READY, false, Some(&lifeline), deadline)?;
+    let worker_pid = sys::receive_pid(&init_channel, Some(&lifeline), deadline)?;
     sys::send(&lifeline, READY, None)?;
+    sys::send_pid(&lifeline, worker_pid)?;
     // A bounded poll interval is not a lifetime timeout. Both init death and
     // broker EOF are observed continuously, without reading the worker channel.
     loop {
@@ -154,6 +156,7 @@ unsafe fn init(args: Vec<OsString>, deadline: Instant) -> io::Result<i32> {
         sys::close_protocol_stdin();
     }
     sys::send(&channel, READY, None)?;
+    sys::send_pid(&channel, child.id())?;
     drop(channel);
     // Namespace PID 1 reaps orphaned descendants as well as the main worker.
     // Once the main worker exits, returning exits init and the kernel kills any

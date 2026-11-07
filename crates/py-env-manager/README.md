@@ -30,8 +30,15 @@ explicitly. Other platforms currently reject these contained launches.
 Mapped factories configured with `with_linux_namespace` use those paths for
 provisioning too. A Linux worker using another placement still needs explicit
 provisioning containment. Selecting provisioning containment does not change the
-worker's placement. Automatic packaging/selection of the supervisor and the
-separate mapped-wheel verification probe remain follow-up integration work.
+worker's placement. Mapped-wheel verification uses this same containment and
+retains its environment lease until the probe and descendants stop. Automatic
+packaging/selection of the supervisor remains follow-up integration work.
+
+The current Linux supervisor uses the `supervise-v2`/`init-v2` startup protocol.
+Rebuild the matching helper when updating the host: version 2 reports the actual
+namespace-local worker PID for probe identity checks. The guardian PID remains a
+separate host identity. Neither numeric PID is a substitute for owned process
+handles/pidfds when signalling or proving process death.
 
 ## Backend migration
 
@@ -63,6 +70,11 @@ Real offline system/uv tests in `tests/provisioning.rs` require a Python with ve
 and pip, and uv for the uv case; run them with `--include-ignored`.
 
 These checks cover cancellation of a controlled installer, cache replacement,
-retained context locks, and real offline provisioning. They do not yet establish
-real installer cancellation at every phase, probe timeout fault injection,
-host-crash lock ordering, or the full mixed pipeline acceptance requirements.
+retained context locks, and real offline provisioning. Probe fault tests use a
+bounded fake interpreter with descendants: build `python-probe-fixture` with the
+`test-probe` feature and set `RM_TEST_PROBE_EXE` to it. Enable `test-probe` for the
+environment library tests and `test-mapped-probe` for the plugin library tests;
+Linux also needs `RM_TEST_PROVISION_SUPERVISOR`. These exercise both timeout and
+task abort, successful parent exit with surviving descendants, and PID mismatch.
+They do not yet establish real installer cancellation at every phase, host-crash
+lock ordering, or the full mixed pipeline acceptance requirements.

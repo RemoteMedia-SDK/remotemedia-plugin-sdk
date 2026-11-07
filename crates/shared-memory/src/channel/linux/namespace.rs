@@ -37,7 +37,7 @@ impl NamespaceCommand {
         // Absolute paths survive a requested worker current_dir/env_clear.
         let mut command = Command::new(supervisor.canonicalize()?);
         command
-            .arg("supervise-v1")
+            .arg("supervise-v2")
             .arg(unshare.canonicalize()?)
             .arg(worker);
         Ok(Self {
@@ -69,8 +69,13 @@ impl NamespaceCommand {
 pub(crate) struct NamespaceLease {
     init: File,
     lifeline: UnixStream,
+    worker_pid: Option<u32>,
 }
 impl NamespaceLease {
+    pub(crate) fn execution_pid(&self) -> u32 {
+        self.worker_pid
+            .expect("namespace startup completed before exposure")
+    }
     pub(crate) fn terminate(&self) -> io::Result<()> {
         sys::kill_pidfd(&self.init)?;
         // pidfd readiness for single-threaded namespace init follows the kernel's
@@ -129,9 +134,14 @@ fn spawn_inner(
     let init = sys::receive(&lifeline, INIT, true, None, deadline)?.unwrap();
     // A real pidfd is required; arbitrary files cannot stand in for exit proof.
     sys::validate_pidfd(&init)?;
-    process.namespace = Some(NamespaceLease { init, lifeline });
-    let lease = process.namespace.as_ref().unwrap();
+    process.namespace = Some(NamespaceLease {
+        init,
+        lifeline,
+        worker_pid: None,
+    });
+    let lease = process.namespace.as_mut().unwrap();
     sys::send(&lease.lifeline, RUN, None)?;
     sys::receive(&lease.lifeline, READY, false, None, deadline)?;
+    lease.worker_pid = Some(sys::receive_pid(&lease.lifeline, None, deadline)?);
     Ok(process)
 }

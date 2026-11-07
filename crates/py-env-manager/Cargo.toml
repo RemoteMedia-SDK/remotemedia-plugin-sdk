@@ -22,6 +22,7 @@ repository = "https://github.com/RemoteMedia-SDK/remotemedia-sdk"
 default = []
 # Process integration tests require the separately built matching supervisor.
 test-linux-namespace = []
+test-probe = []
 # Use `uv` for venv provisioning instead of system `python -m venv` + `pip`.
 # Activates reqwest (blocking + rustls-tls), flate2, tar, and zip (Windows) as optional deps.
 bundled-uv = ["dep:reqwest", "dep:flate2", "dep:tar", "dep:zip"]
@@ -60,3 +61,8 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 flate2 = "1"
 tar = "0.4"
 zip = "2"
+
+[[bin]]
+name = "python-probe-fixture"
+path = "tests/support/probe_fixture.rs"
+required-features = ["test-probe"]

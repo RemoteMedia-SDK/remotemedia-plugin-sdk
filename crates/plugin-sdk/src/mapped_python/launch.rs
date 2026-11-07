@@ -1,10 +1,6 @@
-use remotemedia_py_env::LeasedVenvInfo;
+use remotemedia_py_env::{LeasedVenvInfo, ProvisioningCommand, ProvisioningContext};
 use remotemedia_types::{Error, Result};
-use std::{
-    path::PathBuf,
-    process::{Command, Stdio},
-    time::Duration,
-};
+use std::{path::PathBuf, process::Command, time::Duration};
 
 pub(super) struct PreparedPython {
     program: PathBuf,
@@ -59,11 +55,22 @@ impl PreparedPython {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Probe {
     base_executable: PathBuf,
     pid: u32,
+}
+
+impl Probe {
+    fn ensure_process(&self, expected: u32) -> Result<()> {
+        if self.pid != expected {
+            return Err(Error::Execution(
+                "Python launcher delegated to another process".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 pub(super) async fn prepare(
@@ -72,6 +79,7 @@ pub(super) async fn prepare(
     buffers_hash: &str,
     snapshots: u16,
     output_copies: bool,
+    context: &ProvisioningContext,
 ) -> Result<PreparedPython> {
     let prepared = PreparedPython {
         program: venv.python_executable.clone(),
@@ -83,6 +91,7 @@ pub(super) async fn prepare(
         buffers_hash,
         snapshots,
         output_copies,
+        context,
     )
     .await?;
     if !probe.base_executable.is_absolute() || !probe.base_executable.is_file() {
@@ -103,15 +112,12 @@ pub(super) async fn prepare(
             buffers_hash,
             snapshots,
             output_copies,
+            context,
         )
         .await?;
         (prepared, probe, child_id)
     };
-    if probe.pid != child_id {
-        return Err(Error::Execution(
-            "Python launcher delegated to another process".into(),
-        ));
-    }
+    probe.ensure_process(child_id)?;
     Ok(prepared)
 }
 
@@ -121,13 +127,16 @@ async fn verify(
     buffers_hash: &str,
     snapshots: u16,
     output_copies: bool,
+    context: &ProvisioningContext,
 ) -> Result<(Probe, u32)> {
-    let mut command = tokio::process::Command::from(prepared.command());
-    #[cfg(windows)]
-    {
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
+    let mut command = context
+        .clone()
+        .with_resource(prepared.venv.clone())
+        .command(&prepared.program)
+        .map_err(|e| Error::Execution(format!("mapped Python verification: {e}")))?;
+    prepared.configure(command.command_mut());
     command
+        .command_mut()
         .args([
             "-I",
             "-c",
@@ -137,18 +146,22 @@ async fn verify(
         ])
         .arg(&prepared.venv.path)
         .arg(snapshots.to_string())
-        .arg(u8::from(output_copies).to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .arg(u8::from(output_copies).to_string());
+    verification_output(command, Duration::from_secs(30)).await
+}
+
+async fn verification_output(
+    command: ProvisioningCommand,
+    timeout: Duration,
+) -> Result<(Probe, u32)> {
     let child = command
         .spawn()
         .map_err(|e| Error::Execution(format!("mapped Python verification: {e}")))?;
-    let child_id = child
-        .id()
-        .ok_or_else(|| Error::Execution("missing Python probe process ID".into()))?;
-    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+    let child_id = child.execution_pid();
+    let output = child
+        .capture_output()
+        .map_err(|e| Error::Execution(format!("mapped Python verification capture: {e}")))?;
+    let output = tokio::time::timeout(timeout, output)
         .await
         .map_err(|_| Error::Execution("mapped Python package verification timed out".into()))?
         .map_err(|e| Error::Execution(format!("mapped Python package verification: {e}")))?;
@@ -163,3 +176,7 @@ async fn verify(
     })?;
     Ok((probe, child_id))
 }
+
+#[cfg(all(test, feature = "test-mapped-probe"))]
+#[path = "probe_tests.rs"]
+mod tests;

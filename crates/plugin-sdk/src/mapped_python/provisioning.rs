@@ -131,5 +131,15 @@ pub(super) async fn provision(
     let venv = manager
         .ensure_env_scoped_leased(&requirements, scope.as_deref())
         .await?;
-    super::launch::prepare(venv, &client_hash, &buffers_hash, snapshots, output_copies).await
+    let context =
+        remotemedia_py_env::ProvisioningContext::new(manager.config().process_namespace.clone());
+    super::launch::prepare(
+        venv,
+        &client_hash,
+        &buffers_hash,
+        snapshots,
+        output_copies,
+        &context,
+    )
+    .await
 }

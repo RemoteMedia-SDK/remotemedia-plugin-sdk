@@ -10,6 +10,21 @@ pub(crate) async fn validate_python_version(
     requested: &str,
     context: &ProvisioningContext,
 ) -> Result<()> {
+    validate_with_timeout(
+        python,
+        requested,
+        context,
+        std::time::Duration::from_secs(15),
+    )
+    .await
+}
+
+async fn validate_with_timeout(
+    python: &Path,
+    requested: &str,
+    context: &ProvisioningContext,
+    timeout: std::time::Duration,
+) -> Result<()> {
     let components = requested
         .split('.')
         .map(str::parse::<u32>)
@@ -27,7 +42,7 @@ pub(crate) async fn validate_python_version(
         "import json,sys; print(json.dumps(list(sys.version_info[:3])))",
     ]);
     let output = command.output();
-    let output = tokio::time::timeout(std::time::Duration::from_secs(15), output)
+    let output = tokio::time::timeout(timeout, output)
         .await
         .map_err(|_| Error::ConfigError("Python version probe timed out".into()))?
         .map_err(|e| Error::ConfigError(format!("Cannot probe {}: {e}", python.display())))?;
@@ -51,3 +66,7 @@ pub(crate) async fn validate_python_version(
     }
     Ok(())
 }
+
+#[cfg(all(test, feature = "test-probe", any(windows, target_os = "linux")))]
+#[path = "interpreter_tests.rs"]
+mod tests;

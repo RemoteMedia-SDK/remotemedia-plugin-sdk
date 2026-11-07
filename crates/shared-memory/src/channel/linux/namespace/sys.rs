@@ -125,6 +125,90 @@ pub(super) fn receive(
     Ok(files.pop())
 }
 
+/// A fixed-size namespace-local child identity from the trusted init. Each byte
+/// uses the existing descriptor-aware framing; unexpected handles are rejected.
+pub(super) fn send_pid(stream: &UnixStream, pid: u32) -> io::Result<()> {
+    for byte in pid.to_le_bytes() {
+        send(stream, byte, None)?;
+    }
+    Ok(())
+}
+
+pub(super) fn receive_pid(
+    stream: &UnixStream,
+    cancel: Option<&UnixStream>,
+    deadline: Instant,
+) -> io::Result<u32> {
+    let mut bytes = [0; 4];
+    for byte in &mut bytes {
+        wait_fd(stream, cancel, deadline)?;
+        if !receive_first_byte(stream, byte)?.is_empty() {
+            return Err(invalid("unexpected handle in namespace worker identity"));
+        }
+    }
+    let pid = u32::from_le_bytes(bytes);
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return Err(invalid("invalid namespace worker identity"));
+    }
+    Ok(pid)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn read(stream: &UnixStream) -> io::Result<u32> {
+        receive_pid(stream, None, Instant::now() + Duration::from_millis(50))
+    }
+
+    #[test]
+    fn worker_identity_round_trips_exact_namespace_pid() {
+        for pid in [2, 12345, i32::MAX as u32] {
+            let (sender, receiver) = UnixStream::pair().unwrap();
+            send_pid(&sender, pid).unwrap();
+            assert_eq!(read(&receiver).unwrap(), pid);
+        }
+    }
+
+    #[test]
+    fn reserved_and_overflow_worker_identities_fail() {
+        for pid in [0, 1, i32::MAX as u32 + 1, u32::MAX] {
+            let (sender, receiver) = UnixStream::pair().unwrap();
+            send_pid(&sender, pid).unwrap();
+            assert_eq!(
+                read(&receiver).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn unexpected_identity_handle_fails() {
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        send(&sender, 2, Some(&File::open("/dev/null").unwrap())).unwrap();
+        assert_eq!(
+            read(&receiver).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn truncated_identity_fails() {
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        send(&sender, 2, None).unwrap();
+        drop(sender);
+        assert!(read(&receiver).is_err());
+    }
+
+    #[test]
+    fn stalled_identity_obeys_startup_deadline() {
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        send(&sender, 2, None).unwrap();
+        assert_eq!(read(&receiver).unwrap_err().kind(), io::ErrorKind::TimedOut);
+    }
+}
+
 pub(super) fn peer_pid(stream: &UnixStream) -> io::Result<i32> {
     let mut credentials: libc::ucred = unsafe { mem::zeroed() };
     let mut length = mem::size_of_val(&credentials) as libc::socklen_t;
