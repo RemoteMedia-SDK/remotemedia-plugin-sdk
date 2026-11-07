@@ -159,8 +159,7 @@ impl MappedPythonFactory {
         self
     }
 
-    /// Select explicit namespace ownership without changing interpreter/wheel
-    /// provisioning. Unsupported builds/platforms fail before provisioning; no
+    /// Select explicit namespace ownership for both provisioning and the worker. Unsupported builds/platforms fail before provisioning; no
     /// plain-child fallback is permitted. Session bindings retain this choice.
     /// # Safety
     /// In addition to new's Python contract, these paths must identify trusted
@@ -173,6 +172,9 @@ impl MappedPythonFactory {
         #[cfg(all(target_os = "linux", feature = "linux-worker-supervisor"))]
         {
             let mut configured = self;
+            configured.config.environment.process_namespace = Some(remotemedia_py_env::ProcessNamespace {
+                supervisor: supervisor.clone(), unshare: unshare.clone(),
+            });
             configured.namespace = Some(
                 crate::native_worker::NamespaceLaunch::new(supervisor, unshare).map_err(|e| {
                     Error::ConfigError(format!("mapped Python namespace configuration: {e}"))

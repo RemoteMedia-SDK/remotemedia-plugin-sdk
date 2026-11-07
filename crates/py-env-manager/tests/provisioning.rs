@@ -1,8 +1,25 @@
 //! Explicit real-interpreter checks; no package downloads are needed.
 use remotemedia_py_env::{
-    system_backend::SystemBackend, EnvBackend, PythonEnvConfig, PythonEnvManager, PythonEnvMode,
+    system_backend::SystemBackend, EnvBackend, ProcessNamespace, ProvisioningContext,
+    PythonEnvConfig, PythonEnvManager, PythonEnvMode,
 };
 use std::{path::PathBuf, process::Command};
+
+fn process_namespace() -> Option<ProcessNamespace> {
+    #[cfg(target_os = "linux")]
+    return Some(ProcessNamespace {
+        supervisor: std::env::var_os("RM_TEST_PROVISION_SUPERVISOR")
+            .expect("set RM_TEST_PROVISION_SUPERVISOR")
+            .into(),
+        unshare: "/usr/bin/unshare".into(),
+    });
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+fn context() -> ProvisioningContext {
+    ProvisioningContext::new(process_namespace())
+}
 
 struct Scratch(PathBuf);
 impl Scratch {
@@ -88,6 +105,7 @@ async fn system_wheelhouse_install_and_cache_policy() {
         find_links: vec![wheelhouse],
         no_index: true,
         require_python_version: true,
+        process_namespace: process_namespace(),
         ..Default::default()
     };
     let manager = PythonEnvManager::new(config.clone()).unwrap();
@@ -109,6 +127,22 @@ async fn system_wheelhouse_install_and_cache_policy() {
         env.cache_key,
         manager.ensure_env(&[]).await.unwrap().cache_key
     );
+
+    // Mutating a live environment is rejected before invalidating its metadata.
+    let leased = manager.ensure_env_leased(&[]).await.unwrap();
+    let deps = ["rm-provisioning-fixture==1.0".into()];
+    assert!(manager.install_additional_deps(&env, &deps).await.is_err());
+    drop(leased);
+    manager.install_additional_deps(&env, &deps).await.unwrap();
+    assert!(env.path.join("remotemedia-env.json").is_file());
+    // Failed mutation removes reusable metadata; the next ensure rebuilds it.
+    assert!(manager
+        .install_additional_deps(&env, &["rm-provisioning-missing-fixture==987.6".into()])
+        .await
+        .is_err());
+    assert!(!env.path.join("remotemedia-env.json").exists());
+    let rebuilt = manager.ensure_env(&[]).await.unwrap();
+    assert_eq!(rebuilt.path, env.path);
 
     // A changed wheel source must not silently reuse the successful environment.
     let mut unavailable = config.clone();
@@ -142,11 +176,18 @@ async fn system_wheelhouse_install_and_cache_policy() {
 async fn strict_system_version_rejects_mismatch_and_invalid_requests() {
     let backend = SystemBackend::new().with_config(&PythonEnvConfig {
         require_python_version: true,
+        process_namespace: process_namespace(),
         ..Default::default()
     });
-    backend.ensure_python(&python_version()).await.unwrap();
+    backend
+        .ensure_python(&python_version(), &context())
+        .await
+        .unwrap();
     for version in ["999.1", "3.1.999", "3", "3.12.*", "3.12;print(1)"] {
-        assert!(backend.ensure_python(version).await.is_err(), "{version}");
+        assert!(
+            backend.ensure_python(version, &context()).await.is_err(),
+            "{version}"
+        );
     }
 }
 
@@ -161,11 +202,16 @@ async fn uv_wheelhouse_install_without_indexes() {
         .with_find_links(vec![wheelhouse])
         .with_no_index(true);
     let env = backend
-        .create_venv(std::path::Path::new(python()), &scratch.0, "uv-env")
+        .create_venv(
+            std::path::Path::new(python()),
+            &scratch.0,
+            "uv-env",
+            &context(),
+        )
         .await
         .unwrap();
     backend
-        .install_deps(&env, &["rm-provisioning-fixture==1.0".into()])
+        .install_deps(&env, &["rm-provisioning-fixture==1.0".into()], &context())
         .await
         .unwrap();
     let output = Command::new(&env.python_executable)
@@ -182,7 +228,11 @@ async fn uv_wheelhouse_install_without_indexes() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(backend
-        .install_deps(&env, &["rm-provisioning-missing-fixture==987.6".into()])
+        .install_deps(
+            &env,
+            &["rm-provisioning-missing-fixture==987.6".into()],
+            &context()
+        )
         .await
         .is_err());
 }

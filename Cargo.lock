@@ -1954,6 +1954,7 @@ dependencies = [
  "flate2",
  "fs2",
  "hex",
+ "remotemedia-shared-memory",
  "remotemedia-types",
  "reqwest",
  "serde",

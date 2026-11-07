@@ -16,6 +16,8 @@
 pub mod uv_backend;
 
 mod interpreter;
+mod process;
+pub use process::{ProcessNamespace, ProvisioningCommand, ProvisioningContext};
 pub mod system_backend;
 
 use std::collections::HashMap;
@@ -161,7 +163,11 @@ fn extract_marker(dep: &str) -> String {
 /// the original specs so the operator can see exactly which markers
 /// excluded the current platform. Failure of the probe itself never
 /// breaks the install — it's diagnostic only.
-async fn validate_installed_deps(python_executable: &Path, deps: &[String]) {
+async fn validate_installed_deps(
+    python_executable: &Path,
+    deps: &[String],
+    context: &ProvisioningContext,
+) {
     use std::collections::{HashMap, HashSet};
 
     // Group requested deps by normalized package name, skipping entries
@@ -204,13 +210,12 @@ except Exception as exc:
     sys.exit(2)
 ";
 
-    let mut cmd = tokio::process::Command::new(python_executable);
-    cmd.args(["-c", probe]);
-    #[cfg(windows)]
-    if let Some(flags) = no_window_flag() {
-        cmd.creation_flags(flags);
+    let output = async {
+        let mut cmd = context.command(python_executable)?;
+        cmd.command_mut().args(["-c", probe]);
+        cmd.output().await
     }
-    let output = cmd.output().await;
+    .await;
 
     let stdout = match output {
         Ok(out) if out.status.success() => out.stdout,
@@ -314,14 +319,17 @@ pub use cache_lease::LeasedVenvInfo;
 /// Backend trait for creating and managing Python environments.
 ///
 /// Implementations handle the differences between uv-based and system-based
-/// environment management.
+/// environment management. Each operation receives cache ownership explicitly.
+/// Subprocess work must use that context (or equivalent joined containment).
+/// Returning, dropping, or cancelling the future must not leave unowned writers;
+/// detached tasks must retain the context until all descendants are quiescent.
 #[async_trait]
 pub trait EnvBackend: Send + Sync {
     /// Ensure the requested Python version is available.
     ///
     /// Returns the path to the Python interpreter. For system backends this
     /// simply validates the system python; for uv it may install the version.
-    async fn ensure_python(&self, version: &str) -> Result<PathBuf>;
+    async fn ensure_python(&self, version: &str, context: &ProvisioningContext) -> Result<PathBuf>;
 
     /// Create a new virtual environment.
     ///
@@ -333,10 +341,16 @@ pub trait EnvBackend: Send + Sync {
         python: &Path,
         cache_dir: &Path,
         cache_key: &str,
+        context: &ProvisioningContext,
     ) -> Result<VenvInfo>;
 
     /// Install dependencies into an existing virtual environment.
-    async fn install_deps(&self, venv: &VenvInfo, deps: &[String]) -> Result<()>;
+    async fn install_deps(
+        &self,
+        venv: &VenvInfo,
+        deps: &[String],
+        context: &ProvisioningContext,
+    ) -> Result<()>;
 
     /// Resolve the path to the Python executable inside a venv.
     fn resolve_python(&self, venv: &VenvInfo) -> PathBuf;
@@ -374,6 +388,7 @@ struct VenvCache {
     max_cached_envs: usize,
     /// Lock to prevent concurrent venv creation for the same cache key.
     lock: tokio::sync::Mutex<()>,
+    process: ProvisioningContext,
 }
 
 static GLOBAL_VENV_CACHE_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
@@ -385,6 +400,7 @@ impl VenvCache {
             cache_dir,
             max_cached_envs,
             lock: tokio::sync::Mutex::new(()),
+            process: ProvisioningContext::default(),
         }
     }
 
@@ -422,7 +438,7 @@ impl VenvCache {
         let global_lock = GLOBAL_VENV_CACHE_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
         let _global_guard = global_lock.lock().await;
         let _guard = self.lock.lock().await;
-        let _transaction = cache_lease::transaction(&self.cache_dir).await?;
+        let _transaction = Arc::new(cache_lease::transaction(&self.cache_dir).await?);
 
         let key = Self::cache_key(python_version, deps, scope_context);
         let lease = cache_lease::open_lock(&self.cache_dir, &key)?;
@@ -450,11 +466,14 @@ impl VenvCache {
                             cache_key = %key,
                             "Reusing cached Python environment"
                         );
-                        return LeasedVenvInfo::new(VenvInfo {
-                            path: venv_dir,
-                            python_executable,
-                            cache_key: key,
-                        }, lease);
+                        return LeasedVenvInfo::new(
+                            VenvInfo {
+                                path: venv_dir,
+                                python_executable,
+                                cache_key: key,
+                            },
+                            lease,
+                        );
                     }
                 }
             }
@@ -472,7 +491,12 @@ impl VenvCache {
                 "Cannot replace Python environment {key} while it is leased"
             )));
         }
-        let python = backend.ensure_python(python_version).await?;
+        let lease = Arc::new(lease);
+        let context = self
+            .process
+            .clone()
+            .with_resource((lease.clone(), _transaction.clone()));
+        let python = backend.ensure_python(python_version, &context).await?;
 
         // Remove stale directory if it exists
         if venv_dir.exists() {
@@ -493,19 +517,30 @@ impl VenvCache {
             ))
         })?;
 
-        let venv_info = backend.create_venv(&python, &self.cache_dir, &key).await?;
+        let venv_info = backend
+            .create_venv(&python, &self.cache_dir, &key, &context)
+            .await?;
 
         // Install dependencies
         if !deps.is_empty() {
-            backend.install_deps(&venv_info, deps).await?;
+            backend.install_deps(&venv_info, deps, &context).await?;
             // Post-install validation: `pip install` returning exit 0 can
             // still mean "installed nothing" when every spec for a given
             // package has a PEP 508 environment marker that excludes the
             // current platform. Surface that loudly so a future silent
             // drop doesn't reach the user as a ModuleNotFoundError at
             // first import.
-            validate_installed_deps(&venv_info.python_executable, deps).await;
+            validate_installed_deps(&venv_info.python_executable, deps, &context).await;
         }
+
+        // A custom backend may retain the operation context. Never publish or
+        // unlock an environment until every process owner has released it.
+        drop(context);
+        let lease = Arc::try_unwrap(lease).map_err(|_| {
+            Error::Execution(
+                "Python provisioning still has live or quarantined process owners".into(),
+            )
+        })?;
 
         // Write metadata
         let now = now_iso8601();
@@ -546,12 +581,15 @@ impl VenvCache {
             ))
         })?;
 
-        let mut envs: Vec<(PathBuf, String)> = entries.flatten().filter_map(|entry| {
-            let path = entry.path();
-            let contents = std::fs::read_to_string(path.join(METADATA_FILENAME)).ok()?;
-            let meta = serde_json::from_str::<VenvMetadata>(&contents).ok()?;
-            Some((path, meta.last_used_at))
-        }).collect();
+        let mut envs: Vec<(PathBuf, String)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let contents = std::fs::read_to_string(path.join(METADATA_FILENAME)).ok()?;
+                let meta = serde_json::from_str::<VenvMetadata>(&contents).ok()?;
+                Some((path, meta.last_used_at))
+            })
+            .collect();
 
         if envs.len() <= self.max_cached_envs {
             return Ok(());
@@ -565,7 +603,9 @@ impl VenvCache {
             if to_remove == 0 {
                 break;
             }
-            let Some(key) = path.file_name().and_then(|name| name.to_str()) else { continue };
+            let Some(key) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
             let lease = cache_lease::open_lock(&self.cache_dir, key)?;
             if !cache_lease::try_exclusive(&lease)? {
                 continue;
@@ -667,6 +707,11 @@ pub struct PythonEnvConfig {
     /// retain advisory version selection when false.
     #[serde(default)]
     pub require_python_version: bool,
+
+    /// Linux provisioning requires trusted supervisor/unshare paths. Windows
+    /// uses a private job by default; other platforms reject contained launches.
+    #[serde(default)]
+    pub process_namespace: Option<ProcessNamespace>,
 }
 
 fn default_python_version() -> String {
@@ -689,6 +734,7 @@ impl Default for PythonEnvConfig {
             find_links: Vec::new(),
             no_index: false,
             require_python_version: false,
+            process_namespace: None,
         }
     }
 }
@@ -753,6 +799,17 @@ impl PythonEnvManager {
     /// - `Managed` / `ManagedWithPython`: tries `UvBackend`, falls back to
     ///   `SystemBackend` if uv is not available
     pub fn new(mut config: PythonEnvConfig) -> Result<Self> {
+        // Explicit application configuration, independent of mapped-worker
+        // placement. Never infer namespace ownership from bootstrap variables.
+        if config.process_namespace.is_none() {
+            if let Some(value) = std::env::var_os("REMOTEMEDIA_PYTHON_PROCESS_NAMESPACE") {
+                config.process_namespace =
+                    Some(serde_json::from_str(&value.to_string_lossy()).map_err(|e| {
+                        Error::ConfigError(format!("REMOTEMEDIA_PYTHON_PROCESS_NAMESPACE: {e}"))
+                    })?);
+            }
+        }
+
         // Ensure every provisioned venv can `import remotemedia`. Resolution
         // order when the caller didn't set `base_deps` explicitly:
         //   1. `REMOTEMEDIA_PYTHON_SRC` env var (explicit override).
@@ -826,7 +883,8 @@ impl PythonEnvManager {
             }
         };
 
-        let cache = VenvCache::new(cache_dir, config.max_cached_envs);
+        let mut cache = VenvCache::new(cache_dir, config.max_cached_envs);
+        cache.process = ProvisioningContext::new(config.process_namespace.clone());
 
         Ok(Self {
             backend,
@@ -922,6 +980,7 @@ impl PythonEnvManager {
             interpreter::validate_python_version(
                 &venv.python_executable,
                 &self.config.python_version,
+                &self.cache.process.clone().with_resource(venv.clone()),
             )
             .await?;
         }
@@ -942,8 +1001,35 @@ impl PythonEnvManager {
             deps = ?deps,
             "Installing additional dependencies into existing venv"
         );
-        self.backend.install_deps(venv, deps).await?;
-        validate_installed_deps(&venv.python_executable, deps).await;
+        let transaction = Arc::new(cache_lease::transaction(&self.cache.cache_dir).await?);
+        let lease = Arc::new(cache_lease::open_lock(
+            &self.cache.cache_dir,
+            &venv.cache_key,
+        )?);
+        if !cache_lease::try_exclusive(&lease)? {
+            return Err(Error::Execution(
+                "Cannot install into a leased Python environment".into(),
+            ));
+        }
+        let context = self
+            .cache
+            .process
+            .clone()
+            .with_resource((transaction, lease.clone()));
+        // A failed/cancelled mutation must not leave reusable success metadata.
+        let metadata_path = venv.path.join(METADATA_FILENAME);
+        let metadata = std::fs::read(&metadata_path).map_err(cache_lease::lock_error)?;
+        std::fs::remove_file(&metadata_path).map_err(cache_lease::lock_error)?;
+        self.backend.install_deps(venv, deps, &context).await?;
+        validate_installed_deps(&venv.python_executable, deps, &context).await;
+        drop(context);
+        let _lease = Arc::try_unwrap(lease).map_err(|_| {
+            Error::Execution(
+                "Python dependency installation still has live or quarantined process owners"
+                    .into(),
+            )
+        })?;
+        std::fs::write(metadata_path, metadata).map_err(cache_lease::lock_error)?;
         Ok(())
     }
 
@@ -1001,31 +1087,6 @@ fn default_cache_dir() -> PathBuf {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-/// `CREATE_NO_WINDOW` when this process has no console of its own (a GUI app
-/// such as face-desktop), so each child (python, uv) does not open a console
-/// window; `None` in a console app, whose children keep sharing its console.
-#[cfg(windows)]
-pub(crate) fn no_window_flag() -> Option<u32> {
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetConsoleWindow() -> *mut core::ffi::c_void;
-    }
-    // SAFETY: takes no arguments; returns this process's console window or null.
-    unsafe { GetConsoleWindow() }
-        .is_null()
-        .then_some(0x0800_0000)
-}
-
-/// A tokio `Command` that opens no console window (see [`no_window_flag`]).
-#[cfg_attr(not(windows), allow(unused_mut))]
-pub(crate) fn hidden(mut cmd: tokio::process::Command) -> tokio::process::Command {
-    #[cfg(windows)]
-    if let Some(flags) = no_window_flag() {
-        cmd.creation_flags(flags);
-    }
-    cmd
-}
 
 #[cfg(test)]
 mod tests {

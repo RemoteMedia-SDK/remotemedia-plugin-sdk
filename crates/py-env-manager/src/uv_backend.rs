@@ -7,9 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use tokio::process::Command;
 
-use super::{EnvBackend, VenvInfo};
+use super::{EnvBackend, ProvisioningContext, VenvInfo};
 use remotemedia_types::{Error, Result};
 
 /// Backend that uses `uv` for environment management.
@@ -77,21 +76,11 @@ impl UvBackend {
             }
         }
 
-        // 2. Check PATH via which-style lookup
-        let mut probe = std::process::Command::new("uv");
-        probe.arg("--version");
-        #[cfg(windows)]
-        if let Some(flags) = crate::no_window_flag() {
-            use std::os::windows::process::CommandExt;
-            probe.creation_flags(flags);
-        }
-        if let Ok(output) = probe.output() {
-            if output.status.success() {
-                // Find the actual path
-                let uv_path = which_uv().unwrap_or_else(|| PathBuf::from("uv"));
-                tracing::info!(path = %uv_path.display(), "Found uv on PATH");
-                return Ok(Self::from_uv_path(uv_path));
-            }
+        // Locate without executing an uncontained discovery probe. The first
+        // actual uv operation runs under the caller's provisioning context.
+        if let Some(uv_path) = which_uv() {
+            tracing::info!(path = %uv_path.display(), "Found uv on PATH");
+            return Ok(Self::from_uv_path(uv_path));
         }
 
         // 3. Check ~/.config/remotemedia/bin/uv
@@ -151,19 +140,19 @@ impl UvBackend {
     /// are written to stderr even when the overall exit code is 0
     /// (for example, a `uv pip install` on a no-op resolved set), and
     /// we were previously swallowing them.
-    async fn run_uv(&self, args: &[&str]) -> Result<String> {
+    async fn run_uv(&self, args: &[&str], context: &ProvisioningContext) -> Result<String> {
         tracing::info!(argv = ?args, "Invoking uv");
-        let output = crate::hidden(Command::new(&self.uv_path))
-            .args(args)
-            .output()
-            .await
-            .map_err(|e| {
-                Error::Execution(format!(
-                    "Failed to execute uv {}: {}",
-                    args.first().unwrap_or(&""),
-                    e
-                ))
-            })?;
+        let mut command = context
+            .command(&self.uv_path)
+            .map_err(crate::process::error)?;
+        command.command_mut().args(args);
+        let output = command.output().await.map_err(|e| {
+            Error::Execution(format!(
+                "Failed to execute uv {}: {}",
+                args.first().unwrap_or(&""),
+                e
+            ))
+        })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -191,12 +180,13 @@ impl UvBackend {
 
 #[async_trait]
 impl EnvBackend for UvBackend {
-    async fn ensure_python(&self, version: &str) -> Result<PathBuf> {
+    async fn ensure_python(&self, version: &str, context: &ProvisioningContext) -> Result<PathBuf> {
         // Use `uv python install` to ensure the version is available
-        self.run_uv(&["python", "install", version]).await?;
+        self.run_uv(&["python", "install", version], context)
+            .await?;
 
         // Find the installed python
-        let output = self.run_uv(&["python", "find", version]).await?;
+        let output = self.run_uv(&["python", "find", version], context).await?;
         let python_path = output.trim().to_string();
 
         if python_path.is_empty() {
@@ -214,15 +204,19 @@ impl EnvBackend for UvBackend {
         python: &Path,
         cache_dir: &Path,
         cache_key: &str,
+        context: &ProvisioningContext,
     ) -> Result<VenvInfo> {
         let venv_path = cache_dir.join(cache_key);
 
-        self.run_uv(&[
-            "venv",
-            "--python",
-            &python.to_string_lossy(),
-            &venv_path.to_string_lossy(),
-        ])
+        self.run_uv(
+            &[
+                "venv",
+                "--python",
+                &python.to_string_lossy(),
+                &venv_path.to_string_lossy(),
+            ],
+            context,
+        )
         .await?;
 
         let python_executable = self.resolve_python(&VenvInfo {
@@ -238,7 +232,12 @@ impl EnvBackend for UvBackend {
         })
     }
 
-    async fn install_deps(&self, venv: &VenvInfo, deps: &[String]) -> Result<()> {
+    async fn install_deps(
+        &self,
+        venv: &VenvInfo,
+        deps: &[String],
+        context: &ProvisioningContext,
+    ) -> Result<()> {
         if deps.is_empty() {
             return Ok(());
         }
@@ -272,7 +271,7 @@ impl EnvBackend for UvBackend {
         }
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
 
-        self.run_uv(&arg_refs).await?;
+        self.run_uv(&arg_refs, context).await?;
 
         // Clean up the temp requirements file
         let _ = std::fs::remove_file(&req_path);

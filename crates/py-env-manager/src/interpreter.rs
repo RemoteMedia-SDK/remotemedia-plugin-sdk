@@ -1,11 +1,15 @@
 use std::path::Path;
 
+use crate::ProvisioningContext;
 use remotemedia_types::{Error, Result};
-use tokio::process::Command;
 
 /// Probe the interpreter itself, ignoring ambient Python import paths. Check
 /// cached environments too: metadata records intent, not the executable's ABI.
-pub(crate) async fn validate_python_version(python: &Path, requested: &str) -> Result<()> {
+pub(crate) async fn validate_python_version(
+    python: &Path,
+    requested: &str,
+    context: &ProvisioningContext,
+) -> Result<()> {
     let components = requested
         .split('.')
         .map(str::parse::<u32>)
@@ -16,14 +20,13 @@ pub(crate) async fn validate_python_version(python: &Path, requested: &str) -> R
             "Strict Python version must be major.minor or major.minor.patch".into(),
         ));
     }
-    let output = crate::hidden(Command::new(python))
-        .args([
-            "-I",
-            "-c",
-            "import json,sys; print(json.dumps(list(sys.version_info[:3])))",
-        ])
-        .kill_on_drop(true)
-        .output();
+    let mut command = context.command(python).map_err(crate::process::error)?;
+    command.command_mut().args([
+        "-I",
+        "-c",
+        "import json,sys; print(json.dumps(list(sys.version_info[:3])))",
+    ]);
+    let output = command.output();
     let output = tokio::time::timeout(std::time::Duration::from_secs(15), output)
         .await
         .map_err(|_| Error::ConfigError("Python version probe timed out".into()))?

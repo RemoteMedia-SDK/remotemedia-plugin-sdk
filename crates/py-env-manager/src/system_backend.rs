@@ -7,9 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use tokio::process::Command;
 
-use super::{EnvBackend, VenvInfo};
+use super::{EnvBackend, ProvisioningContext, VenvInfo};
 use remotemedia_types::{Error, Result};
 
 /// Backend using the system Python and standard `venv` + `pip`.
@@ -58,23 +57,22 @@ impl Default for SystemBackend {
 
 #[async_trait]
 impl EnvBackend for SystemBackend {
-    async fn ensure_python(&self, version: &str) -> Result<PathBuf> {
+    async fn ensure_python(&self, version: &str, context: &ProvisioningContext) -> Result<PathBuf> {
         let python_cmd = Self::python_command();
         if self.require_python_version {
-            super::interpreter::validate_python_version(Path::new(python_cmd), version).await?;
+            super::interpreter::validate_python_version(Path::new(python_cmd), version, context)
+                .await?;
             return Ok(PathBuf::from(python_cmd));
         }
 
-        let output = crate::hidden(Command::new(python_cmd))
-            .arg("--version")
-            .output()
-            .await
-            .map_err(|e| {
-                Error::ConfigError(format!(
-                    "Python not found. Ensure '{}' is installed and on PATH: {}",
-                    python_cmd, e
-                ))
-            })?;
+        let mut command = context.command(python_cmd).map_err(crate::process::error)?;
+        command.command_mut().arg("--version");
+        let output = command.output().await.map_err(|e| {
+            Error::ConfigError(format!(
+                "Python not found. Ensure '{}' is installed and on PATH: {}",
+                python_cmd, e
+            ))
+        })?;
 
         if !output.status.success() {
             return Err(Error::ConfigError(format!(
@@ -105,23 +103,24 @@ impl EnvBackend for SystemBackend {
         python: &Path,
         cache_dir: &Path,
         cache_key: &str,
+        context: &ProvisioningContext,
     ) -> Result<VenvInfo> {
         let venv_path = cache_dir.join(cache_key);
 
         // Create an isolated venv without --system-site-packages to avoid
         // inheriting broken/conflicting system packages (e.g., numba/coverage).
         // The remotemedia package is found via sys.path in the multiprocess runner.
-        let output = crate::hidden(Command::new(python))
-            .args(["-I", "-m", "venv", &venv_path.to_string_lossy()])
-            .output()
-            .await
-            .map_err(|e| {
-                Error::Execution(format!(
-                    "Failed to create venv at {}: {}",
-                    venv_path.display(),
-                    e
-                ))
-            })?;
+        let mut command = context.command(python).map_err(crate::process::error)?;
+        command
+            .command_mut()
+            .args(["-I", "-m", "venv", &venv_path.to_string_lossy()]);
+        let output = command.output().await.map_err(|e| {
+            Error::Execution(format!(
+                "Failed to create venv at {}: {}",
+                venv_path.display(),
+                e
+            ))
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -145,7 +144,12 @@ impl EnvBackend for SystemBackend {
         })
     }
 
-    async fn install_deps(&self, venv: &VenvInfo, deps: &[String]) -> Result<()> {
+    async fn install_deps(
+        &self,
+        venv: &VenvInfo,
+        deps: &[String],
+        context: &ProvisioningContext,
+    ) -> Result<()> {
         if deps.is_empty() {
             return Ok(());
         }
@@ -186,17 +190,17 @@ impl EnvBackend for SystemBackend {
             args.push("--no-index".to_string());
         }
         args.push("--disable-pip-version-check".to_string());
-        let output = crate::hidden(Command::new(&venv.python_executable))
-            .args(&args)
-            .output()
-            .await
-            .map_err(|e| {
-                Error::Execution(format!(
-                    "Failed to run pip install in {}: {}",
-                    venv.path.display(),
-                    e
-                ))
-            })?;
+        let mut command = context
+            .command(&venv.python_executable)
+            .map_err(crate::process::error)?;
+        command.command_mut().args(&args);
+        let output = command.output().await.map_err(|e| {
+            Error::Execution(format!(
+                "Failed to run pip install in {}: {}",
+                venv.path.display(),
+                e
+            ))
+        })?;
 
         let _ = std::fs::remove_file(&req_path);
 

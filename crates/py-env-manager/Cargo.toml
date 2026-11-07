@@ -20,6 +20,8 @@ repository = "https://github.com/RemoteMedia-SDK/remotemedia-sdk"
 
 [features]
 default = []
+# Process integration tests require the separately built matching supervisor.
+test-linux-namespace = []
 # Use `uv` for venv provisioning instead of system `python -m venv` + `pip`.
 # Activates reqwest (blocking + rustls-tls), flate2, tar, and zip (Windows) as optional deps.
 bundled-uv = ["dep:reqwest", "dep:flate2", "dep:tar", "dep:zip"]
@@ -31,6 +33,7 @@ embedded-python = ["bundled-uv"]
 
 [dependencies]
 remotemedia-types = { path = "../types", version = "0.4.0" }
+remotemedia-shared-memory = { path = "../shared-memory", features = ["worker-channel", "linux-worker-supervisor"] }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
