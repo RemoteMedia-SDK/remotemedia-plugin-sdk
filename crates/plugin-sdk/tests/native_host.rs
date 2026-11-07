@@ -1,6 +1,9 @@
 #![cfg(all(feature = "test-native-worker", any(windows, target_os = "linux")))]
 #[path = "support/native_namespace.rs"]
 mod namespace;
+#[cfg(feature = "mapped-python")]
+#[path = "support/onnx_worker.rs"]
+mod onnx_worker;
 use remotemedia_plugin_sdk::{
     native_worker::{
         Limits, NativeWorkerFactory, NativeWorkerNode, PoolConfig, SessionId, SharedPool,
