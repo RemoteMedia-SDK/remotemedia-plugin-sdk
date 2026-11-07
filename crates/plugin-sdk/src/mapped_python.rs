@@ -40,6 +40,7 @@ pub struct MappedPythonFactory {
     config: MappedPythonConfig,
     pool: Option<SharedPool>,
     input_copies: Option<WorkerInputCopies>,
+    output_copies: bool,
     limits: Limits,
     startup_timeout: Duration,
     snapshot_inputs: Vec<String>,
@@ -61,6 +62,7 @@ impl MappedPythonFactory {
             pool: Some(pool),
             buffer_declaration: None,
             input_copies: None,
+            output_copies: false,
             limits: Limits::default(),
             startup_timeout: Duration::from_secs(30),
             snapshot_inputs: vec![],
@@ -82,6 +84,7 @@ impl MappedPythonFactory {
             pool: None,
             buffer_declaration: None,
             input_copies: None,
+            output_copies: false,
             limits: Limits::default(),
             startup_timeout: Duration::from_secs(30),
             snapshot_inputs: vec![],
@@ -94,6 +97,13 @@ impl MappedPythonFactory {
     /// Bind a fixed session/node policy scope. Identity is checked before startup.
     pub fn with_input_copies(mut self, copies: WorkerInputCopies) -> Self {
         self.input_copies = Some(copies);
+        self
+    }
+
+    /// Require matching wheels with output-copy protocol 1. Each call still
+    /// needs its host's explicit output policy; input policy is independent.
+    pub fn with_output_copies(mut self) -> Self {
+        self.output_copies = true;
         self
     }
 
@@ -270,6 +280,7 @@ impl StreamingNodeFactory for MappedPythonFactory {
             SnapshotMode::Disabled
         };
         let snapshots = mode.protocol();
+        let output_copies = self.output_copies;
         // Factories are synchronous and may run inside a host Tokio runtime.
         // Provision on an owned thread rather than nesting/blocking that runtime.
         let python = std::thread::Builder::new()
@@ -284,6 +295,7 @@ impl StreamingNodeFactory for MappedPythonFactory {
                     &provision_params,
                     &provision_identity,
                     snapshots,
+                    output_copies,
                 ))
             })
             .map_err(|e| Error::Execution(e.to_string()))?
@@ -317,8 +329,9 @@ impl StreamingNodeFactory for MappedPythonFactory {
         }
         // SAFETY: the constructor accepts the complete selected Python code's
         // mapping contract. Provisioning verifies the exact installed wheels.
-        let peer = unsafe { worker_command.spawn_peer(pool, self.limits, snapshots) }
-            .map_err(|e| Error::Execution(format!("mapped Python worker launch: {e}")))?;
+        let peer =
+            unsafe { worker_command.spawn_peer(pool, self.limits, snapshots, output_copies) }
+                .map_err(|e| Error::Execution(format!("mapped Python worker launch: {e}")))?;
         let node = NativeWorkerNode::from_peer(
             peer,
             identity,

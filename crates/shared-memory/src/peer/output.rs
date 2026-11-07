@@ -35,7 +35,7 @@ pub fn prepare_output(
     })
 }
 
-fn reference<T: MappedElement>(
+pub(super) fn reference<T: MappedElement>(
     data: &SharedBuffer<T>,
     session: SessionId,
     peer: PeerId,

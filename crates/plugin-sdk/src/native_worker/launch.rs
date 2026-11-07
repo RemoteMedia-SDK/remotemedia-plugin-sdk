@@ -27,10 +27,17 @@ impl WorkerCommand {
         pool: SharedPool,
         limits: Limits,
         snapshot_protocol: u16,
+        output_copies: bool,
     ) -> io::Result<(PeerConnection, HostHandle)> {
         // SAFETY: caller accepted the complete executable ownership contract.
         unsafe {
             match self {
+                Self::Direct(command) if output_copies => PeerConnection::spawn_with_output_copies(
+                    command,
+                    pool,
+                    limits,
+                    snapshot_protocol,
+                ),
                 Self::Direct(command) => match snapshot_protocol {
                     0 => PeerConnection::spawn(command, pool, limits),
                     1 => PeerConnection::spawn_with_snapshots(command, pool, limits),
@@ -40,6 +47,15 @@ impl WorkerCommand {
                         "unsupported snapshot protocol",
                     )),
                 },
+                #[cfg(all(target_os = "linux", feature = "linux-worker-supervisor"))]
+                Self::Namespace(command) if output_copies => {
+                    PeerConnection::spawn_namespaced_with_output_copies(
+                        command,
+                        pool,
+                        limits,
+                        snapshot_protocol,
+                    )
+                }
                 #[cfg(all(target_os = "linux", feature = "linux-worker-supervisor"))]
                 Self::Namespace(command) => {
                     PeerConnection::spawn_namespaced(command, pool, limits, snapshot_protocol)

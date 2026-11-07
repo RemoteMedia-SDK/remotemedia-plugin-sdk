@@ -670,6 +670,7 @@ fn call_resources(ctx: &dyn NodeRuntimeContextRead) -> CallResources {
     CallResources {
         snapshots: ctx.snapshot_inputs(),
         output_allocator: ctx.output_allocator(),
+        output_copies: ctx.copy_context(),
         ..Default::default()
     }
 }

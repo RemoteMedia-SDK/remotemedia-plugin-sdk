@@ -51,7 +51,7 @@ fn range(
 }
 
 pub fn recover_audio(obj: &Bound<'_, PyAny>) -> PyResult<SharedBuffer<f32>> {
-    let view = PyBuffer::<f32>::get(obj)?;
+    let view = native_audio_buffer(obj)?;
     if !view.readonly() || !view.is_c_contiguous() {
         return Err(PyBufferError::new_err(
             "audio output must be readonly contiguous native f32",
@@ -71,6 +71,24 @@ pub fn recover_audio(obj: &Bound<'_, PyAny>) -> PyResult<SharedBuffer<f32>> {
     )?;
     data.slice(range)
         .map_err(|e| PyBufferError::new_err(e.to_string()))
+}
+
+/// Validate wire endianness independently of the typed-buffer dependency.
+/// The pinned PyO3 0.28.3 little-endian format check also accepts `>f`.
+pub(crate) fn native_audio_buffer(obj: &Bound<'_, PyAny>) -> PyResult<PyBuffer<f32>> {
+    let view = PyUntypedBuffer::get(obj)?;
+    let native = match view.format().to_bytes() {
+        b"f" | b"@f" | b"=f" => true,
+        b"<f" => cfg!(target_endian = "little"),
+        b">f" | b"!f" => cfg!(target_endian = "big"),
+        _ => false,
+    };
+    if !native || view.item_size() != 4 {
+        return Err(PyBufferError::new_err(
+            "buffer contents are not compatible with native f32",
+        ));
+    }
+    view.into_typed()
 }
 
 pub fn recover_bytes(obj: &Bound<'_, PyAny>) -> PyResult<SharedBuffer<u8>> {

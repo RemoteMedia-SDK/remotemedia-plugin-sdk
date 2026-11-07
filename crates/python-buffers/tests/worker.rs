@@ -8,6 +8,9 @@ use remotemedia_types::{
 };
 use std::{process::Command, sync::mpsc, time::Duration};
 
+#[path = "support/array_outputs.rs"]
+mod array_outputs;
+
 struct Worker {
     peer: PeerConnection,
     handle: HostHandle,
@@ -15,6 +18,9 @@ struct Worker {
 }
 impl Worker {
     fn spawn(pool: &SharedPool) -> Self {
+        Self::spawn_protocol(pool, false)
+    }
+    fn spawn_protocol(pool: &SharedPool, output_copies: bool) -> Self {
         // An optional interpreter path exercises the exact same fixture against
         // an installed wheel. Otherwise use the child embedding the real module.
         let mut command = if let Ok(python) = std::env::var("MAPPED_WORKER_PYTHON") {
@@ -29,9 +35,19 @@ impl Worker {
         };
         // SAFETY: our fixture claims the private endpoint once, only exports
         // owning buffers, and does not fork or delegate handles/mappings.
-        let (mut peer, handle) =
-            unsafe { PeerConnection::spawn(&mut command, pool.clone(), Limits::default()) }
-                .unwrap();
+        let (mut peer, handle) = unsafe {
+            if output_copies {
+                PeerConnection::spawn_with_output_copies(
+                    &mut command,
+                    pool.clone(),
+                    Limits::default(),
+                    0,
+                )
+            } else {
+                PeerConnection::spawn(&mut command, pool.clone(), Limits::default())
+            }
+        }
+        .unwrap();
         let (watchdog, wait) = mpsc::channel();
         let timeout_handle = handle.clone();
         std::thread::spawn(move || {

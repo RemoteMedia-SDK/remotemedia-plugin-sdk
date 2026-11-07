@@ -38,6 +38,7 @@ pub(super) async fn provision(
     params: &serde_json::Value,
     identity: &CallContext,
     snapshots: u16,
+    output_copies: bool,
 ) -> Result<super::launch::PreparedPython> {
     let (client, client_hash) = wheel_requirement("remotemedia-client", &config.wheels.client)?;
     let (buffers, buffers_hash) = wheel_requirement("remotemedia-buffers", &config.wheels.buffers)?;
@@ -130,5 +131,5 @@ pub(super) async fn provision(
     let venv = manager
         .ensure_env_scoped(&requirements, scope.as_deref())
         .await?;
-    super::launch::prepare(venv, &client_hash, &buffers_hash, snapshots).await
+    super::launch::prepare(venv, &client_hash, &buffers_hash, snapshots, output_copies).await
 }

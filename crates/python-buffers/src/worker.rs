@@ -21,6 +21,7 @@ use std::sync::{
 };
 
 static CLAIMED: AtomicBool = AtomicBool::new(false);
+mod copies;
 mod snapshots;
 
 /// Metadata, owning payload exporter, media timestamp, write timestamp, sequence.
@@ -128,6 +129,15 @@ impl Request {
     }
     fn is_cancelled(&self) -> bool {
         self.request.is_cancelled()
+    }
+    #[getter]
+    fn supports_output_copies(&self) -> bool {
+        self.request.supports_output_copies()
+    }
+    /// Retain a shareable native-F32 view, or request an explicitly authorized
+    /// copy. No dtype conversion or private fallback allocation is performed.
+    fn adapt_audio(&self, py: Python<'_>, payload: &Bound<'_, PyAny>) -> PyResult<ReadBuffer> {
+        copies::adapt_audio(py, &self.request, payload)
     }
     /// Recover only published owning views. Metadata shape and length are
     /// validated before dispatch; private arrays never trigger a hidden copy.
@@ -244,5 +254,6 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("WORKER_PROTOCOL_VERSION", 1)?;
     module.add("SNAPSHOT_PROTOCOL_VERSION", 1)?;
     module.add("SNAPSHOT_OUTPUT_PROTOCOL_VERSION", 2)?;
+    module.add("OUTPUT_COPY_PROTOCOL_VERSION", 1)?;
     Ok(())
 }

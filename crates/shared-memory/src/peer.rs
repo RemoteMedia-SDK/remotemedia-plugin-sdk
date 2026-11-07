@@ -253,6 +253,29 @@ impl PeerConnection {
         }
     }
 
+    /// Namespace-contained counterpart of spawn_with_output_copies.
+    /// # Safety
+    /// The ownership, non-delegation and copy-reporting contracts of both
+    /// spawn_namespaced and spawn_with_output_copies apply.
+    #[cfg(all(target_os = "linux", feature = "linux-worker-supervisor"))]
+    pub unsafe fn spawn_namespaced_with_output_copies(
+        command: &mut crate::channel::NamespaceCommand,
+        pool: SharedPool,
+        limits: Limits,
+        snapshot_protocol: u16,
+    ) -> io::Result<(Self, HostHandle)> {
+        // SAFETY: forwarded from the caller's complete worker contract.
+        unsafe {
+            Self::spawn_protocol(
+                || WorkerProcess::spawn_namespaced(command),
+                pool,
+                limits,
+                snapshot_protocol,
+                wire::OUTPUT_COPY_PROTOCOL,
+            )
+        }
+    }
+
     unsafe fn spawn_protocol(
         launch: impl FnOnce() -> io::Result<WorkerProcess>,
         pool: SharedPool,

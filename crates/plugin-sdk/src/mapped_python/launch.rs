@@ -68,12 +68,20 @@ pub(super) async fn prepare(
     client_hash: &str,
     buffers_hash: &str,
     snapshots: u16,
+    output_copies: bool,
 ) -> Result<PreparedPython> {
     let prepared = PreparedPython {
         program: venv.python_executable.clone(),
         venv,
     };
-    let (probe, child_id) = verify(&prepared, client_hash, buffers_hash, snapshots).await?;
+    let (probe, child_id) = verify(
+        &prepared,
+        client_hash,
+        buffers_hash,
+        snapshots,
+        output_copies,
+    )
+    .await?;
     if !probe.base_executable.is_absolute() || !probe.base_executable.is_file() {
         return Err(Error::ConfigError(
             "invalid base Python interpreter path".into(),
@@ -86,7 +94,14 @@ pub(super) async fn prepare(
             program: probe.base_executable,
             ..prepared
         };
-        let (probe, child_id) = verify(&prepared, client_hash, buffers_hash, snapshots).await?;
+        let (probe, child_id) = verify(
+            &prepared,
+            client_hash,
+            buffers_hash,
+            snapshots,
+            output_copies,
+        )
+        .await?;
         (prepared, probe, child_id)
     };
     if probe.pid != child_id {
@@ -102,6 +117,7 @@ async fn verify(
     client_hash: &str,
     buffers_hash: &str,
     snapshots: u16,
+    output_copies: bool,
 ) -> Result<(Probe, u32)> {
     let mut command = tokio::process::Command::from(prepared.command());
     #[cfg(windows)]
@@ -118,6 +134,7 @@ async fn verify(
         ])
         .arg(&prepared.venv.path)
         .arg(snapshots.to_string())
+        .arg(u8::from(output_copies).to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

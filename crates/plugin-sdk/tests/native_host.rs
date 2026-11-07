@@ -1,4 +1,7 @@
 #![cfg(all(feature = "test-native-worker", any(windows, target_os = "linux")))]
+#[cfg(feature = "mapped-python")]
+#[path = "support/array_worker.rs"]
+mod array_worker;
 #[path = "support/native_namespace.rs"]
 mod namespace;
 #[cfg(feature = "mapped-python")]

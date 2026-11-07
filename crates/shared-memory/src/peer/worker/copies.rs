@@ -3,6 +3,38 @@ use super::*;
 use remotemedia_types::SharedBuffer;
 
 impl WorkerRequest {
+    /// Whether this immutable payload already has a descriptor for this worker.
+    /// This checks ownership, not metadata layout or the host's node contract.
+    /// Callers must still emit through the normal validated output boundary.
+    pub fn can_forward_payload(
+        &self,
+        payload: &remotemedia_types::PayloadStorage,
+    ) -> io::Result<bool> {
+        let state = self.shared.state.lock().unwrap();
+        self.shared.check_open()?;
+        let active = state
+            .calls
+            .get(&self.call)
+            .ok_or_else(|| invalid("output adaptation after call completion"))?;
+        if active.cancelled.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "output adaptation cancelled",
+            ));
+        }
+        drop(state);
+        use remotemedia_types::PayloadStorage;
+        Ok(match payload {
+            PayloadStorage::None => true,
+            PayloadStorage::Audio(data) => {
+                super::super::output::reference(data, self.shared.session, self.shared.peer).is_ok()
+            }
+            PayloadStorage::Bytes(data) => {
+                super::super::output::reference(data, self.shared.session, self.shared.peer).is_ok()
+            }
+        })
+    }
+
     pub fn supports_output_copies(&self) -> bool {
         self.shared.output_copy_protocol == OUTPUT_COPY_PROTOCOL
     }

@@ -69,6 +69,21 @@ assert retained.tolist() == [2.0, 3.0]
         .unwrap();
         assert_eq!(releases.load(Ordering::SeqCst), 0);
         let recovered = recover_audio(&locals.get_item("retained").unwrap().unwrap()).unwrap();
+        let swapped = locals
+            .get_item("retained")
+            .unwrap()
+            .unwrap()
+            .call_method1(
+                "view",
+                (if cfg!(target_endian = "little") {
+                    ">f4"
+                } else {
+                    "<f4"
+                },),
+            )
+            .unwrap();
+        assert!(recover_audio(&swapped).is_err());
+        drop(swapped);
         assert_eq!(recovered.as_ptr() as usize, pointer + 4);
         py.run(c"del retained; gc.collect()", Some(&locals), Some(&locals))
             .unwrap();

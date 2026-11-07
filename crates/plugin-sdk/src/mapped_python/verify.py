@@ -44,6 +44,14 @@ with contextlib.redirect_stdout(sys.stderr):
     snapshots = int(sys.argv[4]) if len(sys.argv) > 4 else 0
     if snapshots not in (0, 1, 2):
         raise RuntimeError("unknown mapped Python snapshot protocol")
+    output_copies = int(sys.argv[5]) if len(sys.argv) > 5 else 0
+    if output_copies not in (0, 1):
+        raise RuntimeError("unknown mapped Python output copy protocol")
+    if output_copies:
+        from remotemedia.core.multiprocessing import mapped_context
+        if (getattr(buffers, "OUTPUT_COPY_PROTOCOL_VERSION", None),
+                getattr(mapped_context, "OUTPUT_COPY_PROTOCOL_VERSION", None)) != (1, 1):
+            raise RuntimeError("incompatible mapped Python output copy protocol")
     if snapshots >= 1:
         if (getattr(buffers, "SNAPSHOT_PROTOCOL_VERSION", None),
                 getattr(mapped_runner, "MAPPED_SNAPSHOT_PROTOCOL_VERSION", None)) != (1, 1):

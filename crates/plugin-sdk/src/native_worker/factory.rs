@@ -12,6 +12,7 @@ pub struct NativeWorkerFactory {
     node_type: String,
     pool: Option<SharedPool>,
     input_copies: Option<WorkerInputCopies>,
+    output_copies: bool,
     limits: Limits,
     startup_timeout: Duration,
     snapshot_inputs: Vec<String>,
@@ -31,6 +32,7 @@ impl NativeWorkerFactory {
             pool: Some(pool),
             buffer_declaration: None,
             input_copies: None,
+            output_copies: false,
             limits: Limits::default(),
             startup_timeout: Duration::from_secs(10),
             snapshot_inputs: vec![],
@@ -51,6 +53,7 @@ impl NativeWorkerFactory {
             pool: None,
             buffer_declaration: None,
             input_copies: None,
+            output_copies: false,
             limits: Limits::default(),
             startup_timeout: Duration::from_secs(10),
             snapshot_inputs: vec![],
@@ -62,6 +65,13 @@ impl NativeWorkerFactory {
     /// Bind a fixed session/node policy scope. Identity is checked before startup.
     pub fn with_input_copies(mut self, copies: WorkerInputCopies) -> Self {
         self.input_copies = Some(copies);
+        self
+    }
+
+    /// Require output-copy protocol 1. Permission still comes from each call's
+    /// host context; enabling negotiation never grants permission to copy.
+    pub fn with_output_copies(mut self) -> Self {
+        self.output_copies = true;
         self
     }
 
@@ -243,8 +253,9 @@ impl StreamingNodeFactory for NativeWorkerFactory {
         } else {
             SnapshotMode::Inputs
         };
-        let peer = unsafe { command.spawn_peer(pool, self.limits, mode.protocol()) }
-            .map_err(transport_error)?;
+        let peer =
+            unsafe { command.spawn_peer(pool, self.limits, mode.protocol(), self.output_copies) }
+                .map_err(transport_error)?;
         let node = NativeWorkerNode::from_peer(
             peer,
             identity,

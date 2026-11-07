@@ -29,12 +29,49 @@ os.write(1, b"mapped Python application stdout is separate from protocol\n")
 retained = []
 
 
+def adapt(request, operation):
+    if operation in ("adapt_forward", "adapt_forward_endian"):
+        metadata, owner = request.input("input")
+        source = np.asarray(owner)[2:6]
+        if operation == "adapt_forward_endian":
+            source = source.view(">f4")
+    else:
+        metadata = json.dumps({"Audio": {"sample_rate": 48000, "channels": 1}})
+        source = np.arange(8, dtype=np.float32)
+        if operation == "adapt_strided":
+            source = source[::-2]
+        elif operation == "adapt_readonly":
+            source.setflags(write=False)
+        elif operation == "adapt_f64":
+            source = source.astype(np.float64)
+        elif operation == "adapt_endian":
+            source = source.astype(">f4")
+        elif operation == "adapt_empty":
+            source = source[:0]
+        elif operation == "adapt_heap":
+            loan = buffers.local_allocator().allocate_audio(8)
+            writable = np.asarray(loan)
+            writable[:] = source
+            del writable
+            source = np.asarray(loan.publish())
+    output = np.asarray(request.adapt_audio(source))
+    assert not output.flags.writeable
+    if operation == "adapt_forward":
+        assert output.ctypes.data == source.ctypes.data
+    elif source.size:
+        assert output.ctypes.data != source.ctypes.data
+    assert np.array_equal(output, source)
+    request.emit(metadata, output)
+
+
 def execute(request):
     error = None
     try:
         operation = json.loads(request.arguments_json)["operation"]
         if operation == "rpc":
             request.emit(json.dumps({"Json": json.loads(request.context_json)}))
+        elif operation.startswith("adapt_"):
+            adapt(request, operation)
         elif operation == "release":
             retained.clear()
         elif operation == "source":
