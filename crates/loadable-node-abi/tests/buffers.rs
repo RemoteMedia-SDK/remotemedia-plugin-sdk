@@ -46,12 +46,17 @@ fn allocator_bridge_preserves_address_provenance_and_exhaustion() {
     let allocator = import_allocator(export_allocator(Arc::new(pool.clone())));
     let mut loan = allocator.allocate_audio(8).unwrap();
     let pointer = loan.as_ptr();
-    loan.fill(0.5);
+    assert_eq!(loan.as_ref(), &[0.0; 8]);
     assert!(matches!(
         allocator.allocate_bytes(1),
         Err(BufferAllocationError::Exhausted)
     ));
-    let data = decode(encode(audio(loan.freeze())).unwrap()).unwrap();
+    let data = std::thread::spawn(move || {
+        loan.fill(0.5);
+        decode(encode(audio(loan.freeze())).unwrap()).unwrap()
+    })
+    .join()
+    .unwrap();
     let RuntimeData::Audio { samples, .. } = data else {
         panic!()
     };

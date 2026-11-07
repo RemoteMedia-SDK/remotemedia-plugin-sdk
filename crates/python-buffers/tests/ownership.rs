@@ -94,6 +94,56 @@ assert retained.tolist() == [2.0, 3.0]
     });
 }
 
+#[test]
+fn python_view_handoff_recovers_an_owner_that_releases_without_the_gil() {
+    let releases = Arc::new(AtomicUsize::new(0));
+    let data = SharedBuffer::from_owner(TrackedOwner {
+        data: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+        releases: releases.clone(),
+    });
+    let pointer = data.as_ptr() as usize;
+    let retained = Python::attach(|py| {
+        let locals = PyDict::new(py);
+        locals
+            .set_item(
+                "input",
+                Py::new(py, ReadBuffer::new(BufferData::Audio(data)).unwrap()).unwrap(),
+            )
+            .unwrap();
+        py.run(
+            c"import numpy as np; retained = np.asarray(input)[1:7]",
+            Some(&locals),
+            Some(&locals),
+        )
+        .unwrap();
+        locals.get_item("retained").unwrap().unwrap().unbind()
+    });
+    assert_eq!(releases.load(Ordering::SeqCst), 0);
+    let recovered = std::thread::spawn(move || {
+        let recovered = Python::attach(|py| {
+            let data = recover_audio(retained.bind(py)).unwrap();
+            assert_eq!(data.as_ptr() as usize, pointer + 4);
+            data.slice(1..3).unwrap()
+        });
+        // Dropping a Py handle while detached may defer decref. Reattach to
+        // drain it before verifying that only the recovered Rust owner remains.
+        drop(retained);
+        Python::attach(|_| {});
+        recovered
+    })
+    .join()
+    .unwrap();
+    assert_eq!(releases.load(Ordering::SeqCst), 0);
+    std::thread::spawn(move || {
+        assert_eq!(recovered.as_ptr() as usize, pointer + 8);
+        assert_eq!(recovered.as_slice(), &[3.0, 4.0]);
+        drop(recovered);
+    })
+    .join()
+    .unwrap();
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
+}
+
 fn mapped_pool() -> Arc<SharedPool> {
     Arc::new(
         SharedPool::new(
