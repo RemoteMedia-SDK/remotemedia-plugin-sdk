@@ -41,9 +41,16 @@ impl FfiNodeFactory for ContractFactory {
             | "rust_protocol" => BufferProduction::OutputAllocator,
             _ => return ROk(ROption::RNone),
         };
+        let domain = match params.get("domain") {
+            None => BufferDomain::Host,
+            Some(value) => match serde_json::from_value::<BufferDomain>(value.clone()) {
+                Ok(domain @ (BufferDomain::Host | BufferDomain::SessionMapped)) => domain,
+                _ => return RErr("fixture domain must be host or session_mapped".into()),
+            },
+        };
         let port = BufferPortContract {
             layouts: vec![BufferLayout::AudioInterleavedF32, BufferLayout::Binary],
-            domains: vec![BufferDomain::Host],
+            domains: vec![domain],
             max_payload_bytes: 4096,
         };
         let mut contract = BufferContract {
