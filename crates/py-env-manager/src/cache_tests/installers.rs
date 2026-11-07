@@ -4,6 +4,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+#[path = "installers/windows_witness.rs"]
+mod windows_witness;
+
 /// Use installed system Python so this test cannot trigger uv's Python download
 /// path. Environment creation and installation use the real selected backend.
 struct OfflineBackend {
@@ -149,6 +153,26 @@ impl InstallerFixture {
                 .write(true)
                 .open(self.project.join(format!("lifetime-{depth}")))
                 .unwrap();
+            #[cfg(windows)]
+            {
+                // Original process handles have already proved exit at abort
+                // return. Windows may release its file locks asynchronously.
+                let started = Instant::now();
+                while !cache_lease::try_exclusive(&lock).unwrap() {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(5),
+                        "exited fixture's file lock was not released"
+                    );
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                if started.elapsed() >= Duration::from_millis(5) {
+                    println!(
+                        "exited_process_lock_release_ms={} depth={depth}",
+                        started.elapsed().as_millis()
+                    );
+                }
+            }
+            #[cfg(not(windows))]
             assert!(
                 cache_lease::try_exclusive(&lock).unwrap(),
                 "installer descendant still owns its access lock"
@@ -214,6 +238,8 @@ async fn cancel_install(uv: bool, phase: &str, additional: bool) {
         }
     });
     fixture.wait_ready(&mut task).await;
+    #[cfg(windows)]
+    let processes = windows_witness::Processes::capture(&fixture.project);
     let target = fixture.environment();
     std::fs::write(fixture.project.join("target"), target.to_str().unwrap()).unwrap();
     let key = target.file_name().unwrap().to_str().unwrap();
@@ -224,6 +250,8 @@ async fn cancel_install(uv: bool, phase: &str, additional: bool) {
     assert!(!cache_lease::try_exclusive(&transaction).unwrap());
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
+    #[cfg(windows)]
+    processes.assert_exited();
     assert!(cache_lease::try_exclusive(&lease).unwrap());
     assert!(cache_lease::try_exclusive(&transaction).unwrap());
     fixture.assert_stopped(&target).await;
