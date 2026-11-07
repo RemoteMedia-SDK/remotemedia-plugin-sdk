@@ -138,7 +138,7 @@ mod inner {
             &self,
             input: RuntimeData,
             ctx: &dyn remotemedia_traits::runtime_context::NodeRuntimeContextRead,
-            mut callback: F,
+            callback: F,
         ) -> remotemedia_types::Result<usize>
         where
             F: FnMut(RuntimeData) -> remotemedia_types::Result<()> + Send,
@@ -148,27 +148,44 @@ mod inner {
                 let output = self
                     .invoke_shared(py, input, context, "process_streaming_shared")
                     .map_err(shared_error)?;
-                let result = (|| {
-                    let mut count = 0;
-                    for item in output.try_iter().map_err(shared_error)? {
-                        let item = item.map_err(shared_error)?;
-                        let data = python_to_runtime_data(py, &item, true)
-                            .and_then(validate_shared)
-                            .map_err(shared_error)?;
-                        py.detach(|| callback(data))?;
-                        count += 1;
-                    }
-                    Ok(count)
-                })();
-                if result.is_err() && output.hasattr("close").map_err(shared_error)? {
-                    if let Err(close) = output.call_method0("close") {
-                        return Err(remotemedia_types::Error::Execution(format!(
-                            "{}; Python generator close failed: {close}",
-                            result.unwrap_err()
-                        )));
-                    }
-                }
-                result
+                deliver_shared(py, output, callback)
+            })
+        }
+
+        /// Invoke a source tick with the actual clock values and session provider.
+        /// Quiet ticks return an empty iterable; generator completion ends only
+        /// this tick. Outputs follow the same owning contract as reactive calls.
+        pub fn tick_shared_with_ctx<F>(
+            &self,
+            tick: remotemedia_traits::streaming::Tick,
+            ctx: &dyn remotemedia_traits::runtime_context::NodeRuntimeContextRead,
+            callback: F,
+        ) -> remotemedia_types::Result<usize>
+        where
+            F: FnMut(RuntimeData) -> remotemedia_types::Result<()> + Send,
+        {
+            let context = shared_context(ctx)?;
+            Python::attach(|py| {
+                let fields = PyDict::new(py);
+                fields
+                    .set_item("clock_id", tick.clock_id)
+                    .map_err(shared_error)?;
+                fields
+                    .set_item("pts_us", tick.pts_us)
+                    .map_err(shared_error)?;
+                fields
+                    .set_item("frame_idx", tick.frame_idx)
+                    .map_err(shared_error)?;
+                fields
+                    .set_item("deadline_us", tick.deadline_us)
+                    .map_err(shared_error)?;
+                let context = Py::new(py, context).map_err(shared_error)?;
+                let output = self
+                    .instance
+                    .bind(py)
+                    .call_method1("tick_shared", (fields, context))
+                    .map_err(shared_error)?;
+                deliver_shared(py, output, callback)
             })
         }
 
@@ -200,6 +217,37 @@ mod inner {
                 Ok(())
             })
         }
+    }
+
+    fn deliver_shared<F>(
+        py: Python<'_>,
+        output: Bound<'_, PyAny>,
+        mut callback: F,
+    ) -> remotemedia_types::Result<usize>
+    where
+        F: FnMut(RuntimeData) -> remotemedia_types::Result<()> + Send,
+    {
+        let result = (|| {
+            let mut count = 0;
+            for item in output.try_iter().map_err(shared_error)? {
+                let item = item.map_err(shared_error)?;
+                let data = python_to_runtime_data(py, &item, true)
+                    .and_then(validate_shared)
+                    .map_err(shared_error)?;
+                py.detach(|| callback(data))?;
+                count += 1;
+            }
+            Ok(count)
+        })();
+        if result.is_err() && output.hasattr("close").map_err(shared_error)? {
+            if let Err(close) = output.call_method0("close") {
+                return Err(remotemedia_types::Error::Execution(format!(
+                    "{}; Python generator close failed: {close}",
+                    result.unwrap_err()
+                )));
+            }
+        }
+        result
     }
 
     fn shared_error(error: PyErr) -> remotemedia_types::Error {
