@@ -93,6 +93,16 @@ pub struct CopyRejected {
     pub bytes: u64,
 }
 
+/// A caller reported more copied bytes than the operation authorized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "copy completion reports {actual_bytes} bytes, exceeding {authorized_bytes} authorized bytes"
+)]
+pub struct CopyCompletionError {
+    pub authorized_bytes: u64,
+    pub actual_bytes: u64,
+}
+
 struct Inner {
     boundary: String,
     policy: CopyPolicy,
@@ -241,8 +251,9 @@ impl CopyContext {
 
     /// Authorize an asynchronous or remote copy before it starts. The owning
     /// operation records failure if dropped, including during peer teardown.
-    /// Call complete only after the exact authorized copy succeeded. Zero-byte
-    /// operations produce no events. This does not instrument arbitrary code.
+    /// Call complete after the exact authorized copy succeeded, or complete_bytes
+    /// for a shorter copy within the authorized bound. Zero-byte authorizations
+    /// produce no events. This does not instrument arbitrary code.
     pub fn begin(&self, reason: CopyReason, bytes: u64) -> Result<CopyOperation, CopyRejected> {
         self.check(reason, bytes)?;
         if bytes != 0 {
@@ -252,7 +263,7 @@ impl CopyContext {
             context: self.clone(),
             reason,
             bytes,
-            completed: false,
+            completed: None,
         })
     }
 }
@@ -272,11 +283,30 @@ pub struct CopyOperation {
     context: CopyContext,
     reason: CopyReason,
     bytes: u64,
-    completed: bool,
+    completed: Option<u64>,
 }
 impl CopyOperation {
+    /// Record the full authorized byte count as successfully copied.
     pub fn complete(mut self) {
-        self.completed = true;
+        self.completed = Some(self.bytes);
+    }
+
+    /// Record the actual byte count of a successful copy within the authorized
+    /// bound, for example a partial final capture chunk. Report only after all
+    /// copying has finished. An overrun consumes the operation as a failure;
+    /// this accounting check cannot prevent a copy already performed by a caller.
+    /// A positive authorization completed with zero bytes still closes its
+    /// Started event. Completion and Drop may call a locking or foreign ledger:
+    /// transfer the operation to a worker before completing it in an RT path.
+    pub fn complete_bytes(mut self, actual_bytes: u64) -> Result<(), CopyCompletionError> {
+        if actual_bytes > self.bytes {
+            return Err(CopyCompletionError {
+                authorized_bytes: self.bytes,
+                actual_bytes,
+            });
+        }
+        self.completed = Some(actual_bytes);
+        Ok(())
     }
 }
 impl Drop for CopyOperation {
@@ -286,8 +316,8 @@ impl Drop for CopyOperation {
         }
         self.context.record(
             self.reason,
-            if self.completed {
-                CopyEvent::Completed(self.bytes)
+            if let Some(bytes) = self.completed {
+                CopyEvent::Completed(bytes)
             } else {
                 CopyEvent::Failed(self.bytes)
             },

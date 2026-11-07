@@ -81,8 +81,8 @@ impl<'de, T: Deserialize<'de>> Visitor<'de> for PayloadVisitor<T> {
             }
             output.push(value);
         }
-        if let Some(attempt) = &mut attempt {
-            attempt.completed = true;
+        if let Some(attempt) = attempt {
+            attempt.complete();
         }
         Ok(output)
     }
@@ -108,7 +108,7 @@ impl<'de, T: Deserialize<'de>> DeserializeSeed<'de> for PayloadElement<'_, '_, T
                     context: self.context.clone(),
                     reason,
                     bytes: 0,
-                    completed: false,
+                    completed: None,
                 }
             });
             attempt.bytes = attempt

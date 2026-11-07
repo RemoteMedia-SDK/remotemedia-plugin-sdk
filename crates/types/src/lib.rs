@@ -64,8 +64,8 @@ mod provenance;
 mod payload_layout;
 mod shared_buffer;
 pub use copy_policy::{
-    CopyContext, CopyCounts, CopyEvent, CopyLedger, CopyOperation, CopyPolicy, CopyReason, CopyRejected,
-    CopyReport, COPY_REASONS,
+    CopyCompletionError, CopyContext, CopyCounts, CopyEvent, CopyLedger, CopyOperation, CopyPolicy,
+    CopyReason, CopyRejected, CopyReport, COPY_REASONS,
 };
 pub use message::{PayloadKind, PayloadStorage, RuntimeMetadata, TensorEncoding};
 pub use buffer_budget::{BufferBudget, BufferBudgetUsage};
