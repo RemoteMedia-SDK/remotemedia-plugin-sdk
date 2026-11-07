@@ -39,6 +39,17 @@ use crate::ports::TimestampedSnapshot;
 /// helpers in this module — plugin code is expected to call those rather
 /// than handle `Arc<dyn Any>` directly.
 pub trait NodeRuntimeContextRead: Send + Sync {
+    /// Request completion of this paced source after the active tick succeeds.
+    /// The request does not skip remaining outputs or registered work. A failed
+    /// or cancelled tick cannot commit completion. Quiet ticks are not EOS.
+    /// Only an active tick context may accept this request; unsupported adapters
+    /// and contexts retained beyond their call must return an error.
+    fn finish_source(&self) -> Result<(), remotemedia_types::Error> {
+        Err(remotemedia_types::Error::Execution(
+            "source completion is unavailable in this execution context".into(),
+        ))
+    }
+
     /// Retain the explicit materialization policy and ledger for this node.
     /// None means this context/adapter does not expose that contract. Callers
     /// must not infer permission or invent a compatibility fallback from None.
