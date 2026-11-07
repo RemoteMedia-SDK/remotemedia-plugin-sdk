@@ -1,5 +1,5 @@
 //! Synchronous Serde policy scope and allocation-time payload accounting.
-use super::{Attempt, CopyContext, CopyEvent, CopyLedger, CopyReason};
+use super::{CopyContext, CopyEvent, CopyLedger, CopyOperation, CopyReason};
 use serde::{
     de::{DeserializeSeed, Error, SeqAccess, Visitor},
     Deserialize, Deserializer,
@@ -90,7 +90,7 @@ impl<'de, T: Deserialize<'de>> Visitor<'de> for PayloadVisitor<T> {
 
 struct PayloadElement<'context, 'attempt, T> {
     context: &'context CopyContext,
-    attempt: &'attempt mut Option<Attempt<'context>>,
+    attempt: &'attempt mut Option<CopyOperation>,
     marker: PhantomData<T>,
 }
 impl<'de, T: Deserialize<'de>> DeserializeSeed<'de> for PayloadElement<'_, '_, T> {
@@ -104,8 +104,8 @@ impl<'de, T: Deserialize<'de>> DeserializeSeed<'de> for PayloadElement<'_, '_, T
         if bytes != 0 {
             let attempt = self.attempt.get_or_insert_with(|| {
                 self.context.record(reason, CopyEvent::Started);
-                Attempt {
-                    context: self.context,
+                CopyOperation {
+                    context: self.context.clone(),
                     reason,
                     bytes: 0,
                     completed: false,

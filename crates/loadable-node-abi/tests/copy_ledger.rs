@@ -75,6 +75,32 @@ fn bridge_records_in_flight_success_error_and_local_unwind() {
 }
 
 #[test]
+fn owning_copy_operations_keep_the_imported_abi_ledger_alive_after_context_drop() {
+    let host = CopyContext::new(CopyPolicy::AllowCopies, "worker/output");
+    let remote = import(export(host.clone()));
+    let success = remote.begin(CopyReason::BorrowedInput, 16).unwrap();
+    let failure = remote.begin(CopyReason::BorrowedInput, 32).unwrap();
+    drop(remote);
+    assert_eq!(counts(&host, CopyReason::BorrowedInput).in_flight, 2);
+    std::thread::spawn(move || {
+        success.complete();
+        drop(failure);
+    })
+    .join()
+    .unwrap();
+    assert_eq!(
+        counts(&host, CopyReason::BorrowedInput),
+        CopyCounts {
+            completed: 1,
+            copied_bytes: 16,
+            failed: 1,
+            failed_requested_bytes: 32,
+            ..Default::default()
+        }
+    );
+}
+
+#[test]
 fn bridge_is_retained_reexportable_and_concurrent_without_double_accounting() {
     let host = CopyContext::new(CopyPolicy::AllowCopies, "retained");
     let first = import(export(host.clone()));

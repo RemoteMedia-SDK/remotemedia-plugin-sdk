@@ -6,13 +6,13 @@ use std::sync::{
     Arc, Mutex,
 };
 
-struct Selected {
-    bound: BoundOutputAllocator,
-    pointer: AtomicUsize,
-    cancel: Mutex<Option<(HostHandle, u64)>>,
+pub(super) struct Selected {
+    pub(super) bound: BoundOutputAllocator,
+    pub(super) pointer: AtomicUsize,
+    pub(super) cancel: Mutex<Option<(HostHandle, u64)>>,
 }
 impl Selected {
-    fn new(pool: &SharedPool) -> Arc<Self> {
+    pub(super) fn new(pool: &SharedPool) -> Arc<Self> {
         Arc::new(Self {
             bound: BoundOutputAllocator::new(Arc::new(pool.clone())),
             pointer: AtomicUsize::new(0),

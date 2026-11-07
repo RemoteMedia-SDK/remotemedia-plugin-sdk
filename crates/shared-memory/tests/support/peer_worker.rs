@@ -4,6 +4,8 @@ use std::{
     io,
     sync::{Arc, Condvar, Mutex},
 };
+mod copies;
+mod invalid_copies;
 
 #[derive(Default)]
 struct Fixture {
@@ -13,6 +15,9 @@ struct Fixture {
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().nth(2).as_deref() == Some("invalid-copy") {
+        return invalid_copies::run();
+    }
     if std::env::args().nth(2).as_deref() == Some("forged-release") {
         return forged_release();
     }
@@ -56,6 +61,7 @@ fn forged_release() -> Result<(), Box<dyn std::error::Error>> {
         &serde_json::to_vec(&WorkerMessage::Ready {
             version: WIRE_VERSION,
             snapshot_protocol: 0,
+            output_copy_protocol: 0,
             session,
             peer,
             modes: vec![CallKind::Process],
@@ -78,6 +84,7 @@ fn forged_release() -> Result<(), Box<dyn std::error::Error>> {
 
 fn execute(request: &mut WorkerRequest, fixture: &Fixture) -> io::Result<()> {
     match request.arguments["operation"].as_str().unwrap_or("echo") {
+        "copy" => copies::execute(request, fixture)?,
         "snapshot_once" => {
             assert_eq!(request.snapshot_port_names(), ["latest"]);
             match request.read_snapshot("latest")? {

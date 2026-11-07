@@ -48,6 +48,7 @@ impl SharedWorker {
                     state.calls.insert(
                         call,
                         Active {
+                            pending_copies: 0,
                             snapshot_reads: 0,
                             cancelled: Arc::new(AtomicBool::new(false)),
                             allocations: 0,
@@ -114,12 +115,7 @@ impl SharedWorker {
                         .allocations
                         .remove(&request)
                         .ok_or_else(|| invalid("unknown allocation rejection"))?;
-                    let error = match reason {
-                        AllocationFailure::InvalidLength => BufferAllocationError::InvalidLength,
-                        AllocationFailure::Exhausted => BufferAllocationError::Exhausted,
-                        AllocationFailure::Unavailable => BufferAllocationError::Unavailable,
-                    };
-                    let _ = pending.reply.send(Err(error));
+                    let _ = pending.reply.send(Err(reason));
                 }
                 HostMessage::OutputAccepted { sequence } => {
                     let pending = self
@@ -282,7 +278,7 @@ impl SharedWorker {
             }
         };
         let loan = loan.map_err(other)?;
-        let _ = pending.reply.send(Ok(loan));
+        let _ = pending.reply.send(Ok(GrantedLoan { allocation, loan }));
         Ok(())
     }
 }

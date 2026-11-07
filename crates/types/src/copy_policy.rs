@@ -231,20 +231,29 @@ impl CopyContext {
         bytes: u64,
         operation: impl FnOnce() -> Result<T, E>,
     ) -> Result<Result<T, E>, CopyRejected> {
-        self.check(reason, bytes)?;
-        if bytes == 0 {
-            return Ok(operation());
+        let attempt = self.begin(reason, bytes)?;
+        let value = operation();
+        if value.is_ok() {
+            attempt.complete();
         }
-        self.record(reason, CopyEvent::Started);
-        let mut attempt = Attempt {
-            context: self,
+        Ok(value)
+    }
+
+    /// Authorize an asynchronous or remote copy before it starts. The owning
+    /// operation records failure if dropped, including during peer teardown.
+    /// Call complete only after the exact authorized copy succeeded. Zero-byte
+    /// operations produce no events. This does not instrument arbitrary code.
+    pub fn begin(&self, reason: CopyReason, bytes: u64) -> Result<CopyOperation, CopyRejected> {
+        self.check(reason, bytes)?;
+        if bytes != 0 {
+            self.record(reason, CopyEvent::Started);
+        }
+        Ok(CopyOperation {
+            context: self.clone(),
             reason,
             bytes,
             completed: false,
-        };
-        let value = operation();
-        attempt.completed = value.is_ok();
-        Ok(value)
+        })
     }
 }
 
@@ -257,14 +266,24 @@ impl CopyLedger for CopyContext {
     }
 }
 
-struct Attempt<'a> {
-    context: &'a CopyContext,
+/// One authorized copy retaining its boundary ledger until completion or failure.
+#[must_use = "dropping an unfinished copy records failure"]
+pub struct CopyOperation {
+    context: CopyContext,
     reason: CopyReason,
     bytes: u64,
     completed: bool,
 }
-impl Drop for Attempt<'_> {
+impl CopyOperation {
+    pub fn complete(mut self) {
+        self.completed = true;
+    }
+}
+impl Drop for CopyOperation {
     fn drop(&mut self) {
+        if self.bytes == 0 {
+            return;
+        }
         self.context.record(
             self.reason,
             if self.completed {

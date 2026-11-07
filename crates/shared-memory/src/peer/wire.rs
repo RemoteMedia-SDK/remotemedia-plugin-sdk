@@ -7,6 +7,8 @@ pub const WIRE_VERSION: u16 = 1;
 pub const SNAPSHOT_PROTOCOL: u16 = 1;
 /// Adds node-output discovery/reads to the existing live-input protocol.
 pub const SNAPSHOT_OUTPUT_PROTOCOL: u16 = 2;
+/// Opt-in host-authorized materialization into a remote producer grant.
+pub const OUTPUT_COPY_PROTOCOL: u16 = 1;
 fn absent_protocol(version: &u16) -> bool {
     *version == 0
 }
@@ -83,6 +85,7 @@ pub enum AllocationFailure {
     InvalidLength,
     Exhausted,
     Unavailable,
+    CopyDenied,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,6 +99,8 @@ pub enum HostMessage {
         limits: Limits,
         #[serde(default, skip_serializing_if = "absent_protocol")]
         snapshot_protocol: u16,
+        #[serde(default, skip_serializing_if = "absent_protocol")]
+        output_copy_protocol: u16,
     },
     Begin {
         call: u64,
@@ -148,6 +153,8 @@ pub enum WorkerMessage {
         modes: Vec<CallKind>,
         #[serde(default, skip_serializing_if = "absent_protocol")]
         snapshot_protocol: u16,
+        #[serde(default, skip_serializing_if = "absent_protocol")]
+        output_copy_protocol: u16,
     },
     InputAccepted {
         lease: u64,
@@ -160,6 +167,17 @@ pub enum WorkerMessage {
         call: u64,
         element: ElementType,
         elements: u64,
+    },
+    AllocateCopy {
+        request: u64,
+        call: u64,
+        element: ElementType,
+        elements: u64,
+    },
+    CopyFinished {
+        call: u64,
+        allocation: AllocationId,
+        success: bool,
     },
     ReadSnapshot {
         request: u64,

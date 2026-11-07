@@ -34,6 +34,8 @@ pub type SnapshotInputs = HashMap<String, Arc<dyn remotemedia_traits::ports::Sna
 #[derive(Default)]
 pub struct CallResources {
     pub copies: Option<CopyContext>,
+    /// Separate output materialization authority; None never permits a copy.
+    pub output_copies: Option<CopyContext>,
     pub snapshots: SnapshotInputs,
     pub output_allocator: Option<Arc<dyn remotemedia_types::OutputAllocator>>,
 }
@@ -56,10 +58,14 @@ struct Producer {
     descriptor: WriteDescriptor,
     published: Option<PayloadStorage>,
     pending: Option<crate::remote::PendingPublication>,
+    copy: Option<(u64, remotemedia_types::CopyOperation)>,
+    copy_failed: bool,
 }
 struct Call {
     snapshots: SnapshotInputs,
     copies: Option<CopyContext>,
+    output_copies: Option<CopyContext>,
+    pending_copies: usize,
     output_allocator: Option<Arc<dyn remotemedia_types::OutputAllocator>>,
     cancelled: bool,
     outstanding: usize,
@@ -78,6 +84,7 @@ struct Ledger {
 }
 struct Shared {
     snapshot_protocol: u16,
+    output_copy_protocol: u16,
     pool: SharedPool,
     peer: PeerId,
     limits: Limits,
@@ -155,7 +162,7 @@ impl PeerConnection {
         limits: Limits,
     ) -> io::Result<(Self, HostHandle)> {
         // SAFETY: forwarded from the caller's process ownership contract.
-        unsafe { Self::spawn_protocol(|| WorkerProcess::spawn(command), pool, limits, 0) }
+        unsafe { Self::spawn_protocol(|| WorkerProcess::spawn(command), pool, limits, 0, 0) }
     }
 
     /// Require live shared snapshot reads in the worker handshake.
@@ -173,6 +180,7 @@ impl PeerConnection {
                 pool,
                 limits,
                 wire::SNAPSHOT_PROTOCOL,
+                0,
             )
         }
     }
@@ -193,6 +201,7 @@ impl PeerConnection {
                 pool,
                 limits,
                 wire::SNAPSHOT_OUTPUT_PROTOCOL,
+                0,
             )
         }
     }
@@ -216,6 +225,30 @@ impl PeerConnection {
                 pool,
                 limits,
                 snapshot_protocol,
+                0,
+            )
+        }
+    }
+
+    /// Negotiate output-copy accounting independently of snapshots. Older peers
+    /// reject the extension rather than silently dropping copy policy.
+    /// # Safety
+    /// The complete trust, immutable-publication and non-delegation contract of
+    /// spawn applies. Workers must report each authorized copy exactly once.
+    pub unsafe fn spawn_with_output_copies(
+        command: &mut Command,
+        pool: SharedPool,
+        limits: Limits,
+        snapshot_protocol: u16,
+    ) -> io::Result<(Self, HostHandle)> {
+        // SAFETY: caller supplies the same worker ownership contract as spawn.
+        unsafe {
+            Self::spawn_protocol(
+                || WorkerProcess::spawn(command),
+                pool,
+                limits,
+                snapshot_protocol,
+                wire::OUTPUT_COPY_PROTOCOL,
             )
         }
     }
@@ -225,6 +258,7 @@ impl PeerConnection {
         pool: SharedPool,
         limits: Limits,
         snapshot_protocol: u16,
+        output_copy_protocol: u16,
     ) -> io::Result<(Self, HostHandle)> {
         if snapshot_protocol > wire::SNAPSHOT_OUTPUT_PROTOCOL
             || !(1..=64).contains(&limits.calls)
@@ -242,6 +276,7 @@ impl PeerConnection {
         let (sender, receiver) = process.take_channel().unwrap().split()?;
         let shared = Arc::new(Shared {
             snapshot_protocol,
+            output_copy_protocol,
             pool,
             peer,
             limits,
@@ -265,6 +300,7 @@ impl PeerConnection {
             &HostMessage::Hello {
                 version: wire::WIRE_VERSION,
                 snapshot_protocol,
+                output_copy_protocol,
                 session: shared.pool.session_id(),
                 peer,
                 encoding: TensorEncoding::Runtime,
@@ -379,6 +415,7 @@ impl HostHandle {
     ) -> io::Result<u64> {
         let CallResources {
             copies,
+            output_copies,
             snapshots,
             output_allocator,
         } = resources;
@@ -431,6 +468,8 @@ impl HostHandle {
                 Call {
                     snapshots,
                     copies: copies.clone(),
+                    output_copies,
+                    pending_copies: 0,
                     output_allocator,
                     cancelled: false,
                     outstanding: 0,

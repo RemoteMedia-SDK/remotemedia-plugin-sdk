@@ -17,6 +17,7 @@ use std::{
     },
 };
 
+mod copies;
 mod receive;
 mod snapshots;
 type RuntimeSnapshot = Arc<remotemedia_traits::ports::TimestampedSnapshot<RuntimeData>>;
@@ -24,7 +25,11 @@ struct PendingSnapshot {
     reply: mpsc::SyncSender<io::Result<Option<RuntimeSnapshot>>>,
 }
 
-type AllocationResult = std::result::Result<Loan, BufferAllocationError>;
+type AllocationResult = std::result::Result<GrantedLoan, AllocationFailure>;
+struct GrantedLoan {
+    allocation: AllocationId,
+    loan: Loan,
+}
 enum Loan {
     Audio(BufferLoan<f32>),
     Bytes(BufferLoan<u8>),
@@ -39,6 +44,7 @@ struct PendingOutput {
     reply: mpsc::SyncSender<io::Result<()>>,
 }
 struct Active {
+    pending_copies: usize,
     snapshot_reads: usize,
     cancelled: Arc<AtomicBool>,
     allocations: usize,
@@ -79,6 +85,7 @@ impl Outbound {
 }
 struct SharedWorker {
     snapshot_protocol: u16,
+    output_copy_protocol: u16,
     session: SessionId,
     peer: PeerId,
     encoding: TensorEncoding,
@@ -142,6 +149,7 @@ impl WorkerEndpoint {
             encoding,
             limits,
             snapshot_protocol,
+            output_copy_protocol,
         } = serde_json::from_slice(&frame.metadata).map_err(other)?
         else {
             return Err(invalid("worker expected initial hello"));
@@ -150,6 +158,7 @@ impl WorkerEndpoint {
             || frame.access.is_some()
             || version != WIRE_VERSION
             || ![0, SNAPSHOT_PROTOCOL, SNAPSHOT_OUTPUT_PROTOCOL].contains(&snapshot_protocol)
+            || ![0, OUTPUT_COPY_PROTOCOL].contains(&output_copy_protocol)
             || !(1..=64).contains(&limits.calls)
             || !(1..=64).contains(&limits.inputs_per_call)
             || !(1..=16).contains(&limits.outputs_per_call)
@@ -167,6 +176,7 @@ impl WorkerEndpoint {
         let (wire_send, wire_receive) = mpsc::channel();
         let shared = Arc::new(SharedWorker {
             snapshot_protocol,
+            output_copy_protocol,
             session,
             peer,
             encoding,
@@ -209,6 +219,7 @@ impl WorkerEndpoint {
             })?;
         shared.send(&WorkerMessage::Ready {
             snapshot_protocol,
+            output_copy_protocol,
             version: WIRE_VERSION,
             session,
             peer,
@@ -354,7 +365,11 @@ impl WorkerRequest {
                 .calls
                 .get(&self.call)
                 .ok_or_else(|| invalid("unknown worker call completion"))?;
-            if active.outputs != 0 || active.allocations != 0 || active.snapshot_reads != 0 {
+            if active.outputs != 0
+                || active.allocations != 0
+                || active.snapshot_reads != 0
+                || active.pending_copies != 0
+            {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     "worker call still has pending operations",
@@ -387,35 +402,44 @@ struct RemoteAllocator {
     call: u64,
 }
 impl RemoteAllocator {
-    fn allocate(&self, element: ElementType, elements: usize) -> AllocationResult {
+    fn allocate(&self, element: ElementType, elements: usize, copying: bool) -> AllocationResult {
         let (reply, wait) = mpsc::sync_channel(1);
         let send = (|| {
             let mut outbound = self.shared.outbound.lock().unwrap();
             let mut state = self.shared.state.lock().unwrap();
             if self.shared.closed.load(Ordering::Acquire) {
-                return Err(BufferAllocationError::Unavailable);
+                return Err(AllocationFailure::Unavailable);
             }
             let active = state
                 .calls
                 .get_mut(&self.call)
-                .ok_or(BufferAllocationError::Unavailable)?;
+                .ok_or(AllocationFailure::Unavailable)?;
             if active.cancelled.load(Ordering::Acquire) {
-                return Err(BufferAllocationError::Unavailable);
+                return Err(AllocationFailure::Unavailable);
             }
             if active.allocations >= self.shared.limits.outputs_per_call {
-                return Err(BufferAllocationError::Exhausted);
+                return Err(AllocationFailure::Exhausted);
             }
             let request = outbound.next_allocation;
             let next = request
                 .checked_add(1)
-                .ok_or(BufferAllocationError::Unavailable)?;
-            let bytes = encode(&WorkerMessage::Allocate {
-                request,
-                call: self.call,
-                element,
-                elements: elements as u64,
-            })
-            .map_err(|_| BufferAllocationError::Unavailable)?;
+                .ok_or(AllocationFailure::Unavailable)?;
+            let message = if copying {
+                WorkerMessage::AllocateCopy {
+                    request,
+                    call: self.call,
+                    element,
+                    elements: elements as u64,
+                }
+            } else {
+                WorkerMessage::Allocate {
+                    request,
+                    call: self.call,
+                    element,
+                    elements: elements as u64,
+                }
+            };
+            let bytes = encode(&message).map_err(|_| AllocationFailure::Unavailable)?;
             active.allocations += 1;
             state.allocations.insert(
                 request,
@@ -434,9 +458,7 @@ impl RemoteAllocator {
             Ok(())
         })();
         send?;
-        let result = wait
-            .recv()
-            .unwrap_or(Err(BufferAllocationError::Unavailable));
+        let result = wait.recv().unwrap_or(Err(AllocationFailure::Unavailable));
         if let Some(active) = self.shared.state.lock().unwrap().calls.get_mut(&self.call) {
             active.allocations -= 1;
         }
@@ -448,7 +470,11 @@ impl OutputAllocator for RemoteAllocator {
         &self,
         samples: usize,
     ) -> std::result::Result<BufferLoan<f32>, BufferAllocationError> {
-        match self.allocate(ElementType::F32Le, samples)? {
+        match self
+            .allocate(ElementType::F32Le, samples, false)
+            .map_err(allocation_error)?
+            .loan
+        {
             Loan::Audio(loan) => Ok(loan),
             _ => Err(BufferAllocationError::Unavailable),
         }
@@ -457,7 +483,11 @@ impl OutputAllocator for RemoteAllocator {
         &self,
         len: usize,
     ) -> std::result::Result<BufferLoan<u8>, BufferAllocationError> {
-        match self.allocate(ElementType::Bytes, len)? {
+        match self
+            .allocate(ElementType::Bytes, len, false)
+            .map_err(allocation_error)?
+            .loan
+        {
             Loan::Bytes(loan) => Ok(loan),
             _ => Err(BufferAllocationError::Unavailable),
         }
@@ -518,7 +548,7 @@ impl SharedWorker {
             )));
         }
         for (_, pending) in allocations {
-            let _ = pending.reply.send(Err(BufferAllocationError::Unavailable));
+            let _ = pending.reply.send(Err(AllocationFailure::Unavailable));
         }
         for (_, pending) in outputs {
             drop(pending.prepared);
@@ -542,6 +572,15 @@ impl SharedWorker {
             if known {
                 let _ = shared.send(&WorkerMessage::ProducerReleased { allocation });
             }
+        }
+    }
+}
+fn allocation_error(error: AllocationFailure) -> BufferAllocationError {
+    match error {
+        AllocationFailure::InvalidLength => BufferAllocationError::InvalidLength,
+        AllocationFailure::Exhausted => BufferAllocationError::Exhausted,
+        AllocationFailure::Unavailable | AllocationFailure::CopyDenied => {
+            BufferAllocationError::Unavailable
         }
     }
 }

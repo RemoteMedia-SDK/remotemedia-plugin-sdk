@@ -17,6 +17,7 @@ impl Shared {
                 peer,
                 modes,
                 snapshot_protocol,
+                output_copy_protocol,
             } => {
                 let mut ledger = self.ledger.lock().unwrap();
                 self.check_open()?;
@@ -24,6 +25,7 @@ impl Shared {
                 if ledger.modes.is_some()
                     || version != wire::WIRE_VERSION
                     || snapshot_protocol != self.snapshot_protocol
+                    || output_copy_protocol != self.output_copy_protocol
                     || session != self.pool.session_id()
                     || peer != self.peer
                     || modes.is_empty()
@@ -70,6 +72,9 @@ impl Shared {
                     .producers
                     .get(&allocation)
                     .ok_or_else(|| invalid("unknown or duplicate producer release"))?;
+                if producer.copy.is_some() {
+                    return Err(invalid("producer released before copy completion"));
+                }
                 // SAFETY: the connection validates this live producer record;
                 // publication is not a release, only final unmap sends this event.
                 unsafe { self.pool.release_producer(&producer.descriptor) }.map_err(other)?;
@@ -92,7 +97,24 @@ impl Shared {
                 element,
                 elements,
             } => {
-                self.allocate(request, call, element, elements)?;
+                self.allocate(request, call, element, elements, false)?;
+                Ok(None)
+            }
+            WorkerMessage::AllocateCopy {
+                request,
+                call,
+                element,
+                elements,
+            } => {
+                self.allocate(request, call, element, elements, true)?;
+                Ok(None)
+            }
+            WorkerMessage::CopyFinished {
+                call,
+                allocation,
+                success,
+            } => {
+                self.finish_copy(call, allocation, success)?;
                 Ok(None)
             }
             WorkerMessage::Output {
@@ -107,7 +129,10 @@ impl Shared {
                     .calls
                     .get(&call)
                     .ok_or_else(|| invalid("unknown or duplicate call completion"))?;
-                if active.outstanding != 0 || active.snapshot_reads != 0 {
+                if active.outstanding != 0
+                    || active.snapshot_reads != 0
+                    || active.pending_copies != 0
+                {
                     return Err(invalid(
                         "worker completed before pending operation acknowledgement",
                     ));
@@ -195,6 +220,11 @@ impl Shared {
                     .producers
                     .get_mut(&allocation)
                     .ok_or_else(|| invalid("output references an unknown producer"))?;
+                if producer.copy.is_some() || producer.copy_failed {
+                    return Err(invalid(
+                        "output published before successful copy completion",
+                    ));
+                }
                 validate_layout(&message.metadata, producer.descriptor.element, byte_len)?;
                 if offset
                     .checked_add(byte_len)
