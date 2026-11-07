@@ -444,6 +444,7 @@ impl VenvCache {
         let lease = cache_lease::open_lock(&self.cache_dir, &key)?;
         let venv_dir = self.cache_dir.join(&key);
         let meta_path = venv_dir.join(METADATA_FILENAME);
+        cache_lease::LeaseRecord::require_confirmed_owners(&self.cache_dir, &key)?;
 
         // Check if a valid cached environment exists
         if meta_path.exists() {
@@ -470,9 +471,10 @@ impl VenvCache {
                             VenvInfo {
                                 path: venv_dir,
                                 python_executable,
-                                cache_key: key,
+                                cache_key: key.clone(),
                             },
                             lease,
+                            Arc::new(cache_lease::LeaseRecord::new(&self.cache_dir, &key)?),
                         );
                     }
                 }
@@ -486,16 +488,20 @@ impl VenvCache {
             "Creating new Python environment"
         );
 
-        if !cache_lease::try_exclusive(&lease)? {
+        if !cache_lease::try_exclusive(&lease)?
+            || cache_lease::LeaseRecord::present(&self.cache_dir, &key)?
+        {
             return Err(Error::Execution(format!(
                 "Cannot replace Python environment {key} while it is leased"
             )));
         }
         let lease = Arc::new(lease);
-        let context = self
-            .process
-            .clone()
-            .with_resource((lease.clone(), _transaction.clone()));
+        let record = Arc::new(cache_lease::LeaseRecord::new(&self.cache_dir, &key)?);
+        let context = self.process.clone().with_resource((
+            lease.clone(),
+            _transaction.clone(),
+            record.clone(),
+        ));
         let python = backend.ensure_python(python_version, &context).await?;
 
         // Remove stale directory if it exists
@@ -558,7 +564,7 @@ impl VenvCache {
         // Transition to shared ownership while the transaction still excludes
         // provisioning/eviction. Do not rely on platform-specific lock upgrades.
         fs2::FileExt::unlock(&lease).map_err(cache_lease::lock_error)?;
-        let venv_info = LeasedVenvInfo::new(venv_info, lease)?;
+        let venv_info = LeasedVenvInfo::new(venv_info, lease, record)?;
         self.evict_lru_locked().ok();
 
         Ok(venv_info)
@@ -607,7 +613,9 @@ impl VenvCache {
                 continue;
             };
             let lease = cache_lease::open_lock(&self.cache_dir, key)?;
-            if !cache_lease::try_exclusive(&lease)? {
+            if !cache_lease::try_exclusive(&lease)?
+                || cache_lease::LeaseRecord::present(&self.cache_dir, key)?
+            {
                 continue;
             }
             tracing::info!(
@@ -1002,20 +1010,23 @@ impl PythonEnvManager {
             "Installing additional dependencies into existing venv"
         );
         let transaction = Arc::new(cache_lease::transaction(&self.cache.cache_dir).await?);
+        cache_lease::LeaseRecord::require_confirmed_owners(&self.cache.cache_dir, &venv.cache_key)?;
         let lease = Arc::new(cache_lease::open_lock(
             &self.cache.cache_dir,
             &venv.cache_key,
         )?);
-        if !cache_lease::try_exclusive(&lease)? {
+        if !cache_lease::try_exclusive(&lease)?
+            || cache_lease::LeaseRecord::present(&self.cache.cache_dir, &venv.cache_key)?
+        {
             return Err(Error::Execution(
                 "Cannot install into a leased Python environment".into(),
             ));
         }
-        let context = self
-            .cache
-            .process
-            .clone()
-            .with_resource((transaction, lease.clone()));
+        let context = self.cache.process.clone().with_resource((
+            transaction,
+            lease.clone(),
+            cache_lease::LeaseRecord::new(&self.cache.cache_dir, &venv.cache_key)?,
+        ));
         // A failed/cancelled mutation must not leave reusable success metadata.
         let metadata_path = venv.path.join(METADATA_FILENAME);
         let metadata = std::fs::read(&metadata_path).map_err(cache_lease::lock_error)?;

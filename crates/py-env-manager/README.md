@@ -61,6 +61,26 @@ environments and invalidates metadata before mutation; failed or cancelled
 installation therefore requires rebuilding on the next ensure operation. Legacy
 metadata-only consumers still need migration to leases to be protected.
 
+## Host-crash cache protection
+
+Each provisioning operation and leased environment owns a persistent record in
+`<cache>/.locks/<key>.owners/`. The record stays locked while its owner lives and
+is removed on normal final release. Contained command owners retain it through
+confirmed shutdown; unknown termination retains it. Abrupt host death leaves an
+unowned record, because host death does not prove that descendants have stopped.
+
+Updated cache managers reject reuse, replacement and additional installation for
+such an entry, and eviction skips every entry with retained records. An unreadable
+record store also fails closed. Normal concurrent read leases and final-owner
+release continue to work. These are cooperating-manager guarantees: older cache
+managers and external filesystem tools do not enforce the record protocol.
+
+Automatic recovery of unconfirmed entries is not implemented yet. They remain
+quarantined even after descendants later exit; free OS locks, timestamps and
+numeric PIDs are insufficient recovery evidence. Do not remove records merely
+because a host disappeared. This protects access during a crash but does not
+complete bounded crash recovery or the remaining legacy-launcher migration.
+
 ## Validation
 
 The library's deterministic cancellation regression is enabled normally on
@@ -76,5 +96,20 @@ bounded fake interpreter with descendants: build `python-probe-fixture` with the
 environment library tests and `test-mapped-probe` for the plugin library tests;
 Linux also needs `RM_TEST_PROVISION_SUPERVISOR`. These exercise both timeout and
 task abort, successful parent exit with surviving descendants, and PID mismatch.
-They do not yet establish real installer cancellation at every phase, host-crash
-lock ordering, or the full mixed pipeline acceptance requirements.
+The offline PEP 517 installer matrix additionally needs `bundled-uv`, an absolute
+`RM_TEST_INSTALLER_PYTHON` selecting Python 3.12, pip and uv. Run the ignored
+`cache_tests::installers` cases explicitly; they cover requirements, metadata and
+wheel hooks during both creation and additional installation. The Linux
+host-crash regression deliberately pauses its guardian and proves cache access
+is refused while the installer still writes. Cross-process crash quarantine and
+graceful release run on Windows and Linux. These checks do not establish every
+installer phase, automatic crash recovery, or the full pipeline acceptance scope.
+
+The strengthened Windows installer fixture retains original process handles and
+requires them to be signaled immediately when cancellation returns. Current pip
+cases fail this check even though the process owner's Job Object accounting has
+reached zero. The cause and complete exit ordering remain under investigation;
+the test is not ignored beyond the matrix's explicit external-tool requirement.
+After handle-confirmed exit, the fixture separately allows bounded asynchronous
+file-lock cleanup. Earlier passing lock/write-gate tests did not establish this
+stronger original-handle exit proof.

@@ -69,7 +69,7 @@ impl Drop for Guardian {
 }
 
 #[tokio::test]
-async fn host_death_retains_cache_locks_until_guardian_stops_installer() {
+async fn host_death_quarantines_cache_while_guardian_has_not_stopped_installer() {
     let scratch = Scratch::new();
     let key = VenvCache::cache_key("3.12", &[], Some("crash"));
     let path = scratch.0.join(&key);
@@ -120,12 +120,32 @@ async fn host_death_retains_cache_locks_until_guardian_stops_installer() {
     child.0.wait().unwrap();
     let lease_available = cache_lease::try_exclusive(&lease).unwrap();
     let transaction_available = cache_lease::try_exclusive(&transaction).unwrap();
+    // Retain the original observation: OS locks alone become available. The
+    // persistent record must protect actual manager operations after unlocking.
+    drop((lease, transaction));
     std::fs::write(path.join("after-cancel"), b"probe").unwrap();
     let deadline = Instant::now() + Duration::from_millis(250);
     while !path.join("wrote-after-cancel").exists() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let wrote = path.join("wrote-after-cancel").exists();
+    let other_cache = cache(scratch.0.clone());
+    let replacement = other_cache
+        .get_or_create(&[], "3.12", Some("crash"), &FixtureBackend)
+        .await;
+    let info = VenvInfo {
+        path: path.clone(),
+        python_executable: path.join("python"),
+        cache_key: key.clone(),
+    };
+    let manager = PythonEnvManager {
+        backend: Arc::new(FixtureBackend),
+        config: PythonEnvConfig::default(),
+        cache: other_cache,
+    };
+    let mutation = manager
+        .install_additional_deps(&info, &["new-package".into()])
+        .await;
     // Restore scheduling and verify cleanup before reporting the invariant.
     guardian.signal(libc::SIGCONT);
     assert!(
@@ -134,10 +154,18 @@ async fn host_death_retains_cache_locks_until_guardian_stops_installer() {
     );
     println!("host_dead=true guardian_delayed=true lease_available={lease_available} transaction_available={transaction_available} installer_wrote={wrote}");
     assert!(wrote, "fault did not retain a live environment accessor");
+    assert!(replacement.unwrap_err().to_string().contains("quarantined"));
+    assert!(mutation.unwrap_err().to_string().contains("quarantined"));
     assert!(
-        !lease_available && !transaction_available,
-        "host death released cache locks while the installer could still access the environment"
+        path.join("wrote-after-cancel").exists(),
+        "manager removed live environment"
     );
-    assert!(cache_lease::try_exclusive(&lease).unwrap());
-    assert!(cache_lease::try_exclusive(&transaction).unwrap());
+    // Guardian exit is known to this test, not to the second cache manager.
+    // It must not guess that recovery is safe from time or free OS locks.
+    let error = manager
+        .cache
+        .get_or_create(&[], "3.12", Some("crash"), &FixtureBackend)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("quarantined"));
 }

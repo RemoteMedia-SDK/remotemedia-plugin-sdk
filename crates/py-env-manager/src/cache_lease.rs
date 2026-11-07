@@ -1,9 +1,15 @@
 use crate::{Error, Result, VenvInfo};
 use std::{fs::File, path::Path, sync::Arc};
 
+#[path = "cache_lease/record.rs"]
+mod record;
+pub(crate) use record::LeaseRecord;
+
 /// Environment metadata with a shared cache lease. Keep this owner (or a clone)
 /// until every process using the environment has terminated. Dropping the last
 /// owner makes the environment eligible for eviction; it does not delete it.
+/// Abrupt host death leaves a persistent record which quarantines the entry:
+/// a free OS lock does not prove that all contained descendants have stopped.
 ///
 /// Only cooperating cache managers honor this advisory lock. The lease does not
 /// prevent external deletion or mutation by package installers.
@@ -11,6 +17,7 @@ use std::{fs::File, path::Path, sync::Arc};
 pub struct LeasedVenvInfo {
     info: VenvInfo,
     _lease: Arc<File>,
+    _record: Arc<LeaseRecord>,
 }
 
 impl std::ops::Deref for LeasedVenvInfo {
@@ -21,11 +28,12 @@ impl std::ops::Deref for LeasedVenvInfo {
 }
 
 impl LeasedVenvInfo {
-    pub(crate) fn new(info: VenvInfo, file: File) -> Result<Self> {
+    pub(crate) fn new(info: VenvInfo, file: File, record: Arc<LeaseRecord>) -> Result<Self> {
         fs2::FileExt::try_lock_shared(&file).map_err(lock_error)?;
         Ok(Self {
             info,
             _lease: Arc::new(file),
+            _record: record,
         })
     }
 }

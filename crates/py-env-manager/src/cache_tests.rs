@@ -250,10 +250,37 @@ async fn cross_process_release(kill: bool) {
         assert!(status.success());
     }
     cache.evict_lru().await.unwrap();
-    assert!(
-        !first_path.exists(),
-        "terminated host left an uncollectable lease"
-    );
+    if kill {
+        assert!(
+            first_path.exists(),
+            "unconfirmed host death permitted eviction"
+        );
+        let error = cache
+            .get_or_create(&[], "3.12", Some("child"), &FixtureBackend)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("quarantined"), "{error}");
+        let manager = PythonEnvManager {
+            backend: Arc::new(FixtureBackend),
+            cache: VenvCache::new(scratch.0.clone(), 1),
+            config: PythonEnvConfig::default(),
+        };
+        let info = VenvInfo {
+            path: first_path.clone(),
+            python_executable: first_path.join("python"),
+            cache_key: first_path.file_name().unwrap().to_str().unwrap().into(),
+        };
+        let error = manager
+            .install_additional_deps(&info, &["new-package".into()])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("quarantined"), "{error}");
+    } else {
+        assert!(
+            !first_path.exists(),
+            "graceful release left an uncollectable lease"
+        );
+    }
     assert!(second.python_executable.exists());
 }
 
@@ -263,8 +290,35 @@ async fn other_host_lease_survives_pressure_and_releases_on_exit() {
 }
 
 #[tokio::test]
-async fn other_host_lease_survives_pressure_and_releases_on_kill() {
+async fn other_host_lease_survives_pressure_and_quarantines_on_kill() {
     cross_process_release(true).await;
+}
+
+#[tokio::test]
+async fn unreadable_lease_records_fail_closed_for_reuse_and_eviction() {
+    let scratch = Scratch::new();
+    let cache = VenvCache::new(scratch.0.clone(), 0);
+    let leased = cache
+        .get_or_create(&[], "3.12", None, &FixtureBackend)
+        .await
+        .unwrap();
+    let path = leased.path.clone();
+    let records = scratch
+        .0
+        .join(".locks")
+        .join(format!("{}.owners", leased.cache_key));
+    drop(leased);
+    // A non-directory at the record path is an I/O failure, not an empty record
+    // set. Reproduce it without depending on administrator permission behavior.
+    std::fs::remove_dir(&records).unwrap();
+    std::fs::write(&records, b"invalid record store").unwrap();
+    assert!(cache
+        .get_or_create(&[], "3.12", None, &FixtureBackend)
+        .await
+        .is_err());
+    assert!(cache.evict_lru().await.is_err());
+    assert!(path.join("python").exists());
+    assert!(path.join(METADATA_FILENAME).exists());
 }
 
 struct RetainingBackend(std::sync::Mutex<Option<ProvisioningContext>>);
