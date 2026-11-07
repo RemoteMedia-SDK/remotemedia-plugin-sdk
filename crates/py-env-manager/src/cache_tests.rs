@@ -1,6 +1,10 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(feature = "bundled-uv")]
+#[path = "cache_tests/installers.rs"]
+mod installers;
+
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
