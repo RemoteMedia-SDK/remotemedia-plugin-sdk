@@ -1,5 +1,8 @@
 //! Real managed Python array adaptation with the host node's output authority.
 use super::*;
+
+#[path = "kokoro_worker.rs"]
+mod kokoro;
 use remotemedia_plugin_sdk::mapped_python::{
     MappedPythonConfig, MappedPythonFactory, MappedPythonWheels,
 };
@@ -62,15 +65,17 @@ async fn namespaced_array_outputs_use_call_policy_and_selected_storage() {
     verify(true).await;
 }
 
-async fn verify(namespaced: bool) {
-    let pool = pool();
-    let _reserved: Vec<_> = (0..7).map(|_| pool.allocate::<u8>(1).unwrap()).collect();
-    let allocator = Arc::new(BoundOutputAllocator::new(Arc::new(pool.clone())));
+fn factory(
+    pool: SharedPool,
+    namespaced: bool,
+    node_type: &str,
+    module: &str,
+) -> MappedPythonFactory {
     let config = MappedPythonConfig {
-        node_type: "MappedFixtureNode".into(),
+        node_type: node_type.into(),
         module_root: std::path::PathBuf::from(std::env::var("MAPPED_SDK_PYTHON").unwrap())
             .join("tests/support"),
-        entry_module: "mapped_node_fixture".into(),
+        entry_module: module.into(),
         requirements: vec![],
         wheels: MappedPythonWheels {
             client: std::env::var("MAPPED_CLIENT_WHEEL").unwrap().into(),
@@ -87,13 +92,25 @@ async fn verify(namespaced: bool) {
     // SAFETY: exact local wheels and the checked-in fixture obey owning mapped
     // publication, joined work and the no-delegation contract.
     let factory = unsafe { MappedPythonFactory::new(config, pool.clone()) }.with_output_copies();
-    let factory = if namespaced {
+    if namespaced {
         // SAFETY: matching supervisor and fixture, no mapping delegation.
         unsafe { factory.with_linux_namespace(namespace::supervisor(), "/usr/bin/unshare".into()) }
             .unwrap()
     } else {
         factory
-    };
+    }
+}
+
+async fn verify(namespaced: bool) {
+    let pool = pool();
+    let _reserved: Vec<_> = (0..7).map(|_| pool.allocate::<u8>(1).unwrap()).collect();
+    let allocator = Arc::new(BoundOutputAllocator::new(Arc::new(pool.clone())));
+    let factory = factory(
+        pool.clone(),
+        namespaced,
+        "MappedFixtureNode",
+        "mapped_node_fixture",
+    );
     let node = factory.create("native-node".into(), &serde_json::json!({
         "gain":1, "adapt_audio":true,
         "__python_version__":std::env::var("MAPPED_PYTHON_VERSION").unwrap_or("3.12".into()),
