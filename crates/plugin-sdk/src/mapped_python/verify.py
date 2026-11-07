@@ -52,6 +52,14 @@ with contextlib.redirect_stdout(sys.stderr):
         if (getattr(buffers, "OUTPUT_COPY_PROTOCOL_VERSION", None),
                 getattr(mapped_context, "OUTPUT_COPY_PROTOCOL_VERSION", None)) != (1, 1):
             raise RuntimeError("incompatible mapped Python output copy protocol")
+    source_completion = int(sys.argv[6]) if len(sys.argv) > 6 else 0
+    if source_completion not in (0, 1):
+        raise RuntimeError("unknown mapped Python source completion protocol")
+    if source_completion:
+        from remotemedia.core.multiprocessing import mapped_context
+        if (getattr(buffers, "SOURCE_COMPLETION_PROTOCOL_VERSION", None),
+                getattr(mapped_context, "SOURCE_COMPLETION_PROTOCOL_VERSION", None)) != (1, 1):
+            raise RuntimeError("incompatible mapped Python source completion protocol")
     if snapshots >= 1:
         if (getattr(buffers, "SNAPSHOT_PROTOCOL_VERSION", None),
                 getattr(mapped_runner, "MAPPED_SNAPSHOT_PROTOCOL_VERSION", None)) != (1, 1):

@@ -1,4 +1,5 @@
 use remotemedia_py_env::{LeasedVenvInfo, ProvisioningCommand, ProvisioningContext};
+use remotemedia_shared_memory::peer::Protocols;
 use remotemedia_types::{Error, Result};
 use std::{path::PathBuf, process::Command, time::Duration};
 
@@ -77,23 +78,15 @@ pub(super) async fn prepare(
     venv: LeasedVenvInfo,
     client_hash: &str,
     buffers_hash: &str,
-    snapshots: u16,
-    output_copies: bool,
+    protocols: Protocols,
     context: &ProvisioningContext,
 ) -> Result<PreparedPython> {
     let prepared = PreparedPython {
         program: venv.python_executable.clone(),
         venv,
     };
-    let (probe, child_id) = verify(
-        &prepared,
-        client_hash,
-        buffers_hash,
-        snapshots,
-        output_copies,
-        context,
-    )
-    .await?;
+    let (probe, child_id) =
+        verify(&prepared, client_hash, buffers_hash, protocols, context).await?;
     if !probe.base_executable.is_absolute() || !probe.base_executable.is_file() {
         return Err(Error::ConfigError(
             "invalid base Python interpreter path".into(),
@@ -106,15 +99,8 @@ pub(super) async fn prepare(
             program: probe.base_executable,
             ..prepared
         };
-        let (probe, child_id) = verify(
-            &prepared,
-            client_hash,
-            buffers_hash,
-            snapshots,
-            output_copies,
-            context,
-        )
-        .await?;
+        let (probe, child_id) =
+            verify(&prepared, client_hash, buffers_hash, protocols, context).await?;
         (prepared, probe, child_id)
     };
     probe.ensure_process(child_id)?;
@@ -125,8 +111,7 @@ async fn verify(
     prepared: &PreparedPython,
     client_hash: &str,
     buffers_hash: &str,
-    snapshots: u16,
-    output_copies: bool,
+    protocols: Protocols,
     context: &ProvisioningContext,
 ) -> Result<(Probe, u32)> {
     let mut command = context
@@ -145,8 +130,9 @@ async fn verify(
             buffers_hash,
         ])
         .arg(&prepared.venv.path)
-        .arg(snapshots.to_string())
-        .arg(u8::from(output_copies).to_string());
+        .arg(protocols.snapshots.to_string())
+        .arg(u8::from(protocols.output_copies).to_string())
+        .arg(u8::from(protocols.source_completion).to_string());
     verification_output(command, Duration::from_secs(30)).await
 }
 

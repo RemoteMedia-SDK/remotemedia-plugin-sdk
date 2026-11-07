@@ -1,6 +1,6 @@
 use super::MappedPythonConfig;
 use remotemedia_py_env::{merge_deps, EnvScope, PythonEnvManager};
-use remotemedia_shared_memory::peer::CallContext;
+use remotemedia_shared_memory::peer::{CallContext, Protocols};
 use remotemedia_types::{Error, Result};
 use sha2::{Digest, Sha256};
 use std::{io::Read, path::Path};
@@ -41,8 +41,7 @@ pub(super) async fn provision(
     config: &MappedPythonConfig,
     params: &serde_json::Value,
     identity: &CallContext,
-    snapshots: u16,
-    output_copies: bool,
+    protocols: Protocols,
 ) -> Result<super::launch::PreparedPython> {
     let (client, client_hash) = wheel_requirement("remotemedia-client", &config.wheels.client)?;
     let (buffers, buffers_hash) = wheel_requirement("remotemedia-buffers", &config.wheels.buffers)?;
@@ -137,13 +136,5 @@ pub(super) async fn provision(
         .await?;
     let context =
         remotemedia_py_env::ProvisioningContext::new(manager.config().process_namespace.clone());
-    super::launch::prepare(
-        venv,
-        &client_hash,
-        &buffers_hash,
-        snapshots,
-        output_copies,
-        &context,
-    )
-    .await
+    super::launch::prepare(venv, &client_hash, &buffers_hash, protocols, &context).await
 }

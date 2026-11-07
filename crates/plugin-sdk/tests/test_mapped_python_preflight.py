@@ -22,11 +22,12 @@ class InstalledPreflightTests(unittest.TestCase):
             with open(os.environ[name], "rb") as artifact:
                 cls.hashes.append(hashlib.file_digest(artifact, "sha256").hexdigest())
 
-    def probe(self, prefix="", client_hash=None, venv=None, snapshots=False):
+    def probe(self, prefix="", client_hash=None, venv=None, snapshots=False, source_completion=0):
         wrapper = prefix + "\nimport runpy,sys; sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')"
         return subprocess.run([
             str(self.python), "-I", "-c", wrapper, str(self.verifier),
             client_hash or self.hashes[0], self.hashes[1], str(venv or self.venv), str(int(snapshots)),
+            "0", str(source_completion),
         ], capture_output=True, text=True, timeout=30)
 
     def assert_rejected(self, expected, **options):
@@ -35,8 +36,21 @@ class InstalledPreflightTests(unittest.TestCase):
         self.assertIn(expected, result.stderr)
 
     def test_matching_installed_artifacts(self):
-        result = self.probe()
-        self.assertEqual(result.returncode, 0, result.stderr)
+        for source_completion in (0, 1):
+            with self.subTest(source_completion=source_completion):
+                result = self.probe(source_completion=source_completion)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_native_source_completion_protocol(self):
+        self.assert_rejected("incompatible mapped Python source completion protocol", source_completion=1,
+                             prefix="import _remotemedia_buffers as b; del b.SOURCE_COMPLETION_PROTOCOL_VERSION")
+
+    def test_incompatible_client_source_completion_protocol(self):
+        self.assert_rejected("incompatible mapped Python source completion protocol", source_completion=1,
+                             prefix="import remotemedia.core.multiprocessing.mapped_context as c; c.SOURCE_COMPLETION_PROTOCOL_VERSION = 999")
+
+    def test_unknown_source_completion_protocol(self):
+        self.assert_rejected("unknown mapped Python source completion protocol", source_completion=2)
 
     def test_matching_snapshot_artifacts(self):
         result = self.probe(snapshots=True)
@@ -67,8 +81,13 @@ class InstalledPreflightTests(unittest.TestCase):
                              prefix="import remotemedia.core.multiprocessing.mapped_runner as r; del r.MAPPED_SNAPSHOT_PROTOCOL_VERSION")
 
     def test_snapshot_capability_is_optional_for_ordinary_calls(self):
-        result = self.probe(prefix="import _remotemedia_buffers as b; del b.SNAPSHOT_PROTOCOL_VERSION")
-        self.assertEqual(result.returncode, 0, result.stderr)
+        for capability in ("SNAPSHOT_PROTOCOL_VERSION", "SOURCE_COMPLETION_PROTOCOL_VERSION"):
+            with self.subTest(capability=capability):
+                prefix = f"import _remotemedia_buffers as b; del b.{capability}"
+                if capability == "SOURCE_COMPLETION_PROTOCOL_VERSION":
+                    prefix += "; import remotemedia.core.multiprocessing.mapped_context as c; del c.SOURCE_COMPLETION_PROTOCOL_VERSION"
+                result = self.probe(prefix=prefix)
+                self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_shadowed_snapshot_context(self):
         self.assert_rejected("imported outside its selected distribution", snapshots=True,

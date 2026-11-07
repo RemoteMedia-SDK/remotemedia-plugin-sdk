@@ -130,6 +130,10 @@ impl Request {
     fn is_cancelled(&self) -> bool {
         self.request.is_cancelled()
     }
+    /// Request EOS for an active negotiated tick; complete() commits on success.
+    fn finish_source(&self) -> PyResult<()> {
+        self.request.finish_source().map_err(PyErr::from)
+    }
     #[getter]
     fn supports_output_copies(&self) -> bool {
         self.request.supports_output_copies()
@@ -255,5 +259,6 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("SNAPSHOT_PROTOCOL_VERSION", 1)?;
     module.add("SNAPSHOT_OUTPUT_PROTOCOL_VERSION", 2)?;
     module.add("OUTPUT_COPY_PROTOCOL_VERSION", 1)?;
+    module.add("SOURCE_COMPLETION_PROTOCOL_VERSION", 1)?;
     Ok(())
 }

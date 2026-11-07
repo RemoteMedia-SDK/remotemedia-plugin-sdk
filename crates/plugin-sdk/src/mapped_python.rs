@@ -12,7 +12,7 @@ use crate::native_worker::{
     WorkerCommand, WorkerInputCopies,
 };
 use remotemedia_py_env::PythonEnvConfig;
-use remotemedia_shared_memory::peer::CallContext;
+use remotemedia_shared_memory::peer::{CallContext, Protocols};
 use remotemedia_traits::{AsyncNodeWrapper, StreamingNode, StreamingNodeFactory};
 use remotemedia_types::{Error, Result};
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -43,6 +43,7 @@ pub struct MappedPythonFactory {
     pool: Option<SharedPool>,
     input_copies: Option<WorkerInputCopies>,
     output_copies: bool,
+    source_completion: bool,
     limits: Limits,
     startup_timeout: Duration,
     snapshot_inputs: Vec<String>,
@@ -65,6 +66,7 @@ impl MappedPythonFactory {
             buffer_declaration: None,
             input_copies: None,
             output_copies: false,
+            source_completion: false,
             limits: Limits::default(),
             startup_timeout: Duration::from_secs(30),
             snapshot_inputs: vec![],
@@ -87,6 +89,7 @@ impl MappedPythonFactory {
             buffer_declaration: None,
             input_copies: None,
             output_copies: false,
+            source_completion: false,
             limits: Limits::default(),
             startup_timeout: Duration::from_secs(30),
             snapshot_inputs: vec![],
@@ -106,6 +109,13 @@ impl MappedPythonFactory {
     /// needs its host's explicit output policy; input policy is independent.
     pub fn with_output_copies(mut self) -> Self {
         self.output_copies = true;
+        self
+    }
+
+    /// Require matching client/buffer wheels with explicit tick completion.
+    /// Registered output work must finish successfully before EOS commits.
+    pub fn with_source_completion(mut self) -> Self {
+        self.source_completion = true;
         self
     }
 
@@ -283,8 +293,11 @@ impl StreamingNodeFactory for MappedPythonFactory {
         } else {
             SnapshotMode::Disabled
         };
-        let snapshots = mode.protocol();
-        let output_copies = self.output_copies;
+        let protocols = Protocols {
+            snapshots: mode.protocol(),
+            output_copies: self.output_copies,
+            source_completion: self.source_completion,
+        };
         // Factories are synchronous and may run inside a host Tokio runtime.
         // Provision on an owned thread rather than nesting/blocking that runtime.
         let python = std::thread::Builder::new()
@@ -298,8 +311,7 @@ impl StreamingNodeFactory for MappedPythonFactory {
                     &config,
                     &provision_params,
                     &provision_identity,
-                    snapshots,
-                    output_copies,
+                    protocols,
                 ))
             })
             .map_err(|e| Error::Execution(e.to_string()))?
@@ -337,11 +349,7 @@ impl StreamingNodeFactory for MappedPythonFactory {
             worker_command.spawn_peer_with_resources(
                 pool,
                 self.limits,
-                remotemedia_shared_memory::peer::Protocols {
-                    snapshots,
-                    output_copies,
-                    source_completion: false,
-                },
+                protocols,
                 python.resources(),
             )
         }
