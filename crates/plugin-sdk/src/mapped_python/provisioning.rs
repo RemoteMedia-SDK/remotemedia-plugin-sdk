@@ -14,7 +14,15 @@ fn wheel_requirement(name: &str, path: &Path) -> Result<(String, String)> {
             "{name} must be a wheel artifact"
         )));
     }
-    let mut file = std::fs::File::open(&path).map_err(|e| Error::ConfigError(e.to_string()))?;
+    let digest = file_digest(&path)?;
+    let mut url = url::Url::from_file_path(path)
+        .map_err(|_| Error::ConfigError(format!("{name} wheel path cannot become a file URL")))?;
+    url.set_fragment(Some(&format!("sha256={digest}")));
+    Ok((format!("{name} @ {url}"), digest))
+}
+
+pub(super) fn file_digest(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path).map_err(|e| Error::ConfigError(e.to_string()))?;
     let mut hash = Sha256::new();
     let mut bytes = [0; 64 * 1024];
     loop {
@@ -26,11 +34,7 @@ fn wheel_requirement(name: &str, path: &Path) -> Result<(String, String)> {
         }
         hash.update(&bytes[..count]);
     }
-    let digest = hex::encode(hash.finalize());
-    let mut url = url::Url::from_file_path(path)
-        .map_err(|_| Error::ConfigError(format!("{name} wheel path cannot become a file URL")))?;
-    url.set_fragment(Some(&format!("sha256={digest}")));
-    Ok((format!("{name} @ {url}"), digest))
+    Ok(hex::encode(hash.finalize()))
 }
 
 pub(super) async fn provision(

@@ -4,6 +4,8 @@
 //! peer. Factory templates can be bound by the host to separate session pools.
 mod launch;
 mod provisioning;
+mod bundle;
+pub use bundle::MappedPythonBundle;
 
 use crate::native_worker::{
     input_copy_context, Limits, NativeWorkerNode, SessionWorkerFactory, SharedPool, SnapshotMode,
