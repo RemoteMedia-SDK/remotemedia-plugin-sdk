@@ -12,6 +12,8 @@ use std::{
 };
 use traits::rpc::{RpcMethod, RpcMode, RpcRequest, RpcResponder};
 mod native_worker_profile;
+#[cfg(windows)]
+mod windows_payload_guard;
 
 fn forward_probe(data: RuntimeData, copy: bool) -> Result<RuntimeData, Error> {
     if copy {
@@ -324,6 +326,8 @@ fn snapshot(
 }
 
 fn main() -> Result<(), Error> {
+    #[cfg(windows)]
+    windows_payload_guard::install();
     if std::env::args().any(|arg| arg == "--silent") {
         loop {
             std::thread::park();
