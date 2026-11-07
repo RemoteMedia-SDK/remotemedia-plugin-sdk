@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(all(target_os = "linux", feature = "test-linux-namespace"))]
+#[path = "cancellation/host_crash.rs"]
+mod host_crash;
+
 // This subprocess uses the same contained output owner as the system
 // and uv backends. It accesses the environment only after the parent has aborted
 // provisioning and attempted to obtain the environment's exclusive cache lock.
@@ -48,7 +52,15 @@ impl EnvBackend for CancellableBackend {
                 "--nocapture",
             ])
             .env("RM_CANCEL_PROVISION_ROOT", &info.path);
-        let output = command.output().await.map_err(cache_lease::lock_error)?;
+        let process = command.spawn().map_err(cache_lease::lock_error)?;
+        if std::env::var_os("RM_CACHE_CRASH_HOST").is_some() {
+            std::fs::write(info.path.join("guardian"), process.id().to_string()).unwrap();
+        }
+        let output = process
+            .capture_output()
+            .map_err(cache_lease::lock_error)?
+            .await
+            .map_err(cache_lease::lock_error)?;
         assert!(output.status.success());
         Ok(info)
     }

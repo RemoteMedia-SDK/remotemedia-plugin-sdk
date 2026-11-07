@@ -66,3 +66,6 @@ zip = "2"
 name = "python-probe-fixture"
 path = "tests/support/probe_fixture.rs"
 required-features = ["test-probe"]
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
