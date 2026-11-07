@@ -7,6 +7,9 @@ mod namespace;
 #[cfg(feature = "mapped-python")]
 #[path = "support/onnx_worker.rs"]
 mod onnx_worker;
+#[cfg(feature = "mapped-python")]
+#[path = "support/real_kokoro_worker.rs"]
+mod real_kokoro_worker;
 use remotemedia_plugin_sdk::{
     native_worker::{
         Limits, NativeWorkerFactory, NativeWorkerNode, PoolConfig, SessionId, SharedPool,
