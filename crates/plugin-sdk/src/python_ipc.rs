@@ -794,7 +794,9 @@ mod win_job {
         unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
             if snap == INVALID_HANDLE_VALUE {
-                eprintln!("[plugin-sdk python_ipc] cannot resume runner {pid}: thread snapshot failed");
+                eprintln!(
+                    "[plugin-sdk python_ipc] cannot resume runner {pid}: thread snapshot failed"
+                );
                 return;
             }
             let mut entry: THREADENTRY32 = std::mem::zeroed();

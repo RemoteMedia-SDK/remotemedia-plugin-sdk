@@ -77,7 +77,11 @@ fn default_deadline_ms() -> u64 {
 }
 
 impl CallRequestEnvelope {
-    pub fn new(endpoint: impl Into<String>, method: impl Into<String>, corr_id: impl Into<String>) -> Self {
+    pub fn new(
+        endpoint: impl Into<String>,
+        method: impl Into<String>,
+        corr_id: impl Into<String>,
+    ) -> Self {
         Self {
             endpoint: endpoint.into(),
             method: method.into(),
@@ -94,8 +98,15 @@ impl CallRequestEnvelope {
     }
 
     /// A cancellation for an in-flight call.
-    pub fn cancellation(endpoint: impl Into<String>, method: impl Into<String>, corr_id: impl Into<String>) -> Self {
-        Self { cancel: true, ..Self::new(endpoint, method, corr_id) }
+    pub fn cancellation(
+        endpoint: impl Into<String>,
+        method: impl Into<String>,
+        corr_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            cancel: true,
+            ..Self::new(endpoint, method, corr_id)
+        }
     }
 
     /// Wrap as the `__call__` aux envelope JSON a node emits on its output.
@@ -183,9 +194,15 @@ impl std::fmt::Display for CallErrorKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum CallReplyEvent {
-    Value { data: Value },
+    Value {
+        data: Value,
+    },
     End,
-    Error { error: CallErrorKind, #[serde(default)] message: String },
+    Error {
+        error: CallErrorKind,
+        #[serde(default)]
+        message: String,
+    },
 }
 
 /// Argument of a `__call_reply__` invocation.
@@ -201,13 +218,32 @@ pub struct CallReplyEnvelope {
 
 impl CallReplyEnvelope {
     pub fn value(corr_id: impl Into<String>, data: Value) -> Self {
-        Self { corr_id: corr_id.into(), event: CallReplyEvent::Value { data }, meta: None }
+        Self {
+            corr_id: corr_id.into(),
+            event: CallReplyEvent::Value { data },
+            meta: None,
+        }
     }
     pub fn end(corr_id: impl Into<String>) -> Self {
-        Self { corr_id: corr_id.into(), event: CallReplyEvent::End, meta: None }
+        Self {
+            corr_id: corr_id.into(),
+            event: CallReplyEvent::End,
+            meta: None,
+        }
     }
-    pub fn error(corr_id: impl Into<String>, error: CallErrorKind, message: impl Into<String>) -> Self {
-        Self { corr_id: corr_id.into(), event: CallReplyEvent::Error { error, message: message.into() }, meta: None }
+    pub fn error(
+        corr_id: impl Into<String>,
+        error: CallErrorKind,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            corr_id: corr_id.into(),
+            event: CallReplyEvent::Error {
+                error,
+                message: message.into(),
+            },
+            meta: None,
+        }
     }
     /// `true` for the last chunk of a call (`end` or `error`).
     pub fn is_terminal(&self) -> bool {
@@ -249,12 +285,37 @@ mod tests {
 
     #[test]
     fn reply_wire_shape_is_stable() {
-        let v = serde_json::to_value(CallReplyEnvelope::value("c", serde_json::json!({"tool": "x"}))).unwrap();
-        assert_eq!(v, serde_json::json!({"corr_id": "c", "kind": "value", "data": {"tool": "x"}}));
-        let e = serde_json::to_value(CallReplyEnvelope::error("c", CallErrorKind::NoResponder, "none")).unwrap();
-        assert_eq!(e, serde_json::json!({"corr_id": "c", "kind": "error", "error": "no_responder", "message": "none"}));
+        let v = serde_json::to_value(CallReplyEnvelope::value(
+            "c",
+            serde_json::json!({"tool": "x"}),
+        ))
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"corr_id": "c", "kind": "value", "data": {"tool": "x"}})
+        );
+        let e = serde_json::to_value(CallReplyEnvelope::error(
+            "c",
+            CallErrorKind::NoResponder,
+            "none",
+        ))
+        .unwrap();
+        assert_eq!(
+            e,
+            serde_json::json!({"corr_id": "c", "kind": "error", "error": "no_responder", "message": "none"})
+        );
         assert!(CallReplyEnvelope::end("c").is_terminal());
-        for k in ["no_responder", "responder_gone", "timeout", "overloaded", "cancelled", "unavailable", "unsupported", "not_found", "error"] {
+        for k in [
+            "no_responder",
+            "responder_gone",
+            "timeout",
+            "overloaded",
+            "cancelled",
+            "unavailable",
+            "unsupported",
+            "not_found",
+            "error",
+        ] {
             assert_eq!(CallErrorKind::parse(k).unwrap().as_str(), k);
         }
     }

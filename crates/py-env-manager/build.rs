@@ -19,7 +19,6 @@
 /// ```sh
 /// UV_BINARY_PATH=/path/to/uv cargo build --features bundled-uv-embedded
 /// ```
-
 use std::io::Read;
 use std::path::Path;
 
@@ -144,7 +143,12 @@ fn uv_platform_target() -> Option<&'static str> {
 /// Copy `src` to `dest`, preserving the executable bit on Unix.
 fn copy_with_perms(src: &Path, dest: &Path) {
     std::fs::copy(src, dest).unwrap_or_else(|e| {
-        panic!("Failed to copy uv binary from '{}' to '{}': {}", src.display(), dest.display(), e)
+        panic!(
+            "Failed to copy uv binary from '{}' to '{}': {}",
+            src.display(),
+            dest.display(),
+            e
+        )
     });
     #[cfg(unix)]
     {
