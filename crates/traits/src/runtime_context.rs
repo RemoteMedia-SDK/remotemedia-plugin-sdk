@@ -408,6 +408,12 @@ mod tests {
 /// plugin code can report loading progress through the host's control
 /// bus without depending on `SessionControl` directly.
 pub trait InitializeContextRead: Send + Sync {
+    /// Optional host-bound copy authority retained through initialization.
+    /// Missing authority must not be interpreted as permission for strict work.
+    fn copy_context(&self) -> Option<remotemedia_types::CopyContext> {
+        None
+    }
+
     /// Session ID for this pipeline run.
     fn session_id(&self) -> &str;
 

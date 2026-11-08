@@ -201,6 +201,12 @@ impl CopyContext {
         &self.0.boundary
     }
 
+    /// Whether both handles retain the exact same immutable authority. Matching
+    /// boundary labels or independently wrapped ledgers do not establish identity.
+    pub fn same_authority(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
     /// Check before allocating destination storage. Zero-byte operations do not
     /// materialize a payload and are allowed under either policy.
     pub fn check(&self, reason: CopyReason, bytes: u64) -> Result<(), CopyRejected> {
