@@ -30,7 +30,7 @@ default = []
 # default so Rust-only plugins don't pay for the include_dir / py-env /
 # dirs dep weight. Python plugin crates opt in via
 # `remotemedia-plugin-sdk = { features = ["python-plugin"] }`.
-python-plugin = ["dep:include_dir", "dep:remotemedia-py-env", "dep:dirs", "dep:sha2", "dep:hex", "dep:iceoryx2", "dep:libc"]
+python-plugin = ["dep:include_dir", "dep:remotemedia-py-env", "dep:dirs", "dep:sha2", "dep:hex", "dep:iceoryx2", "dep:libc", "dep:windows-sys"]
 # Enables in-process Python execution via PyO3 (Android, and opt-in on Linux/macOS)
 inprocess-python = ["dep:include_dir", "dep:remotemedia-py-env", "dep:dirs", "dep:sha2", "dep:hex", "dep:pyo3", "dep:pyo3-async-runtimes", "dep:numpy"]
 # Forward bundled-uv feature flags to `remotemedia-py-env` so plugins
@@ -82,6 +82,18 @@ numpy = { workspace = true, optional = true }
 # SIGKILL'd / segfaulted" safety net.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true, optional = true }
+
+# Windows has no parent-death signal: each runner (and the real interpreter
+# a venv launcher starts) runs in its own kill-on-close job object, so it
+# ends with its node or with the host process, even on a crash.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
 
 [dev-dependencies]
 # `macros` is needed for #[tokio::test]; `rt` for current_thread flavor in
