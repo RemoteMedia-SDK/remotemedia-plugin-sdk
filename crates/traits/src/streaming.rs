@@ -508,6 +508,27 @@ pub trait StreamingNode: Send + Sync {
         Ok(())
     }
 
+    /// Runtime capability handshake, the backward half (`Adaptive` nodes).
+    ///
+    /// After every node is initialized, the runtime collects what the nodes
+    /// downstream of this one accept (their `actual_capabilities()` inputs,
+    /// e.g. the rates a speaker's device takes) and passes their
+    /// intersection as `accepted` (input constraints). The node picks the
+    /// output it will produce, keeping each upstream value it already has
+    /// when `accepted` allows it (mono stays mono, 48 kHz stays 48 kHz) and
+    /// otherwise the nearest accepted value, and returns that output so the
+    /// runtime can check the connections after it. An explicit param that
+    /// `accepted` rules out is an error, not something to override.
+    ///
+    /// Called after `configure_from_upstream`, before any data flows.
+    /// Default: `Ok(None)` (the node does not adapt to downstream).
+    fn configure_for_downstream(
+        &self,
+        _accepted: &MediaCapabilities,
+    ) -> Result<Option<MediaCapabilities>, Error> {
+        Ok(None)
+    }
+
     // =========================================================================
     // Runtime Context Methods (node-runtime-context plan, PR 2)
     // =========================================================================

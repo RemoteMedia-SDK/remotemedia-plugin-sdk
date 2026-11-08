@@ -454,6 +454,49 @@ pub enum IpcCommand {
         frame_tx: mpsc::Sender<Vec<u8>>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Out-of-band, fire-and-forget publish on the input channel. Unlike
+    /// the `Round*` commands it is also honoured *while a round is in
+    /// flight* (the round loops poll for it), and it expects no output and
+    /// no `EndOfInput`. Carries endpoint-call `__call_reply__` frames to a
+    /// Python plugin that is awaiting the reply inside `process()`
+    /// (openspec: add-agent-harness-integration).
+    Send { req_bytes: Vec<u8> },
+}
+
+/// Pending commands the IPC thread pulled off its channel while a round was
+/// in flight (out-of-band `Send`s are published immediately; everything
+/// else waits here for the round to finish, in order).
+struct Side<'a> {
+    cmd_rx: &'a mut mpsc::Receiver<IpcCommand>,
+    stash: &'a mut std::collections::VecDeque<IpcCommand>,
+}
+
+fn publish_bytes(
+    publisher: &iceoryx2::port::publisher::Publisher<ipc::Service, [u8], ()>,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let sample = publisher
+        .loan_slice_uninit(bytes.len())
+        .map_err(|e| format!("loan: {e:?}"))?;
+    let sample = sample.write_from_slice(bytes);
+    sample.send().map_err(|e| format!("send: {e:?}"))?;
+    Ok(())
+}
+
+impl Side<'_> {
+    /// Publish queued out-of-band sends; stash any other command.
+    fn pump(&mut self, publisher: &iceoryx2::port::publisher::Publisher<ipc::Service, [u8], ()>) {
+        while let Ok(cmd) = self.cmd_rx.try_recv() {
+            match cmd {
+                IpcCommand::Send { req_bytes } => {
+                    if let Err(e) = publish_bytes(publisher, &req_bytes) {
+                        eprintln!("[plugin-sdk python_ipc] out-of-band send failed: {e}");
+                    }
+                }
+                other => self.stash.push_back(other),
+            }
+        }
+    }
 }
 
 /// Spawn the runner subprocess + dedicated IPC thread for one
@@ -484,17 +527,26 @@ pub fn spawn_runner_and_ipc(
     let control_channel = format!("control/{session_id}_{node_id}");
 
     // Start the IPC thread FIRST so the iceoryx2 services (input,
-    // output, control) exist by the time Python attaches.
+    // output, control) exist by the time Python attaches. The thread
+    // ends the runner when every `cmd_tx` is gone (node dropped).
+    let lifetime: Arc<Mutex<Option<RunnerLifetime>>> = Arc::new(Mutex::new(None));
     let cmd_tx = spawn_ipc_thread(
         in_channel,
         out_channel,
         control_channel,
         session_id.to_string(),
         node_id.to_string(),
+        lifetime.clone(),
     )?;
 
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
+    // The runner talks to the host only over iceoryx2 (params come via
+    // `--params`), so it must not inherit the host's stdin. A stdio-based
+    // host (e.g. an MCP server) keeps a blocking read pending on its stdin
+    // pipe; on Windows a child sharing that synchronous pipe handle hangs in
+    // interpreter start-up and never sends READY.
+    command.stdin(Stdio::null());
     // Stderr handling: by default inherit (so a host with a real terminal
     // sees the runner's logs). When the parent's stderr inheritance is
     // unreliable (e.g. NAPI / Node hides it from grandchild processes),
@@ -542,10 +594,28 @@ pub fn spawn_runner_and_ipc(
         }
     }
 
+    // Windows: start suspended so the runner joins its kill-on-close job
+    // before it can run (a venv launcher immediately starts the real
+    // interpreter, which must be born inside the job too).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+    }
+
     let child = command
         .spawn()
         .map_err(|e| format!("spawn runner {}: {e}", argv[0]))?;
+    #[cfg(windows)]
+    let job = win_job::adopt_and_resume(&child);
     let child = Arc::new(Mutex::new(child));
+    if let Ok(mut slot) = lifetime.lock() {
+        *slot = Some(RunnerLifetime {
+            child: child.clone(),
+            #[cfg(windows)]
+            _job: job,
+        });
+    }
 
     // Wait for the runner to publish `b"READY"` on the control
     // channel. Python's `Node._publish_ready_signal` emits this after
@@ -628,6 +698,125 @@ pub fn spawn_runner_and_ipc(
     Ok((cmd_tx, child))
 }
 
+/// Ends a runner subprocess when dropped (by the IPC thread once the node's
+/// last `cmd_tx` is gone). On Windows closing the job also ends the real
+/// interpreter a venv launcher started, which killing the launcher alone
+/// would leave running.
+struct RunnerLifetime {
+    child: Arc<Mutex<Child>>,
+    #[cfg(windows)]
+    _job: Option<win_job::Job>,
+}
+
+impl Drop for RunnerLifetime {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        drop(self._job.take());
+        if let Ok(mut child) = self.child.lock() {
+            if matches!(child.try_wait(), Ok(None)) {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+    }
+}
+
+/// One kill-on-close job object per runner. The handle closes when the
+/// node goes away or, at the latest, when the host process ends (even on a
+/// crash), killing every process in the job.
+#[cfg(windows)]
+mod win_job {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    pub(super) struct Job(HANDLE);
+
+    // SAFETY: a job handle is a kernel handle usable from any thread.
+    unsafe impl Send for Job {}
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // SAFETY: we own the handle; closing the last one kills the members.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    fn new_job() -> Option<Job> {
+        // SAFETY: plain Win32 calls on a handle we own.
+        unsafe {
+            let handle = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if handle == 0 {
+                return None;
+            }
+            let job = Job(handle);
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            (ok != 0).then_some(job)
+        }
+    }
+
+    /// Put the (suspended) `child` in a fresh job, then let it run. Always
+    /// resumes the child, even when the job cannot be set up.
+    pub(super) fn adopt_and_resume(child: &std::process::Child) -> Option<Job> {
+        let job = new_job().and_then(|job| {
+            // SAFETY: both handles are valid for the duration of the call.
+            let ok = unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE) };
+            (ok != 0).then_some(job)
+        });
+        if job.is_none() {
+            eprintln!(
+                "[plugin-sdk python_ipc] runner {} may outlive its host: job object setup failed",
+                child.id()
+            );
+        }
+        resume(child.id());
+        job
+    }
+
+    /// Resume every thread of `pid` (a CREATE_SUSPENDED process has one).
+    fn resume(pid: u32) {
+        // SAFETY: Toolhelp/thread calls on handles we open and close here.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                eprintln!(
+                    "[plugin-sdk python_ipc] cannot resume runner {pid}: thread snapshot failed"
+                );
+                return;
+            }
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut ok = Thread32First(snap, &mut entry) != 0;
+            while ok {
+                if entry.th32OwnerProcessID == pid {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if thread != 0 {
+                        ResumeThread(thread);
+                        CloseHandle(thread);
+                    }
+                }
+                ok = Thread32Next(snap, &mut entry) != 0;
+            }
+            CloseHandle(snap);
+        }
+    }
+}
+
 /// Owns iceoryx2 publisher + subscriber on a dedicated OS thread
 /// (`Publisher`/`Subscriber` are `!Send`). Async callers use the
 /// returned `mpsc::Sender<IpcCommand>` to round-trip data.
@@ -637,6 +826,7 @@ fn spawn_ipc_thread(
     control_channel: String,
     session_id: String,
     node_id: String,
+    lifetime: Arc<Mutex<Option<RunnerLifetime>>>,
 ) -> Result<mpsc::Sender<IpcCommand>, String> {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<IpcCommand>(64);
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
@@ -733,8 +923,32 @@ fn spawn_ipc_thread(
             // by reference so the per-command closures don't have to
             // clone the strings.
             let control_ctx = (session_id.as_str(), node_id.as_str());
-            while let Some(cmd) = cmd_rx.blocking_recv() {
+            let mut stash = std::collections::VecDeque::<IpcCommand>::new();
+            loop {
+                let cmd = match stash.pop_front() {
+                    Some(cmd) => cmd,
+                    None => match cmd_rx.blocking_recv() {
+                        Some(cmd) => cmd,
+                        None => {
+                            // Every handle to this node is gone: end the
+                            // runner (and its process tree) now instead of
+                            // leaving it polling an orphaned channel.
+                            let ended = lifetime.lock().ok().and_then(|mut s| s.take());
+                            drop(ended);
+                            break;
+                        }
+                    },
+                };
+                let mut side = Side {
+                    cmd_rx: &mut cmd_rx,
+                    stash: &mut stash,
+                };
                 match cmd {
+                    IpcCommand::Send { req_bytes } => {
+                        if let Err(e) = publish_bytes(&publisher, &req_bytes) {
+                            eprintln!("[plugin-sdk python_ipc] out-of-band send failed: {e}");
+                        }
+                    }
                     IpcCommand::WaitForReady { timeout, reply } => {
                         // During READY handshake we still drain
                         // PROGRESS:/PUBLISH: via the hook so a Python
@@ -752,6 +966,7 @@ fn spawn_ipc_thread(
                             &control_subscriber,
                             control_ctx,
                             &req_bytes,
+                            &mut side,
                         );
                         let _ = reply.send(result);
                     }
@@ -762,6 +977,7 @@ fn spawn_ipc_thread(
                             &control_subscriber,
                             control_ctx,
                             &req_bytes,
+                            &mut side,
                         );
                         let _ = reply.send(result);
                     }
@@ -777,6 +993,7 @@ fn spawn_ipc_thread(
                             control_ctx,
                             &req_bytes,
                             &frame_tx,
+                            &mut side,
                         );
                         // Drop frame_tx BEFORE replying so the consumer's
                         // `while let Some(...) = frame_rx.recv().await`
@@ -860,12 +1077,9 @@ fn round_trip(
     control_subscriber: &iceoryx2::port::subscriber::Subscriber<ipc::Service, [u8], ()>,
     ctx: (&str, &str),
     req: &[u8],
+    side: &mut Side<'_>,
 ) -> Result<Vec<u8>, String> {
-    let sample = publisher
-        .loan_slice_uninit(req.len())
-        .map_err(|e| format!("loan: {e:?}"))?;
-    let sample = sample.write_from_slice(req);
-    sample.send().map_err(|e| format!("send: {e:?}"))?;
+    publish_bytes(publisher, req)?;
 
     let mut first: Option<Vec<u8>> = None;
     loop {
@@ -873,6 +1087,7 @@ fn round_trip(
         // / `publish_to_node_port` calls from inside `process()` are
         // surfaced promptly rather than after the turn ends.
         drain_control_messages(control_subscriber, ctx);
+        side.pump(publisher);
         match subscriber
             .receive()
             .map_err(|e| format!("receive: {e:?}"))?
@@ -915,16 +1130,14 @@ fn round_trip_multi(
     control_subscriber: &iceoryx2::port::subscriber::Subscriber<ipc::Service, [u8], ()>,
     ctx: (&str, &str),
     req: &[u8],
+    side: &mut Side<'_>,
 ) -> Result<Vec<Vec<u8>>, String> {
-    let sample = publisher
-        .loan_slice_uninit(req.len())
-        .map_err(|e| format!("loan: {e:?}"))?;
-    let sample = sample.write_from_slice(req);
-    sample.send().map_err(|e| format!("send: {e:?}"))?;
+    publish_bytes(publisher, req)?;
 
     let mut outputs: Vec<Vec<u8>> = Vec::new();
     loop {
         drain_control_messages(control_subscriber, ctx);
+        side.pump(publisher);
         match subscriber
             .receive()
             .map_err(|e| format!("receive: {e:?}"))?
@@ -969,16 +1182,14 @@ fn round_trip_streaming(
     ctx: (&str, &str),
     req: &[u8],
     frame_tx: &mpsc::Sender<Vec<u8>>,
+    side: &mut Side<'_>,
 ) -> Result<(), String> {
-    let sample = publisher
-        .loan_slice_uninit(req.len())
-        .map_err(|e| format!("loan: {e:?}"))?;
-    let sample = sample.write_from_slice(req);
-    sample.send().map_err(|e| format!("send: {e:?}"))?;
+    publish_bytes(publisher, req)?;
 
     let mut consumer_alive = true;
     loop {
         drain_control_messages(control_subscriber, ctx);
+        side.pump(publisher);
         match subscriber
             .receive()
             .map_err(|e| format!("receive: {e:?}"))?

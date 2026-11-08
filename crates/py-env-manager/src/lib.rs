@@ -738,6 +738,14 @@ impl PythonEnvManager {
                 Some((src, origin)) => {
                     // Single requirements.txt line — the `-e <path>` form
                     // must not be split across lines or `pip` rejects it.
+                    // pip splits option lines shell-style, which eats the
+                    // backslashes of a Windows path (`D:\a\b` -> `D:ab`);
+                    // forward slashes work for pip and uv on every OS.
+                    let src = if cfg!(windows) {
+                        src.replace('\\', "/")
+                    } else {
+                        src
+                    };
                     config.base_deps = vec![format!("-e {}", src)];
                     tracing::info!(
                         src = %src,
