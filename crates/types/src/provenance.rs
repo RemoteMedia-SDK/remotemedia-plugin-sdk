@@ -30,6 +30,14 @@ impl Drop for AcceptedBy {
 }
 
 impl Provenance {
+    pub(crate) fn same_as(&self, other: &Self) -> bool {
+        self.budget.as_ref().map(Arc::as_ptr) == other.budget.as_ref().map(Arc::as_ptr)
+            && self.allocation.as_ref().map(Arc::as_ptr)
+                == other.allocation.as_ref().map(Arc::as_ptr)
+            && self.forwarding.as_ref().map(Arc::as_ptr)
+                == other.forwarding.as_ref().map(Arc::as_ptr)
+    }
+
     fn accepted_by(&self, scope: &Arc<()>) -> bool {
         let mut link = self.forwarding.as_deref();
         while let Some(accepted) = link {

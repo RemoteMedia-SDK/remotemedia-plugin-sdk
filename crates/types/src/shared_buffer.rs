@@ -173,6 +173,23 @@ impl<T> SharedBuffer<T> {
         }
     }
 
+    /// Join adjacent views of the same owner without reading or copying payloads.
+    /// Both views must retain identical budget and admission provenance; a join
+    /// must never drop the second view's credit or widen its forwarding authority.
+    pub fn try_join(&self, next: &Self) -> Option<Self> {
+        if !self.shares_storage(next)
+            || self.range.end != next.range.start
+            || !self.provenance.same_as(&next.provenance)
+        {
+            return None;
+        }
+        Some(Self {
+            storage: self.storage.clone(),
+            range: self.range.start..next.range.end,
+            provenance: self.provenance.clone(),
+        })
+    }
+
     /// Recover exclusive write access without allocation or copying, if the
     /// backing Vec or Arc slice has no other views. External owners cannot be
     /// reopened: they may have remote readers not represented by local Arc counts.
@@ -343,9 +360,15 @@ impl<T: Clone> SharedBuffer<T> {
 
 impl<T> From<Vec<T>> for SharedBuffer<T> {
     fn from(value: Vec<T>) -> Self {
+        Arc::new(value).into()
+    }
+}
+
+impl<T> From<Arc<Vec<T>>> for SharedBuffer<T> {
+    fn from(value: Arc<Vec<T>>) -> Self {
         let len = value.len();
         Self {
-            storage: Storage::Vec(Arc::new(value)),
+            storage: Storage::Vec(value),
             range: 0..len,
             provenance: Default::default(),
         }
