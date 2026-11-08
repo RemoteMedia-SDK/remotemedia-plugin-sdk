@@ -286,6 +286,17 @@ pub trait AsyncStreamingNode: Send + Sync {
         Vec::new()
     }
 
+    /// Latest-input-wins. When `true`, the session router cancels this
+    /// node's in-flight call as soon as a newer data input arrives,
+    /// instead of queueing the new input behind the running call.
+    ///
+    /// Aux-port envelopes (`barge_in`, `context`, ...) are never "newer
+    /// input". Cancellation still honours any active `ProtectGuard`.
+    /// Default `false` (inputs are processed strictly in order).
+    fn supersede_on_new_input(&self) -> bool {
+        false
+    }
+
     /// May run concurrently with media and other RPCs. Host context owns identity.
     async fn call_rpc(
         &self,
@@ -401,6 +412,17 @@ pub trait StreamingNode: Send + Sync {
     /// Methods handled on the dedicated control RPC channel. Empty opts out.
     fn rpc_methods(&self) -> Vec<crate::rpc::RpcMethod> {
         Vec::new()
+    }
+
+    /// Latest-input-wins. When `true`, the session router cancels this
+    /// node's in-flight call as soon as a newer data input arrives,
+    /// instead of queueing the new input behind the running call.
+    ///
+    /// Aux-port envelopes (`barge_in`, `context`, ...) are never "newer
+    /// input". Cancellation still honours any active `ProtectGuard`.
+    /// Default `false` (inputs are processed strictly in order).
+    fn supersede_on_new_input(&self) -> bool {
+        false
     }
 
     /// May run concurrently with media and other RPCs. Host context owns identity.
@@ -608,6 +630,10 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
 
     fn rpc_methods(&self) -> Vec<crate::rpc::RpcMethod> {
         self.0.rpc_methods()
+    }
+
+    fn supersede_on_new_input(&self) -> bool {
+        self.0.supersede_on_new_input()
     }
 
     async fn call_rpc(
