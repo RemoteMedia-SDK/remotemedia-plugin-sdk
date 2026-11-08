@@ -541,6 +541,12 @@ pub fn spawn_runner_and_ipc(
 
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
+    // The runner talks to the host only over iceoryx2 (params come via
+    // `--params`), so it must not inherit the host's stdin. A stdio-based
+    // host (e.g. an MCP server) keeps a blocking read pending on its stdin
+    // pipe; on Windows a child sharing that synchronous pipe handle hangs in
+    // interpreter start-up and never sends READY.
+    command.stdin(Stdio::null());
     // Stderr handling: by default inherit (so a host with a real terminal
     // sees the runner's logs). When the parent's stderr inheritance is
     // unreliable (e.g. NAPI / Node hides it from grandchild processes),
