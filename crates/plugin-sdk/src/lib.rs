@@ -17,6 +17,7 @@ pub use remotemedia_types as types;
 pub use rmp_serde;
 
 pub mod adapter;
+pub mod endpoint_call;
 pub mod params;
 
 #[cfg(all(feature = "python-plugin", not(target_os = "android")))]

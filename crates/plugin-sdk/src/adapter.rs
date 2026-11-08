@@ -209,7 +209,11 @@ where
             // `tokio::sync::Mutex`, `tokio::time::sleep`,
             // `tokio::spawn`) sees a real runtime, instead of the
             // empty FFI polling-thread context.
-            let join = plugin_runtime().spawn(async move { inner.process(data).await });
+            // Batched path: endpoint calls fail fast with `unsupported`
+            // (outputs only leave after `process` returns).
+            let join = plugin_runtime().spawn(crate::endpoint_call::on_batched_path(async move {
+                inner.process(data).await
+            }));
             let result = match join.await {
                 Ok(r) => r,
                 Err(e) => {
@@ -281,7 +285,7 @@ where
             let outputs = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
             let outputs_for_cb = Arc::clone(&outputs);
 
-            let join = plugin_runtime().spawn(async move {
+            let join = plugin_runtime().spawn(crate::endpoint_call::on_batched_path(async move {
                 let cb =
                     move |data: RuntimeData| -> std::result::Result<(), remotemedia_types::Error> {
                         let bytes = rmp_serde::to_vec_named(&data).map_err(|e| {
@@ -291,7 +295,7 @@ where
                         Ok(())
                     };
                 inner.process_streaming(data, None, cb).await
-            });
+            }));
 
             match join.await {
                 Ok(Ok(_count)) => {

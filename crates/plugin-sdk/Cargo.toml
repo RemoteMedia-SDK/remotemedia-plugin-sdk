@@ -54,7 +54,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 inventory = { workspace = true }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 
 # python-plugin feature deps (opt-in).
 include_dir = { version = "0.7", optional = true }
