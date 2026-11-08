@@ -113,13 +113,17 @@ impl AudioSamples {
     /// Number of samples.
     #[inline]
     pub fn len(&self) -> usize {
-        self.as_slice().len()
+        match self {
+            Self::Vec(samples) => samples.len(),
+            Self::Arc(samples) => samples.len(),
+            Self::Shared(samples) => samples.len(),
+        }
     }
 
     /// Whether the sample buffer is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.as_slice().is_empty()
+        self.len() == 0
     }
 
     /// Consume and return a `Vec<f32>`.
@@ -874,7 +878,7 @@ impl RuntimeData {
     /// Text, JSON, control and file references are metadata in the sharing protocol.
     pub fn bulk_payload_bytes(&self) -> usize {
         match self {
-            Self::Audio { samples, .. } => std::mem::size_of_val(samples.as_slice()),
+            Self::Audio { samples, .. } => samples.len() * std::mem::size_of::<f32>(),
             Self::Video { pixel_data, .. } => pixel_data.len(),
             Self::Image { data, .. }
             | Self::Tensor { data, .. }

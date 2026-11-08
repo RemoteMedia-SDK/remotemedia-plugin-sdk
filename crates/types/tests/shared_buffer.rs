@@ -2,6 +2,39 @@ use remotemedia_types::{AudioSamples, ImageFormat, PixelFormat, RuntimeData, Sha
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+#[test]
+fn audio_length_and_byte_count_do_not_access_external_payloads() {
+    struct MeasuredOwner(Arc<AtomicUsize>);
+    impl AsRef<[f32]> for MeasuredOwner {
+        fn as_ref(&self) -> &[f32] {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            &[0.25, -0.5]
+        }
+    }
+    let reads = Arc::new(AtomicUsize::new(0));
+    let samples = SharedBuffer::from_owner(MeasuredOwner(reads.clone()));
+    let initial = reads.load(Ordering::SeqCst);
+    let samples: AudioSamples = samples.into();
+    assert_eq!(samples.len(), 2);
+    assert!(!samples.is_empty());
+    let data = RuntimeData::Audio {
+        samples,
+        sample_rate: 48000,
+        channels: 1,
+        stream_id: None,
+        timestamp_us: None,
+        arrival_ts_us: None,
+        metadata: None,
+    };
+    assert_eq!(data.bulk_payload_bytes(), 8);
+    assert_eq!(reads.load(Ordering::SeqCst), initial);
+    let RuntimeData::Audio { samples, .. } = data else {
+        unreachable!()
+    };
+    assert_eq!(samples.as_slice(), &[0.25, -0.5]);
+    assert!(reads.load(Ordering::SeqCst) > initial);
+}
+
 struct TrackedOwner {
     values: Vec<f32>,
     releases: Arc<AtomicUsize>,
