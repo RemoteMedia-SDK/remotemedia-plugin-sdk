@@ -152,6 +152,15 @@ impl CopyLedger for LocalLedger {
 #[derive(Clone)]
 pub struct CopyContext(Arc<Inner>);
 
+impl std::fmt::Debug for CopyContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CopyContext")
+            .field("policy", &self.policy())
+            .field("boundary", &self.boundary())
+            .finish_non_exhaustive()
+    }
+}
+
 impl CopyContext {
     pub fn new(policy: CopyPolicy, boundary: impl Into<String>) -> Self {
         Self::from_ledger(
