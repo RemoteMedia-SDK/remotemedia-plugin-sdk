@@ -245,3 +245,23 @@ fn compatibility_dictionary_audio_roundtrip_keeps_legacy_path_working() {
     let input = audio(vec![0.25; 4].into());
     assert_eq!(handle("PassThrough").process(&input).unwrap(), input);
 }
+
+#[test]
+fn contextual_legacy_api_refuses_strict_before_python_invocation_even_for_metadata() {
+    use remotemedia_types::{CopyContext, CopyPolicy};
+    // Gain has no legacy process methods: invoking Python would give AttributeError.
+    let node = handle("Gain");
+    let copies = CopyContext::new(CopyPolicy::RequireZeroCopy, "legacy-guard");
+    let input = RuntimeData::Text("metadata".into());
+    let error = node.process_with_copy_context(&input, &copies).unwrap_err();
+    assert!(error.to_string().contains("requires allow_copies"));
+    let error = node
+        .process_streaming_with_copy_context(&input, &copies)
+        .unwrap_err();
+    assert!(error.to_string().contains("requires allow_copies"));
+    assert!(copies
+        .report()
+        .entries
+        .iter()
+        .all(|(_, counts)| counts.copied_bytes == 0));
+}
