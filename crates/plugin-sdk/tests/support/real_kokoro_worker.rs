@@ -73,8 +73,22 @@ fn checksum(samples: &[f32]) -> String {
 #[test]
 #[ignore = "requires real Kokoro CPU dependencies, exact model snapshot and matching native extension"]
 fn real_kokoro_mapped_copy_policy_forwarding_and_shutdown() {
+    verify(false);
+}
+
+#[test]
+#[ignore = "requires real Kokoro CPU dependencies, exact model snapshot and matching native extension"]
+fn real_kokoro_direct_output_is_strict_and_matches_reference() {
+    verify(true);
+}
+
+fn verify(runtime: bool) {
     let root = PathBuf::from(std::env::var("MAPPED_SDK_PYTHON").unwrap());
-    let evidence = PathBuf::from(std::env::var("KOKORO_PROBE_OUTPUT").unwrap());
+    let evidence = PathBuf::from(std::env::var("KOKORO_PROBE_OUTPUT").unwrap()).join(if runtime {
+        "runtime"
+    } else {
+        "model"
+    });
     std::fs::create_dir_all(&evidence).unwrap();
     let trace = evidence.join("model-outputs.jsonl");
     assert!(
@@ -84,6 +98,7 @@ fn real_kokoro_mapped_copy_policy_forwarding_and_shutdown() {
     let params = serde_json::json!({
         "snapshot": std::env::var("KOKORO_MODEL_SNAPSHOT").unwrap(),
         "trace": trace, "voice": "af_heart", "speed": 1.0, "sample_rate": 24000,
+        "device": "cpu", "output_allocation": if runtime { "runtime" } else { "model" },
     });
     let mut command = Command::new(std::env::var("MAPPED_WORKER_PYTHON").unwrap());
     command.env("PYTHONPATH", &root).env("HF_HUB_OFFLINE", "1").args([
@@ -143,27 +158,34 @@ fn real_kokoro_mapped_copy_policy_forwarding_and_shutdown() {
         allocator.clone(),
         Some(strict.clone()),
     );
-    assert!(error.unwrap_err().contains("copy policy denied"));
-    assert!(
-        rejected.is_empty(),
-        "denial must not emit audio or speech end"
-    );
-    let (outputs, result) = call(
-        &mut peer,
-        &handle,
-        CallKind::Stream,
-        text(),
-        allocator.clone(),
-        Some(allow.clone()),
-    );
-    result.unwrap();
+    let outputs = if runtime {
+        error.unwrap();
+        rejected
+    } else {
+        assert!(error.unwrap_err().contains("copy policy denied"));
+        assert!(
+            rejected.is_empty(),
+            "denial must not emit audio or speech end"
+        );
+        let (outputs, result) = call(
+            &mut peer,
+            &handle,
+            CallKind::Stream,
+            text(),
+            allocator.clone(),
+            Some(allow.clone()),
+        );
+        result.unwrap();
+        outputs
+    };
     assert_eq!(outputs.len(), 3);
     let rows: Vec<serde_json::Value> = std::fs::read_to_string(&trace)
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(rows.len(), 3); // One rejected model chunk, two accepted chunks.
+    let offset = usize::from(!runtime);
+    assert_eq!(rows.len(), 2 + offset);
     let mut samples = 0_u64;
     for (index, data) in outputs[..2].iter().enumerate() {
         assert!(pool.owns_payload(data));
@@ -172,12 +194,15 @@ fn real_kokoro_mapped_copy_policy_forwarding_and_shutdown() {
         assert!(values.iter().any(|v| *v != 0.0));
         assert_eq!(
             values.len() as u64,
-            rows[index + 1]["samples"].as_u64().unwrap()
+            rows[index + offset]["samples"].as_u64().unwrap()
         );
         assert_eq!(
             checksum(values),
-            rows[index + 1]["sha256"].as_str().unwrap()
+            rows[index + offset]["sha256"].as_str().unwrap()
         );
+        if runtime {
+            assert_eq!(rows[index]["reference_equal"], true);
+        }
         let RuntimeData::Audio {
             metadata: Some(metadata),
             ..
@@ -203,7 +228,11 @@ fn real_kokoro_mapped_copy_policy_forwarding_and_shutdown() {
         .1;
     assert_eq!(
         (count.completed, count.copied_bytes, count.failed),
-        (2, samples * 4, 0)
+        if runtime {
+            (0, 0, 0)
+        } else {
+            (2, samples * 4, 0)
+        }
     );
     let denied = &strict
         .report()
@@ -214,12 +243,31 @@ fn real_kokoro_mapped_copy_policy_forwarding_and_shutdown() {
         .1;
     assert_eq!(
         (denied.rejected, denied.rejected_bytes, denied.copied_bytes),
-        (1, rows[0]["samples"].as_u64().unwrap() * 4, 0)
+        if runtime {
+            (0, 0, 0)
+        } else {
+            (1, rows[0]["samples"].as_u64().unwrap() * 4, 0)
+        }
     );
     assert!(
         pool.allocate::<u8>(1).is_err(),
         "retained audio must pin both slots"
     );
+    if runtime {
+        let (failed, result) = call(
+            &mut peer,
+            &handle,
+            CallKind::Stream,
+            text(),
+            allocator.clone(),
+            Some(strict.clone()),
+        );
+        assert!(result.unwrap_err().contains("insufficient capacity"));
+        assert!(
+            failed.is_empty(),
+            "exhausted direct output emitted a partial publication"
+        );
+    }
     let pointer = audio(&outputs[0]).as_ptr();
     let (forwarded, result) = call(
         &mut peer,
@@ -251,7 +299,7 @@ fn real_kokoro_mapped_copy_policy_forwarding_and_shutdown() {
     assert!(pool.allocate::<u8>(1).is_err());
     assert_eq!(
         checksum(audio(&outputs[0])),
-        rows[1]["sha256"].as_str().unwrap()
+        rows[offset]["sha256"].as_str().unwrap()
     );
     let AudioSamples::Shared(owner) = audio(&outputs[0]) else {
         panic!("shared owner")
@@ -267,7 +315,8 @@ fn real_kokoro_mapped_copy_policy_forwarding_and_shutdown() {
     drop(retained);
     assert!(pool.allocate::<u8>(1).is_ok());
     drop(free);
-    let report = serde_json::json!({"samples":samples, "strict":strict.report(),
+    let report = serde_json::json!({"runtime_output":runtime, "samples":samples, "strict":strict.report(),
+        "exhausted_model_request_rejected":runtime,
         "compatible":allow.report(), "retained_slice_sha256":retained_hash,
         "joined_cleanup":true, "all_slots_reclaimed":true});
     std::fs::write(
