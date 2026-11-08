@@ -454,6 +454,49 @@ pub enum IpcCommand {
         frame_tx: mpsc::Sender<Vec<u8>>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Out-of-band, fire-and-forget publish on the input channel. Unlike
+    /// the `Round*` commands it is also honoured *while a round is in
+    /// flight* (the round loops poll for it), and it expects no output and
+    /// no `EndOfInput`. Carries endpoint-call `__call_reply__` frames to a
+    /// Python plugin that is awaiting the reply inside `process()`
+    /// (openspec: add-agent-harness-integration).
+    Send { req_bytes: Vec<u8> },
+}
+
+/// Pending commands the IPC thread pulled off its channel while a round was
+/// in flight (out-of-band `Send`s are published immediately; everything
+/// else waits here for the round to finish, in order).
+struct Side<'a> {
+    cmd_rx: &'a mut mpsc::Receiver<IpcCommand>,
+    stash: &'a mut std::collections::VecDeque<IpcCommand>,
+}
+
+fn publish_bytes(
+    publisher: &iceoryx2::port::publisher::Publisher<ipc::Service, [u8], ()>,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let sample = publisher
+        .loan_slice_uninit(bytes.len())
+        .map_err(|e| format!("loan: {e:?}"))?;
+    let sample = sample.write_from_slice(bytes);
+    sample.send().map_err(|e| format!("send: {e:?}"))?;
+    Ok(())
+}
+
+impl Side<'_> {
+    /// Publish queued out-of-band sends; stash any other command.
+    fn pump(&mut self, publisher: &iceoryx2::port::publisher::Publisher<ipc::Service, [u8], ()>) {
+        while let Ok(cmd) = self.cmd_rx.try_recv() {
+            match cmd {
+                IpcCommand::Send { req_bytes } => {
+                    if let Err(e) = publish_bytes(publisher, &req_bytes) {
+                        eprintln!("[plugin-sdk python_ipc] out-of-band send failed: {e}");
+                    }
+                }
+                other => self.stash.push_back(other),
+            }
+        }
+    }
 }
 
 /// Spawn the runner subprocess + dedicated IPC thread for one
@@ -733,8 +776,25 @@ fn spawn_ipc_thread(
             // by reference so the per-command closures don't have to
             // clone the strings.
             let control_ctx = (session_id.as_str(), node_id.as_str());
-            while let Some(cmd) = cmd_rx.blocking_recv() {
+            let mut stash = std::collections::VecDeque::<IpcCommand>::new();
+            loop {
+                let cmd = match stash.pop_front() {
+                    Some(cmd) => cmd,
+                    None => match cmd_rx.blocking_recv() {
+                        Some(cmd) => cmd,
+                        None => break,
+                    },
+                };
+                let mut side = Side {
+                    cmd_rx: &mut cmd_rx,
+                    stash: &mut stash,
+                };
                 match cmd {
+                    IpcCommand::Send { req_bytes } => {
+                        if let Err(e) = publish_bytes(&publisher, &req_bytes) {
+                            eprintln!("[plugin-sdk python_ipc] out-of-band send failed: {e}");
+                        }
+                    }
                     IpcCommand::WaitForReady { timeout, reply } => {
                         // During READY handshake we still drain
                         // PROGRESS:/PUBLISH: via the hook so a Python
@@ -752,6 +812,7 @@ fn spawn_ipc_thread(
                             &control_subscriber,
                             control_ctx,
                             &req_bytes,
+                            &mut side,
                         );
                         let _ = reply.send(result);
                     }
@@ -762,6 +823,7 @@ fn spawn_ipc_thread(
                             &control_subscriber,
                             control_ctx,
                             &req_bytes,
+                            &mut side,
                         );
                         let _ = reply.send(result);
                     }
@@ -777,6 +839,7 @@ fn spawn_ipc_thread(
                             control_ctx,
                             &req_bytes,
                             &frame_tx,
+                            &mut side,
                         );
                         // Drop frame_tx BEFORE replying so the consumer's
                         // `while let Some(...) = frame_rx.recv().await`
@@ -860,12 +923,9 @@ fn round_trip(
     control_subscriber: &iceoryx2::port::subscriber::Subscriber<ipc::Service, [u8], ()>,
     ctx: (&str, &str),
     req: &[u8],
+    side: &mut Side<'_>,
 ) -> Result<Vec<u8>, String> {
-    let sample = publisher
-        .loan_slice_uninit(req.len())
-        .map_err(|e| format!("loan: {e:?}"))?;
-    let sample = sample.write_from_slice(req);
-    sample.send().map_err(|e| format!("send: {e:?}"))?;
+    publish_bytes(publisher, req)?;
 
     let mut first: Option<Vec<u8>> = None;
     loop {
@@ -873,6 +933,7 @@ fn round_trip(
         // / `publish_to_node_port` calls from inside `process()` are
         // surfaced promptly rather than after the turn ends.
         drain_control_messages(control_subscriber, ctx);
+        side.pump(publisher);
         match subscriber
             .receive()
             .map_err(|e| format!("receive: {e:?}"))?
@@ -915,16 +976,14 @@ fn round_trip_multi(
     control_subscriber: &iceoryx2::port::subscriber::Subscriber<ipc::Service, [u8], ()>,
     ctx: (&str, &str),
     req: &[u8],
+    side: &mut Side<'_>,
 ) -> Result<Vec<Vec<u8>>, String> {
-    let sample = publisher
-        .loan_slice_uninit(req.len())
-        .map_err(|e| format!("loan: {e:?}"))?;
-    let sample = sample.write_from_slice(req);
-    sample.send().map_err(|e| format!("send: {e:?}"))?;
+    publish_bytes(publisher, req)?;
 
     let mut outputs: Vec<Vec<u8>> = Vec::new();
     loop {
         drain_control_messages(control_subscriber, ctx);
+        side.pump(publisher);
         match subscriber
             .receive()
             .map_err(|e| format!("receive: {e:?}"))?
@@ -969,16 +1028,14 @@ fn round_trip_streaming(
     ctx: (&str, &str),
     req: &[u8],
     frame_tx: &mpsc::Sender<Vec<u8>>,
+    side: &mut Side<'_>,
 ) -> Result<(), String> {
-    let sample = publisher
-        .loan_slice_uninit(req.len())
-        .map_err(|e| format!("loan: {e:?}"))?;
-    let sample = sample.write_from_slice(req);
-    sample.send().map_err(|e| format!("send: {e:?}"))?;
+    publish_bytes(publisher, req)?;
 
     let mut consumer_alive = true;
     loop {
         drain_control_messages(control_subscriber, ctx);
+        side.pump(publisher);
         match subscriber
             .receive()
             .map_err(|e| format!("receive: {e:?}"))?

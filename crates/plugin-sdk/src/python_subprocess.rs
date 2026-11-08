@@ -608,9 +608,120 @@ impl PythonSubprocessNode {
     }
 }
 
+/// Text JSON aux frame carrying one `__call_reply__` invocation to the Python
+/// runner: `{"__aux_port__":"__call_reply__","payload":{"corr_id",
+/// "args":[<CallReplyEnvelope>],"kwargs":{}}}` (typed-RPC ff request shape).
+pub fn call_reply_frame(request: &remotemedia_traits::rpc::RpcRequest) -> String {
+    serde_json::json!({
+        "__aux_port__": remotemedia_traits::call::CALL_REPLY_METHOD,
+        "payload": {
+            "corr_id": request.corr_id,
+            "args": request.args,
+            "kwargs": request.kwargs,
+        },
+    })
+    .to_string()
+}
+
 impl FfiNode for PythonSubprocessNode {
     fn node_type(&self) -> RString {
         RString::from(self.node_type.clone())
+    }
+
+    /// Typed-RPC passthrough for Python source plugins (task 2.6.4): the
+    /// runtime-delivered `__call_reply__` is the only method on the native
+    /// lane. Every other `@rpc` method keeps reaching the runner's
+    /// dispatcher through the input path (the host gives this node a
+    /// call-reply-only lane).
+    fn rpc_methods(&self) -> RString {
+        serde_json::to_string(&[remotemedia_traits::call::call_reply_method()])
+            .expect("RPC descriptors serialize")
+            .into()
+    }
+
+    /// Forward `__call_reply__` to the runner as an out-of-band input frame
+    /// (published even while a `process()` round is in flight; no output
+    /// and no `EndOfInput` is expected for it).
+    fn call_rpc(
+        &self,
+        request: RVec<u8>,
+        _context: loadable_node_abi::FfiCallContext,
+        _sink: loadable_node_abi::RpcReplySinkBox,
+    ) -> FfiFuture<RResult<(), RString>> {
+        let cmd_tx = self.cmd_tx.clone();
+        let session_id = self.session_id.clone();
+        async move {
+            let request: remotemedia_traits::rpc::RpcRequest =
+                match rmp_serde::from_slice(request.as_slice()) {
+                    Ok(r) => r,
+                    Err(e) => return RErr(format!("invalid RPC request: {e}").into()),
+                };
+            if request.method != remotemedia_traits::call::CALL_REPLY_METHOD {
+                return RErr(format!("unknown RPC method: {}", request.method).into());
+            }
+            let wire = crate::python_ipc::WireRuntimeData::now_text(
+                &call_reply_frame(&request),
+                &session_id,
+            );
+            match cmd_tx
+                .send(crate::python_ipc::IpcCommand::Send {
+                    req_bytes: wire.to_bytes(),
+                })
+                .await
+            {
+                Ok(()) => ROk(()),
+                Err(e) => RErr(format!("ipc cmd send: {e}").into()),
+            }
+        }
+        .into_ffi()
+    }
+
+    /// Per-frame streaming (instead of the batched `process_multi`
+    /// default), so a `__call__` envelope emitted mid-`process()` leaves the
+    /// node immediately and its reply can arrive while the call is in
+    /// flight.
+    fn process_streaming(
+        &self,
+        input: RVec<u8>,
+        sink: loadable_node_abi::OutputSinkBox,
+    ) -> FfiFuture<RResult<usize, RString>> {
+        let cmd_tx = self.cmd_tx.clone();
+        let session_id = self.session_id.clone();
+        async move {
+            let req_bytes = match encode_input(&input, &session_id) {
+                Ok(b) => b,
+                Err(e) => return RErr(RString::from(e)),
+            };
+            let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            if let Err(e) = cmd_tx
+                .send(crate::python_ipc::IpcCommand::RoundStreaming {
+                    req_bytes,
+                    frame_tx,
+                    reply: reply_tx,
+                })
+                .await
+            {
+                return RErr(RString::from(format!("ipc cmd send: {e}")));
+            }
+            let mut count = 0usize;
+            while let Some(frame) = frame_rx.recv().await {
+                let bytes = match decode_output_to_ffi(&frame) {
+                    Ok(b) => b,
+                    Err(e) => return RErr(RString::from(e)),
+                };
+                if let RErr(e) = sink.push(RVec::from(bytes)) {
+                    return RErr(e);
+                }
+                count += 1;
+            }
+            match reply_rx.await {
+                Ok(Ok(())) => ROk(count),
+                Ok(Err(e)) => RErr(RString::from(format!("ipc reply: {e}"))),
+                Err(e) => RErr(RString::from(format!("ipc reply recv: {e}"))),
+            }
+        }
+        .into_ffi()
     }
 
     fn process(&self, input: RVec<u8>) -> FfiFuture<RResult<RVec<u8>, RString>> {
