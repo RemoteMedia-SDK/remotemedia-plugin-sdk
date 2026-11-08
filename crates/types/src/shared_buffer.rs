@@ -27,6 +27,13 @@ enum Storage<T> {
     Slice(Arc<[T]>),
     Owner(Arc<dyn BufferOwner<T>>),
     MutableOwner(Arc<dyn MutableOwner<T>>),
+    /// A checked immutable view retains the source allocation's budget identity
+    /// and full backing size, independently of its visible element type/range.
+    View {
+        owner: Arc<dyn BufferOwner<T>>,
+        identity: (u8, usize),
+        backing_bytes: usize,
+    },
 }
 
 impl<T> Storage<T> {
@@ -36,6 +43,7 @@ impl<T> Storage<T> {
             Self::Slice(owner) => owner,
             Self::Owner(owner) => owner.as_ref().as_ref(),
             Self::MutableOwner(owner) => owner.as_ref().as_ref(),
+            Self::View { owner, .. } => owner.as_ref().as_ref(),
         }
     }
 
@@ -44,7 +52,7 @@ impl<T> Storage<T> {
             Self::Vec(owner) => Arc::get_mut(owner).map(Vec::as_mut_slice),
             Self::Slice(owner) => Arc::get_mut(owner),
             Self::MutableOwner(owner) => Arc::get_mut(owner).map(AsMut::as_mut),
-            Self::Owner(_) => None,
+            Self::Owner(_) | Self::View { .. } => None,
         }
     }
 }
@@ -56,6 +64,15 @@ impl<T> Clone for Storage<T> {
             Self::Slice(owner) => Self::Slice(Arc::clone(owner)),
             Self::Owner(owner) => Self::Owner(Arc::clone(owner)),
             Self::MutableOwner(owner) => Self::MutableOwner(Arc::clone(owner)),
+            Self::View {
+                owner,
+                identity,
+                backing_bytes,
+            } => Self::View {
+                owner: Arc::clone(owner),
+                identity: *identity,
+                backing_bytes: *backing_bytes,
+            },
         }
     }
 }
@@ -90,10 +107,14 @@ impl<T> SharedBuffer<T> {
             Storage::Slice(v) => (1, Arc::as_ptr(v) as *const () as usize),
             Storage::Owner(v) => (2, Arc::as_ptr(v) as *const () as usize),
             Storage::MutableOwner(v) => (3, Arc::as_ptr(v) as *const () as usize),
+            Storage::View { identity, .. } => *identity,
         }
     }
 
     pub(crate) fn backing_bytes(&self) -> usize {
+        if let Storage::View { backing_bytes, .. } = &self.storage {
+            return *backing_bytes;
+        }
         let elements = match &self.storage {
             Storage::Vec(owner) => owner.capacity(),
             _ => self.storage.as_slice().len(),
@@ -169,6 +190,9 @@ impl<T> SharedBuffer<T> {
             (Storage::Slice(a), Storage::Slice(b)) => Arc::ptr_eq(a, b),
             (Storage::Owner(a), Storage::Owner(b)) => Arc::ptr_eq(a, b),
             (Storage::MutableOwner(a), Storage::MutableOwner(b)) => Arc::ptr_eq(a, b),
+            // Separate conversions may start at different byte offsets. Only
+            // slices of the same view have a common coordinate system for joins.
+            (Storage::View { owner: a, .. }, Storage::View { owner: b, .. }) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -408,6 +432,8 @@ impl<T> Default for SharedBuffer<T> {
         Vec::new().into()
     }
 }
+
+mod native_f32;
 
 impl<T> AsRef<[T]> for SharedBuffer<T> {
     fn as_ref(&self) -> &[T] {
