@@ -588,6 +588,14 @@ pub struct PythonSubprocessNode {
     pub _child: std::sync::Arc<std::sync::Mutex<std::process::Child>>,
 }
 
+impl Drop for PythonSubprocessNode {
+    fn drop(&mut self) {
+        // Without this the runner outlived node teardown; its parent-death
+        // watcher only fires when the whole host exits.
+        crate::python_ipc::terminate_runner(&self._child);
+    }
+}
+
 impl PythonSubprocessNode {
     /// Construct directly from a freshly-spawned subprocess + IPC
     /// channel. Used by core's source-load resolver to wrap the

@@ -485,12 +485,14 @@ pub fn spawn_runner_and_ipc(
 
     // Start the IPC thread FIRST so the iceoryx2 services (input,
     // output, control) exist by the time Python attaches.
+    let liveness = RunnerLiveness::default();
     let cmd_tx = spawn_ipc_thread(
         in_channel,
         out_channel,
         control_channel,
         session_id.to_string(),
         node_id.to_string(),
+        liveness.clone(),
     )?;
 
     let mut command = Command::new(&argv[0]);
@@ -546,6 +548,7 @@ pub fn spawn_runner_and_ipc(
         .spawn()
         .map_err(|e| format!("spawn runner {}: {e}", argv[0]))?;
     let child = Arc::new(Mutex::new(child));
+    liveness.install(child.clone());
 
     // Wait for the runner to publish `b"READY"` on the control
     // channel. Python's `Node._publish_ready_signal` emits this after
@@ -628,6 +631,95 @@ pub fn spawn_runner_and_ipc(
     Ok((cmd_tx, child))
 }
 
+/// Terminate and reap a Python runner spawned by [`spawn_runner_and_ipc`].
+/// `std::process::Child` does not stop its process on drop. On Windows a venv
+/// launcher owns a second Python process, so its whole tree is terminated
+/// before the launcher is reaped; otherwise the model survives with its GPU
+/// allocation and inherited pipe handles.
+pub fn terminate_runner(child: &Mutex<Child>) {
+    let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let result = std::process::Command::new("taskkill.exe")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output();
+        if !matches!(result, Ok(ref output) if output.status.success()) {
+            eprintln!(
+                "[python_ipc] failed to terminate Python runner process tree (pid {})",
+                child.id()
+            );
+        }
+    }
+    if let Err(error) = child.kill() {
+        if !matches!(child.try_wait(), Ok(Some(_))) {
+            eprintln!(
+                "[python_ipc] failed to terminate Python runner (pid {}): {error}",
+                child.id()
+            );
+            return;
+        }
+    }
+    let _ = child.wait();
+}
+
+/// Runner process handle, installed once the child spawns, so a turn can stop
+/// waiting for an `EndOfInput` that a dead runner will never publish.
+#[derive(Clone, Default)]
+pub(crate) struct RunnerLiveness(Arc<std::sync::OnceLock<Arc<Mutex<Child>>>>);
+
+impl RunnerLiveness {
+    fn install(&self, child: Arc<Mutex<Child>>) {
+        let _ = self.0.set(child);
+    }
+
+    fn poll(&self) -> IdlePoll<'_> {
+        IdlePoll {
+            runner: self,
+            next_check: std::time::Instant::now() + RUNNER_LIVENESS_INTERVAL,
+        }
+    }
+}
+
+const RUNNER_LIVENESS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Idle step of a turn: yield, and periodically confirm the runner is alive.
+/// Only called when no sample is queued, so frames a runner published before
+/// exiting are still delivered first.
+struct IdlePoll<'a> {
+    runner: &'a RunnerLiveness,
+    next_check: std::time::Instant,
+}
+
+impl IdlePoll<'_> {
+    fn wait(&mut self) -> Result<(), String> {
+        std::thread::yield_now();
+        let now = std::time::Instant::now();
+        if now < self.next_check {
+            return Ok(());
+        }
+        self.next_check = now + RUNNER_LIVENESS_INTERVAL;
+        let Some(child) = self.runner.0.get() else {
+            return Ok(());
+        };
+        let status = child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .try_wait()
+            .map_err(|e| format!("runner liveness check: {e}"))?;
+        match status {
+            Some(status) => Err(format!(
+                "Python runner exited before EndOfInput (status: {status})"
+            )),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Owns iceoryx2 publisher + subscriber on a dedicated OS thread
 /// (`Publisher`/`Subscriber` are `!Send`). Async callers use the
 /// returned `mpsc::Sender<IpcCommand>` to round-trip data.
@@ -637,6 +729,7 @@ fn spawn_ipc_thread(
     control_channel: String,
     session_id: String,
     node_id: String,
+    liveness: RunnerLiveness,
 ) -> Result<mpsc::Sender<IpcCommand>, String> {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<IpcCommand>(64);
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
@@ -752,6 +845,7 @@ fn spawn_ipc_thread(
                             &control_subscriber,
                             control_ctx,
                             &req_bytes,
+                            &liveness,
                         );
                         let _ = reply.send(result);
                     }
@@ -762,6 +856,7 @@ fn spawn_ipc_thread(
                             &control_subscriber,
                             control_ctx,
                             &req_bytes,
+                            &liveness,
                         );
                         let _ = reply.send(result);
                     }
@@ -777,6 +872,7 @@ fn spawn_ipc_thread(
                             control_ctx,
                             &req_bytes,
                             &frame_tx,
+                            &liveness,
                         );
                         // Drop frame_tx BEFORE replying so the consumer's
                         // `while let Some(...) = frame_rx.recv().await`
@@ -860,12 +956,14 @@ fn round_trip(
     control_subscriber: &iceoryx2::port::subscriber::Subscriber<ipc::Service, [u8], ()>,
     ctx: (&str, &str),
     req: &[u8],
+    liveness: &RunnerLiveness,
 ) -> Result<Vec<u8>, String> {
     let sample = publisher
         .loan_slice_uninit(req.len())
         .map_err(|e| format!("loan: {e:?}"))?;
     let sample = sample.write_from_slice(req);
     sample.send().map_err(|e| format!("send: {e:?}"))?;
+    let mut idle = liveness.poll();
 
     let mut first: Option<Vec<u8>> = None;
     loop {
@@ -897,7 +995,7 @@ fn round_trip(
                 // contract. Keep looping to consume EndOfInput so the
                 // next call doesn't see stale frames.
             }
-            None => std::thread::yield_now(),
+            None => idle.wait()?,
         }
     }
 }
@@ -915,12 +1013,14 @@ fn round_trip_multi(
     control_subscriber: &iceoryx2::port::subscriber::Subscriber<ipc::Service, [u8], ()>,
     ctx: (&str, &str),
     req: &[u8],
+    liveness: &RunnerLiveness,
 ) -> Result<Vec<Vec<u8>>, String> {
     let sample = publisher
         .loan_slice_uninit(req.len())
         .map_err(|e| format!("loan: {e:?}"))?;
     let sample = sample.write_from_slice(req);
     sample.send().map_err(|e| format!("send: {e:?}"))?;
+    let mut idle = liveness.poll();
 
     let mut outputs: Vec<Vec<u8>> = Vec::new();
     loop {
@@ -941,7 +1041,7 @@ fn round_trip_multi(
                 }
                 outputs.push(bytes);
             }
-            None => std::thread::yield_now(),
+            None => idle.wait()?,
         }
     }
 }
@@ -969,12 +1069,14 @@ fn round_trip_streaming(
     ctx: (&str, &str),
     req: &[u8],
     frame_tx: &mpsc::Sender<Vec<u8>>,
+    liveness: &RunnerLiveness,
 ) -> Result<(), String> {
     let sample = publisher
         .loan_slice_uninit(req.len())
         .map_err(|e| format!("loan: {e:?}"))?;
     let sample = sample.write_from_slice(req);
     sample.send().map_err(|e| format!("send: {e:?}"))?;
+    let mut idle = liveness.poll();
 
     let mut consumer_alive = true;
     loop {
@@ -1004,7 +1106,7 @@ fn round_trip_streaming(
                 }
                 // else: drain to EndOfInput without forwarding.
             }
-            None => std::thread::yield_now(),
+            None => idle.wait()?,
         }
     }
 }
@@ -1188,5 +1290,55 @@ mod tests {
         let decoded = WireRuntimeData::from_bytes(&bytes).expect("decode");
         let out = decoded.decode_control_message().expect("decode ctrl");
         assert_eq!(out, payload);
+    }
+}
+
+#[cfg(test)]
+mod runner_lifecycle_tests {
+    use super::*;
+
+    fn shell(script_windows: &str, script_unix: &str) -> Arc<Mutex<Child>> {
+        let child = if cfg!(windows) {
+            Command::new("cmd").args(["/C", script_windows]).spawn()
+        } else {
+            Command::new("sh").args(["-c", script_unix]).spawn()
+        }
+        .expect("spawn test child");
+        Arc::new(Mutex::new(child))
+    }
+
+    #[test]
+    fn idle_poll_reports_a_runner_that_exits_mid_turn() {
+        let liveness = RunnerLiveness::default();
+        let mut idle = liveness.poll();
+        // No child installed yet (startup window): never an error.
+        assert!(idle.wait().is_ok());
+        let child = shell("exit 3", "exit 3");
+        liveness.install(child);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let error = loop {
+            match idle.wait() {
+                Err(error) => break error,
+                Ok(()) => assert!(
+                    std::time::Instant::now() < deadline,
+                    "dead runner was never reported"
+                ),
+            }
+        };
+        assert!(error.contains("exited before EndOfInput"), "{error}");
+    }
+
+    #[test]
+    fn terminate_runner_kills_and_reaps_a_live_runner() {
+        let child = shell("ping -n 60 127.0.0.1 >NUL", "sleep 60");
+        let started = std::time::Instant::now();
+        terminate_runner(&child);
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert!(
+            matches!(child.lock().unwrap().try_wait(), Ok(Some(_))),
+            "runner must be reaped"
+        );
+        // Idempotent for an already-reaped runner.
+        terminate_runner(&child);
     }
 }
