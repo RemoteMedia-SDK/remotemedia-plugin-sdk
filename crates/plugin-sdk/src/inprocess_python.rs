@@ -380,9 +380,13 @@ mod inner {
         shared: bool,
     ) -> PyResult<Option<serde_json::Value>> {
         if !shared {
-            return Ok(field(obj, "metadata")
-                .ok()
-                .and_then(|v| py_any_to_json(&v).ok()));
+            // A missing field means no metadata; a present value that is not
+            // JSON is an error rather than silently dropped metadata.
+            return match field(obj, "metadata") {
+                Ok(value) if value.is_none() => Ok(None),
+                Ok(value) => py_any_to_json(&value).map(Some),
+                Err(_) => Ok(None),
+            };
         }
         match field(obj, "metadata") {
             Ok(value) if value.is_none() => Ok(None),
@@ -846,12 +850,22 @@ mod inner {
             Ok(serde_json::Value::String(s))
         } else if obj.is_instance_of::<PyList>() {
             py_list_to_json(obj)
+        } else if obj.is_instance_of::<pyo3::types::PyTuple>() {
+            let tuple = obj.downcast::<pyo3::types::PyTuple>()?;
+            tuple
+                .iter()
+                .map(|item| py_any_to_json(&item))
+                .collect::<PyResult<Vec<_>>>()
+                .map(serde_json::Value::Array)
         } else if obj.is_instance_of::<PyDict>() {
             py_dict_to_json(obj)
         } else {
-            // Fallback to string representation
-            let s: String = obj.str()?.to_string();
-            Ok(serde_json::Value::String(s))
+            // Stringifying an ndarray, bytes or arbitrary object silently
+            // materializes (and corrupts) a hidden payload; reject instead.
+            Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "cannot convert Python {} to JSON; carry bulk data as a RuntimeData payload",
+                obj.get_type().name()?
+            )))
         }
     }
 
@@ -948,6 +962,35 @@ mod inner {
                 s
             ))
             .into()),
+        }
+    }
+
+    #[cfg(test)]
+    mod json_conversion_tests {
+        use super::*;
+
+        #[test]
+        fn legacy_json_rejects_bulk_objects_instead_of_stringifying_them() {
+            Python::attach(|py| {
+                let value = py
+                    .eval(
+                        c"{'n': 1, 'pair': (2, 3), 'tags': ['a'], 'payload': b'raw'}",
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                let error = py_any_to_json(&value).unwrap_err().to_string();
+                assert!(error.contains("bytes"), "{error}");
+                assert!(error.contains("RuntimeData"), "{error}");
+                let value = py
+                    .eval(c"{'n': 1, 'pair': (2, 3), 'tags': ['a']}", None, None)
+                    .unwrap();
+                assert_eq!(
+                    py_any_to_json(&value).unwrap(),
+                    serde_json::json!({"n": 1, "pair": [2, 3], "tags": ["a"]}),
+                    "tuples become JSON arrays, not their repr"
+                );
+            });
         }
     }
 }
