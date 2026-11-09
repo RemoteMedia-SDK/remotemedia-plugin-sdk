@@ -50,3 +50,10 @@ tracing = "0.1"
 pyo3 = { version = "0.28", features = ["abi3-py311", "auto-initialize"], default-features = false }
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 numpy = "0.28"
+
+# Vendored iceoryx2 0.9.3 Windows repairs (from a9b23afd; see
+# crates/patches/README.md): dead-node port-tag cleanup so Windows node
+# directories are actually removed, plus enumeration/diagnostic fixes.
+[patch.crates-io]
+iceoryx2-pal-posix = { path = "../remotemedia-sdk/crates/patches/iceoryx2-pal-posix" }
+iceoryx2 = { path = "../remotemedia-sdk/crates/patches/iceoryx2" }

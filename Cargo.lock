@@ -854,8 +854,6 @@ dependencies = [
 [[package]]
 name = "iceoryx2"
 version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e226c6041866b416e8c384d69a54a8578cb26619725253351e3e17ea5f32627f"
 dependencies = [
  "iceoryx2-bb-concurrency",
  "iceoryx2-bb-container",
@@ -1095,8 +1093,6 @@ dependencies = [
 [[package]]
 name = "iceoryx2-pal-posix"
 version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "717117199992be87c4c49bd058e65d470a90519274c11d4a2b004f79b20234ba"
 dependencies = [
  "bindgen",
  "cc",
