@@ -70,21 +70,59 @@ impl<'de, T: Deserialize<'de>> Visitor<'de> for PayloadVisitor<T> {
             .min(1024 * 1024 / size_of::<T>().max(1));
         let mut output = Vec::new();
         let mut attempt = None;
-        while let Some(value) = sequence.next_element_seed(PayloadElement {
+        // Policy is decided once, before the first element: the context and
+        // element type are fixed for the whole sequence.
+        let Some(first) = sequence.next_element_seed(PayloadElement {
             context: &self.context,
             attempt: &mut attempt,
             marker: PhantomData,
-        })? {
-            // No destination allocation until an element passes policy.
-            if output.is_empty() {
-                output.reserve(capacity);
+        })?
+        else {
+            return Ok(output);
+        };
+        // No destination allocation until an element passes policy.
+        output.reserve(capacity);
+        output.push(first);
+        match attempt.as_mut() {
+            // Later elements only extend the running byte count, which still
+            // includes an element that fails or panics while decoding.
+            Some(operation) => {
+                while let Some(value) = sequence.next_element_seed(CountedElement {
+                    operation: &mut *operation,
+                    marker: PhantomData,
+                })? {
+                    output.push(value);
+                }
             }
-            output.push(value);
+            // Zero-sized elements are never counted or rejected.
+            None => {
+                while let Some(value) = sequence.next_element::<T>()? {
+                    output.push(value);
+                }
+            }
         }
         if let Some(attempt) = attempt {
             attempt.complete();
         }
         Ok(output)
+    }
+}
+
+/// Element after the first: policy already passed for this sequence.
+struct CountedElement<'operation, T> {
+    operation: &'operation mut CopyOperation,
+    marker: PhantomData<T>,
+}
+impl<'de, T: Deserialize<'de>> DeserializeSeed<'de> for CountedElement<'_, T> {
+    type Value = T;
+    #[inline]
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<T, D::Error> {
+        self.operation.bytes = self
+            .operation
+            .bytes
+            .checked_add(size_of::<T>() as u64)
+            .ok_or_else(|| D::Error::custom("payload deserialization byte count overflow"))?;
+        T::deserialize(deserializer)
     }
 }
 
