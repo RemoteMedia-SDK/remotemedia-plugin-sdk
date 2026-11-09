@@ -88,6 +88,11 @@ on:
         required: false
         type: string
         default: ''
+      linux-apt-packages:
+        description: 'Space-separated apt packages to install on the Linux runners before building (e.g. "libasound2-dev libudev-dev" for Bevy-based plugins). Empty = install nothing.'
+        required: false
+        type: string
+        default: ''
       enforce-loadable-abi:
         description: 'Fail the release if cargo resolves remotemedia-plugin-sdk/loadable-node-abi versions that do not match this SDK workflow. Keep enabled for published loadable plugins.'
         required: false
@@ -171,6 +176,17 @@ jobs:
         include: ${{ fromJSON(needs.matrix.outputs.include) }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Linux system packages
+        if: runner.os == 'Linux' && inputs.linux-apt-packages != ''
+        shell: bash
+        env:
+          PACKAGES: ${{ inputs.linux-apt-packages }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          # Word-splitting $PACKAGES is intended: it is a space-separated list.
+          sudo apt-get install -y -q --no-install-recommends $PACKAGES
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
