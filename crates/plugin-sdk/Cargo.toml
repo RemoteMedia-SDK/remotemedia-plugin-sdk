@@ -90,12 +90,11 @@ pyo3-async-runtimes = { workspace = true, optional = true }
 numpy = { workspace = true, optional = true }
 remotemedia-python-buffers = { path = "../python-buffers", optional = true }
 
-# libc is needed only on Linux for prctl(PR_SET_PDEATHSIG) — gives the
-# kernel a hook to SIGKILL the runner subprocess if the host process
-# dies before Drop has a chance to clean it up. The cdylib's `Drop`
-# already kills the child on normal teardown; this is the "host got
-# SIGKILL'd / segfaulted" safety net.
-[target.'cfg(target_os = "linux")'.dependencies]
+# libc is needed on Unix to kill a Python runner's process group on
+# teardown, and on Linux for prctl(PR_SET_PDEATHSIG) — the kernel's hook
+# to signal the runner if the host process dies before Drop runs (the
+# "host got SIGKILL'd / segfaulted" safety net).
+[target.'cfg(unix)'.dependencies]
 libc = { workspace = true, optional = true }
 
 [dev-dependencies]

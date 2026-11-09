@@ -521,28 +521,7 @@ pub fn spawn_runner_and_ipc(
         }
     }
 
-    // Linux-only safety net: ask the kernel to deliver SIGTERM to this
-    // child if the host process dies before Drop runs (segfault, SIGKILL,
-    // etc.). Normal teardown still relies on the child handle's `Drop`
-    // killing the runner explicitly — this is purely the adversarial
-    // parent-death path. Matches the pattern in
-    // `crates/core/src/python/multiprocess/process_manager.rs`.
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: prctl(PR_SET_PDEATHSIG) is async-signal-safe — fine to
-        // call from `pre_exec` which runs in the forked child between
-        // fork() and exec(). The libc::SIGTERM arg is a constant; no
-        // allocations.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
+    contain_runner(&mut command);
 
     let child = command
         .spawn()
@@ -641,15 +620,61 @@ pub fn spawn_runner_and_ipc(
     Ok((cmd_tx, child))
 }
 
+/// Process containment for a runner. On Unix the runner leads its own process
+/// group, so [`terminate_runner`] ends every process it started (model worker
+/// pools, compiler helpers), not only the runner. On Linux the kernel also
+/// sends the runner SIGTERM if the host dies before teardown runs (segfault,
+/// SIGKILL): the adversarial parent-death path. Windows contains the tree at
+/// termination time instead (`taskkill /T`).
+fn contain_runner(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: prctl(PR_SET_PDEATHSIG) is async-signal-safe, so it may run
+        // in `pre_exec` between fork() and exec(). No allocations.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
 /// Terminate and reap a Python runner spawned by [`spawn_runner_and_ipc`].
-/// `std::process::Child` does not stop its process on drop. On Windows a venv
-/// launcher owns a second Python process, so its whole tree is terminated
-/// before the launcher is reaped; otherwise the model survives with its GPU
-/// allocation and inherited pipe handles.
+/// `std::process::Child` does not stop its process on drop. The runner's whole
+/// tree is terminated before it is reaped: on Windows a venv launcher owns a
+/// second Python process, and on any platform the model may start helpers.
+/// Otherwise they survive with their GPU allocations and inherited pipe
+/// handles. Unix kills the runner's process group ([`contain_runner`]);
+/// Windows uses `taskkill /T`. A runner already reaped is left alone, since
+/// its group id may no longer be its own.
 pub fn terminate_runner(child: &Mutex<Child>) {
     let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
     if matches!(child.try_wait(), Ok(Some(_))) {
         return;
+    }
+    #[cfg(unix)]
+    {
+        // The runner is unreaped, so its pid (and group id) cannot have been
+        // reused. ESRCH means it does not lead a group: nothing more to end.
+        // SAFETY: killpg has no memory-safety preconditions.
+        let pgid = child.id() as libc::pid_t;
+        if unsafe { libc::killpg(pgid, libc::SIGKILL) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                eprintln!("[python_ipc] failed to kill runner process group {pgid}: {error}");
+            }
+        }
     }
     #[cfg(windows)]
     {
@@ -1410,5 +1435,44 @@ mod runner_lifecycle_tests {
         );
         // Idempotent for an already-reaped runner.
         terminate_runner(&child);
+    }
+
+    #[test]
+    fn terminate_runner_ends_processes_the_runner_started() {
+        use std::io::BufRead;
+        // The runner starts a long-lived child, prints its pid, then waits.
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("powershell");
+            command.args([
+                "-NoProfile",
+                "-Command",
+                "$p = Start-Process ping -ArgumentList '-n','60','127.0.0.1'                  -PassThru -WindowStyle Hidden; $p.Id; Wait-Process -Id $p.Id",
+            ]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 60 & echo $!; wait"]);
+            command
+        };
+        command.stdout(Stdio::piped());
+        contain_runner(&mut command);
+        let mut child = command.spawn().expect("spawn runner");
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let grandchild: u32 = line.trim().parse().expect("grandchild pid");
+        assert!(alive(grandchild), "grandchild {grandchild} never started");
+        let child = Mutex::new(child);
+        terminate_runner(&child);
+        assert!(matches!(child.lock().unwrap().try_wait(), Ok(Some(_))));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while alive(grandchild) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild {grandchild} outlived its runner"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
