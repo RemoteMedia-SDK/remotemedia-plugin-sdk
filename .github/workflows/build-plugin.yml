@@ -1,0 +1,552 @@
+# Reusable workflow for building + releasing a RemoteMedia SDK plugin
+# cdylib across the platforms the resolver knows how to download.
+#
+# How to use it (from a plugin author's repo):
+#
+#     # .github/workflows/release.yml
+#     name: Release
+#     on:
+#       push:
+#         tags: ['v*']
+#       workflow_dispatch:
+#         inputs:
+#           tag:
+#             description: 'Tag to release (e.g. v0.2.0)'
+#             required: true
+#
+#     jobs:
+#       release:
+#         uses: RemoteMedia-SDK/remotemedia-plugin-sdk/.github/workflows/build-plugin.yml@main
+#         with:
+#           crate-name: silero-vad-loadable-plugin   # cargo `name = ...` field
+#           display-name: silero-vad                  # plugin.toml [plugin].name
+#         permissions:
+#           contents: write   # required for softprops/action-gh-release
+#
+# What this does, per release:
+#   1. Matrix-builds the cdylib for x86_64/aarch64 × linux/macos/windows
+#      (5 targets, skipping aarch64-windows — niche).
+#   2. Renames each output to `lib{display-name}-{arch}-{os}.{ext}` so the
+#      resolver's `current_platform()` lookup matches.
+#   3. SHA256-hashes each binary.
+#   4. Validates the plugin resolved the loadable ABI versions this
+#      workflow expects, before any artifacts are uploaded.
+#   5. Assembles a `release-manifest.json` enumerating every platform →
+#      file + sha256 entry (the schema the resolver fetches in Phase 1B),
+#      plus the expected SDK/ABI crate versions for diagnostics.
+#   6. Uploads every binary + the manifest to the GitHub Release at the
+#      triggering tag, creating it if it doesn't exist yet.
+#
+# After running, the resolver can fetch the release via the
+# canonical-org shorthand:
+#
+#     "plugins": ["silero-vad@v0.2.0"]
+#
+# which expands to:
+#
+#     https://github.com/RemoteMedia-SDK/silero-vad/releases/download/v0.2.0/release-manifest.json
+#     → looks up x86_64-linux entry
+#     → downloads lib{display-name}-x86_64-linux.so
+#     → verifies sha256
+#     → dlopens
+
+name: Build Plugin
+
+on:
+  workflow_call:
+    inputs:
+      crate-name:
+        description: 'Cargo package name (the `name = ...` field in Cargo.toml). Used to find the build output: target/{rust-target}/release/lib{crate_name_underscored}.{ext}'
+        required: true
+        type: string
+      display-name:
+        description: 'Plugin display name (matches `[plugin].name` in plugin.toml). Used in the release asset filenames + release-manifest.json. Should match the GitHub repo name for canonical-org shorthand to work.'
+        required: true
+        type: string
+      tag:
+        description: 'Git tag to release against. Defaults to github.ref_name (the tag that triggered the workflow).'
+        required: false
+        type: string
+        default: ''
+      cargo-features:
+        description: 'Optional `--features <list>` passed to cargo build. Empty = build with default features. Set this when your plugin needs feature flags (e.g. "whisper,loadable-export" — though typically the plugin Cargo.toml handles this transitively).'
+        required: false
+        type: string
+        default: ''
+      cargo-no-default-features:
+        description: 'Pass --no-default-features to cargo build. Default false.'
+        required: false
+        type: boolean
+        default: false
+      cubism-sdk-version:
+        description: 'Live2D Cubism Native SDK version tag in RemoteMedia-SDK/cubism-sdk-internal (e.g. "v5.r.5"). When set, the SDK is fetched + unzipped before `cargo build`, and LIVE2D_CUBISM_CORE_DIR is exported pointing at the unzipped root. Leave empty for plugins that do not depend on Cubism. Requires the caller to pass a CUBISM_SDK_TOKEN secret with Contents:read on the private SDK store.'
+        required: false
+        type: string
+        default: ''
+      skip-platforms:
+        description: 'Comma-separated list of matrix platforms to skip (e.g. "aarch64-linux,x86_64-windows"). Use this when a plugin depends on a crate whose upstream does not support a target the matrix builds — the build job is `if:`-skipped for those platforms and the release-manifest.json simply omits them. Consumers on a skipped platform hit `PlatformNotPublished` from the resolver and can build from source locally. Valid values: `x86_64-linux`, `aarch64-linux`, `aarch64-darwin`, `x86_64-windows`.'
+        required: false
+        type: string
+        default: ''
+      linux-apt-packages:
+        description: 'Space-separated apt packages to install on the Linux runners before building (e.g. "libasound2-dev libudev-dev" for Bevy-based plugins). Empty = install nothing.'
+        required: false
+        type: string
+        default: ''
+      enforce-loadable-abi:
+        description: 'Fail the release if cargo resolves remotemedia-plugin-sdk/loadable-node-abi versions that do not match this SDK workflow. Keep enabled for published loadable plugins.'
+        required: false
+        type: boolean
+        default: true
+      expected-remotemedia-plugin-sdk:
+        description: 'Expected remotemedia-plugin-sdk crate version. Bump alongside remotemedia-plugin-sdk repo crates/plugin-sdk/Cargo.toml when the reusable workflow is updated.'
+        required: false
+        type: string
+        default: '0.7.0'
+      expected-loadable-node-abi:
+        description: 'Expected loadable-node-abi crate version. Bump alongside remotemedia-plugin-sdk repo crates/loadable-node-abi/Cargo.toml when the reusable workflow is updated.'
+        required: false
+        type: string
+        default: '0.5.0'
+    secrets:
+      CUBISM_SDK_TOKEN:
+        description: 'Fine-grained PAT with Contents:read on RemoteMedia-SDK/cubism-sdk-internal. Only required when `cubism-sdk-version` input is set. See live2d-render/LIVE2D_SDK_SETUP.md for setup.'
+        required: false
+
+jobs:
+  # Tiny setup job that emits the build matrix as JSON, filtered by
+  # `inputs.skip-platforms`. Lets callers opt out of targets their
+  # upstream deps don't compile against (e.g. foundry-local-sdk has no
+  # `linux-aarch64` natives AND its FFI shim doesn't compile there).
+  # Skipped platforms are simply absent from the dynamic matrix, so
+  # the release-manifest.json omits them and consumers on those
+  # platforms hit `PlatformNotPublished` from the resolver.
+  #
+  # Job-level `if:` can't reference `matrix.*` (evaluated before the
+  # matrix expands), which is why this is a pre-pass rather than an
+  # inline gate.
+  matrix:
+    name: compute matrix
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.compute.outputs.include }}
+    steps:
+      - id: compute
+        shell: bash
+        env:
+          SKIP: ${{ inputs.skip-platforms }}
+        run: |
+          set -euo pipefail
+          # Canonical static matrix. NOTE: x86_64-darwin (macos-13 /
+          # Intel Macs) intentionally dropped — the free-tier macos-13
+          # queue often starves indefinitely, blocking the `release`
+          # job. Apple stopped making Intel Macs in 2023; most
+          # consumers are on Apple Silicon now.
+          ALL='[
+            {"platform":"x86_64-linux",  "runner":"ubuntu-latest",    "rust-target":"x86_64-unknown-linux-gnu",  "ext":"so",    "lib-prefix":"lib"},
+            {"platform":"aarch64-linux", "runner":"ubuntu-24.04-arm", "rust-target":"aarch64-unknown-linux-gnu", "ext":"so",    "lib-prefix":"lib"},
+            {"platform":"aarch64-darwin","runner":"macos-latest",     "rust-target":"aarch64-apple-darwin",      "ext":"dylib", "lib-prefix":"lib"},
+            {"platform":"x86_64-windows","runner":"windows-latest",   "rust-target":"x86_64-pc-windows-msvc",    "ext":"dll",   "lib-prefix":""}
+          ]'
+          # Filter out anything in $SKIP (comma-separated list). Empty
+          # SKIP → no filtering. Token-exact match: SPLIT keeps blanks
+          # out via `[.[]|select(.!="")]`.
+          INCLUDE=$(echo "$ALL" | jq -c --arg skip "$SKIP" '
+            ($skip | split(",") | [.[]|select(.!="")]) as $drop
+            | [ .[] | select(.platform as $p | $drop | index($p) | not) ]
+          ')
+          echo "Computed matrix (skip=$SKIP):"
+          echo "$INCLUDE" | jq .
+          echo "include=$INCLUDE" >> "$GITHUB_OUTPUT"
+          # Sanity: bail if the user skipped every platform.
+          COUNT=$(echo "$INCLUDE" | jq 'length')
+          if [ "$COUNT" -eq 0 ]; then
+            echo "FATAL: skip-platforms='$SKIP' filtered out the entire matrix." >&2
+            exit 1
+          fi
+
+  build:
+    name: build (${{ matrix.platform }})
+    needs: matrix
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.matrix.outputs.include) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system packages
+        if: runner.os == 'Linux' && inputs.linux-apt-packages != ''
+        shell: bash
+        env:
+          PACKAGES: ${{ inputs.linux-apt-packages }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          # Word-splitting $PACKAGES is intended: it is a space-separated list.
+          sudo apt-get install -y -q --no-install-recommends $PACKAGES
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform }}
+
+      # Windows runners ship with Git's bundled Strawberry Perl which is
+      # missing core modules (Locale::Maketext::Simple, Params::Check,
+      # IPC::Cmd) needed by `openssl-sys`'s vendored OpenSSL build. Most
+      # plugins pull `openssl-sys` transitively via `reqwest` (with the
+      # default `native-tls` feature) or hf-hub etc. Without a full Perl
+      # distribution the build hits:
+      #
+      #   Can't locate Locale/Maketext/Simple.pm in @INC
+      #
+      # Installing the full Strawberry Perl distribution gives openssl-sys
+      # everything it needs to configure + build OpenSSL from vendored
+      # source. Cheap (~10s, cached at choco level on subsequent runs).
+      - name: Install Strawberry Perl (Windows — needed by openssl-sys vendored build)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install -y --no-progress strawberryperl
+          # Prepend to PATH so cargo's openssl-sys build sees the full
+          # distribution before the partial Git-bundled perl
+          echo "C:\strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      # Fetch crates first so we can patch the registry copies of known
+      # CRT-misbehaving crates BEFORE cargo invokes their build.rs.
+      # On non-Windows platforms this is just a cache warmer.
+      - name: Cargo fetch (so we can patch CRT-misbehaving crates before build)
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            export PATH="/c/Strawberry/perl/bin:$PATH"
+          fi
+          cargo fetch --target ${{ matrix.rust-target }}
+
+      - name: Validate RemoteMedia loadable ABI
+        if: inputs.enforce-loadable-abi
+        shell: bash
+        env:
+          EXPECTED_PLUGIN_SDK: ${{ inputs.expected-remotemedia-plugin-sdk }}
+          EXPECTED_LOADABLE_NODE_ABI: ${{ inputs.expected-loadable-node-abi }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          expected_plugin_sdk = os.environ["EXPECTED_PLUGIN_SDK"]
+          expected_abi = os.environ["EXPECTED_LOADABLE_NODE_ABI"]
+
+          metadata = json.loads(subprocess.check_output([
+              "cargo",
+              "metadata",
+              "--format-version",
+              "1",
+              "--no-deps",
+          ], encoding="utf-8"))
+          package_ids = set(metadata.get("workspace_members") or [])
+
+          full = json.loads(subprocess.check_output([
+              "cargo",
+              "metadata",
+              "--format-version",
+              "1",
+          ], encoding="utf-8"))
+          packages = {pkg["id"]: pkg for pkg in full.get("packages", [])}
+          nodes = {node["id"]: node for node in full.get("resolve", {}).get("nodes", [])}
+
+          seen = set()
+          stack = list(package_ids)
+          while stack:
+              package_id = stack.pop()
+              if package_id in seen:
+                  continue
+              seen.add(package_id)
+              for dep in nodes.get(package_id, {}).get("deps", []):
+                  dep_id = dep.get("pkg")
+                  if dep_id and dep_id not in seen:
+                      stack.append(dep_id)
+
+          by_name = {}
+          for package_id in seen:
+              pkg = packages.get(package_id)
+              if pkg:
+                  by_name.setdefault(pkg["name"], set()).add(pkg["version"])
+
+          plugin_sdk_versions = sorted(by_name.get("remotemedia-plugin-sdk", []))
+          abi_versions = sorted(by_name.get("loadable-node-abi", []))
+
+          print(f"Resolved remotemedia-plugin-sdk: {plugin_sdk_versions or '<not present>'}")
+          print(f"Resolved loadable-node-abi: {abi_versions or '<not present>'}")
+          print(f"Expected remotemedia-plugin-sdk: {expected_plugin_sdk}")
+          print(f"Expected loadable-node-abi: {expected_abi}")
+
+          errors = []
+          if not plugin_sdk_versions and not abi_versions:
+              errors.append(
+                  "Neither remotemedia-plugin-sdk nor loadable-node-abi is present in the plugin dependency graph."
+              )
+          if plugin_sdk_versions and plugin_sdk_versions != [expected_plugin_sdk]:
+              errors.append(
+                  f"remotemedia-plugin-sdk resolved to {plugin_sdk_versions}, expected exactly {expected_plugin_sdk}."
+              )
+          if abi_versions and abi_versions != [expected_abi]:
+              errors.append(
+                  f"loadable-node-abi resolved to {abi_versions}, expected exactly {expected_abi}."
+              )
+
+          if errors:
+              print("\nFATAL: incompatible RemoteMedia loadable ABI dependency graph:", file=sys.stderr)
+              for error in errors:
+                  print(f"  - {error}", file=sys.stderr)
+              print("\nUpdate the plugin's Cargo.toml/Cargo.lock so it builds against the SDK ABI expected by this workflow, then rerun the release.", file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      # esaxx-rs 0.1.x hardcodes `.static_crt(true)` (= /MT) in build.rs
+      # for its C++ feature. The rest of the dep tree (ort-sys etc.)
+      # builds with the default /MD on Windows, so the linker emits
+      # hundreds of LNK2038 mismatches at final link
+      # ('MD_DynamicRelease' doesn't match 'MT_StaticRelease'). Flip the
+      # flag in the cached registry copy so esaxx_rs participates in the
+      # dynamic-CRT consensus. Same approach as the SDK's
+      # scripts/setup-build-env.ps1 (Step 3). No-op on non-Windows.
+      #
+      # Affects: any plugin transitively depending on `tokenizers`
+      # (which pulls esaxx-rs) — currently silero-vad, whisper.
+      # moss-tts-realtime is unaffected because Python deps stay out of
+      # the cargo dep tree.
+      - name: Patch esaxx-rs static_crt for Windows /MD-consensus link
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          REGISTRY="$USERPROFILE/.cargo/registry/src"
+          # Cygdrive-style path for find:
+          REGISTRY_BASH=$(cygpath -u "$REGISTRY" 2>/dev/null || echo "$REGISTRY")
+          # Find every cached esaxx-rs-* build.rs and flip the flag.
+          # `find -type f` first, then sed in-place. If no esaxx-rs in
+          # the dep tree (e.g. moss-tts-realtime), this is a graceful
+          # no-op.
+          found=0
+          while IFS= read -r build_rs; do
+            if grep -q '\.static_crt(true)' "$build_rs"; then
+              sed -i 's|\.static_crt(true)|.static_crt(false)|g' "$build_rs"
+              echo "Patched: $build_rs"
+              found=$((found + 1))
+            fi
+          done < <(find "$REGISTRY_BASH" -type f -path '*/esaxx-rs-*/build.rs' 2>/dev/null || true)
+          if [ "$found" -eq 0 ]; then
+            echo "No esaxx-rs build.rs found in registry (or none had static_crt(true)) — nothing to patch"
+          else
+            echo "Patched $found esaxx-rs build.rs file(s)"
+          fi
+
+      # Cubism Native SDK fetch (optional, only fires when caller sets
+      # `cubism-sdk-version`). The SDK ships under Live2D's Free Material
+      # License which prohibits public redistribution, so the zip lives
+      # in the private RemoteMedia-SDK/cubism-sdk-internal repo and we
+      # download it with a fine-grained PAT (CUBISM_SDK_TOKEN secret).
+      # See live2d-render/LIVE2D_SDK_SETUP.md for the one-time setup.
+      - name: Cache Cubism SDK (per version)
+        if: inputs.cubism-sdk-version != ''
+        id: cubism-cache
+        uses: actions/cache@v4
+        with:
+          path: cubism-sdk
+          key: cubism-${{ inputs.cubism-sdk-version }}
+
+      - name: Fetch Cubism SDK (cache miss)
+        if: inputs.cubism-sdk-version != '' && steps.cubism-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.CUBISM_SDK_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "FATAL: cubism-sdk-version='${{ inputs.cubism-sdk-version }}' was set but CUBISM_SDK_TOKEN secret wasn't passed by the caller workflow." >&2
+            echo "See LIVE2D_SDK_SETUP.md for the one-time setup." >&2
+            exit 1
+          fi
+          mkdir -p cubism-sdk
+          gh release download '${{ inputs.cubism-sdk-version }}' \
+              --repo RemoteMedia-SDK/cubism-sdk-internal \
+              --pattern 'CubismSdkForNative-*.zip' \
+              --dir /tmp
+          ZIP=$(ls /tmp/CubismSdkForNative-*.zip | head -1)
+          echo "Unzipping $ZIP → cubism-sdk/"
+          unzip -q "$ZIP" -d cubism-sdk
+          rm -f "$ZIP"
+
+      - name: Export LIVE2D_CUBISM_CORE_DIR
+        if: inputs.cubism-sdk-version != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT=$(ls -d cubism-sdk/CubismSdkForNative-* 2>/dev/null | head -1)
+          if [ -z "$ROOT" ]; then
+            echo "FATAL: no CubismSdkForNative-* dir under cubism-sdk/ after fetch+unzip." >&2
+            ls -la cubism-sdk/ >&2
+            exit 1
+          fi
+          # build.rs scripts in the Cubism Rust bindings read this env var.
+          # Use the absolute repo-workspace path so cargo's per-target build
+          # dir can resolve it independent of the CWD it ends up running in.
+          echo "LIVE2D_CUBISM_CORE_DIR=$GITHUB_WORKSPACE/$ROOT" >> "$GITHUB_ENV"
+          echo "Exported LIVE2D_CUBISM_CORE_DIR=$GITHUB_WORKSPACE/$ROOT"
+
+      - name: Build cdylib
+        shell: bash
+        run: |
+          # On Windows, `shell: bash` resolves to Git Bash which prepends
+          # /usr/bin to PATH at profile-load time, so its stripped-down
+          # bundled Perl (missing Locale::Maketext::Simple etc.) wins over
+          # the Strawberry Perl we installed via choco in the prior step.
+          # The "Install Strawberry Perl" step's $GITHUB_PATH update made
+          # it visible to subsequent pwsh steps, not to this bash shell.
+          # Re-prepend Strawberry Perl here from inside bash so openssl-sys's
+          # `Command::new("perl")` resolves to the full distribution.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            export PATH="/c/Strawberry/perl/bin:$PATH"
+            echo "perl resolved to: $(which perl)"
+            perl -e 'use Locale::Maketext::Simple; print "Locale::Maketext::Simple OK\n"' \
+              || { echo "FATAL: Strawberry Perl PATH override didn't take" >&2; exit 1; }
+          fi
+          ARGS="--release --target ${{ matrix.rust-target }}"
+          if [ "${{ inputs.cargo-no-default-features }}" = "true" ]; then
+            ARGS="$ARGS --no-default-features"
+          fi
+          if [ -n "${{ inputs.cargo-features }}" ]; then
+            ARGS="$ARGS --features ${{ inputs.cargo-features }}"
+          fi
+          echo "+ cargo build $ARGS"
+          cargo build $ARGS
+
+      - name: Rename + SHA256
+        id: stage
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Cargo turns hyphens in the crate name into underscores for the libfile
+          LIBNAME=$(echo '${{ inputs.crate-name }}' | tr '-' '_')
+          SRC=target/${{ matrix.rust-target }}/release/${{ matrix.lib-prefix }}${LIBNAME}.${{ matrix.ext }}
+          DEST=lib${{ inputs.display-name }}-${{ matrix.platform }}.${{ matrix.ext }}
+          if [ ! -f "$SRC" ]; then
+            echo "Build artifact not found: $SRC" >&2
+            echo "Available files in target/${{ matrix.rust-target }}/release/:" >&2
+            ls -la target/${{ matrix.rust-target }}/release/ | head -30 >&2
+            exit 1
+          fi
+          cp "$SRC" "$DEST"
+          if command -v sha256sum >/dev/null 2>&1; then
+            HASH=$(sha256sum "$DEST" | awk '{print $1}')
+          else
+            HASH=$(shasum -a 256 "$DEST" | awk '{print $1}')
+          fi
+          printf '%s' "$HASH" > "$DEST.sha256"
+          echo "file=$DEST"   >> "$GITHUB_OUTPUT"
+          echo "sha256=$HASH" >> "$GITHUB_OUTPUT"
+          echo "Built $DEST (sha256=$HASH)"
+
+      - name: Upload platform artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-${{ matrix.platform }}
+          path: |
+            lib${{ inputs.display-name }}-${{ matrix.platform }}.${{ matrix.ext }}
+            lib${{ inputs.display-name }}-${{ matrix.platform }}.${{ matrix.ext }}.sha256
+          if-no-files-found: error
+
+  release:
+    name: assemble + publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate release-manifest.json
+        shell: bash
+        env:
+          DISPLAY_NAME: ${{ inputs.display-name }}
+          TAG: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+          EXPECTED_PLUGIN_SDK: ${{ inputs.expected-remotemedia-plugin-sdk }}
+          EXPECTED_LOADABLE_NODE_ABI: ${{ inputs.expected-loadable-node-abi }}
+        run: |
+          python3 <<'PY'
+          import json, os, re, sys
+          from pathlib import Path
+
+          plugin_name = os.environ["DISPLAY_NAME"]
+          tag = os.environ["TAG"]
+          expected_plugin_sdk = os.environ["EXPECTED_PLUGIN_SDK"]
+          expected_abi = os.environ["EXPECTED_LOADABLE_NODE_ABI"]
+          art = Path("artifacts")
+
+          # Match lib{plugin_name}-{arch}-{os}.{ext}, ignore .sha256 sidecars
+          pattern = re.compile(
+              rf"^lib{re.escape(plugin_name)}-([a-z0-9_]+-[a-z0-9_]+)\.(so|dylib|dll)$"
+          )
+          platforms = {}
+          for f in sorted(art.iterdir()):
+              if not f.is_file():
+                  continue
+              m = pattern.match(f.name)
+              if not m:
+                  continue
+              platform = m.group(1)
+              sha_file = Path(str(f) + ".sha256")
+              if not sha_file.exists():
+                  print(f"WARN: no .sha256 sidecar for {f.name}", file=sys.stderr)
+                  continue
+              sha = sha_file.read_text().strip()
+              platforms[platform] = {"file": f.name, "sha256": sha}
+              print(f"  {platform:20s} {f.name} {sha}")
+
+          if not platforms:
+              print(f"FATAL: no platform binaries found under artifacts/ matching lib{plugin_name}-*.{{so,dylib,dll}}", file=sys.stderr)
+              for f in sorted(art.iterdir()):
+                  print(f"  {f.name}", file=sys.stderr)
+              sys.exit(1)
+
+          manifest = {
+              "name": plugin_name,
+              "version": tag,
+              "loadable_node_abi": expected_abi,
+              "remotemedia_plugin_sdk": expected_plugin_sdk,
+              "platforms": platforms,
+          }
+          out = art / "release-manifest.json"
+          out.write_text(json.dumps(manifest, indent=2) + "\n")
+          print()
+          print(f"Wrote {out}:")
+          print(out.read_text())
+          PY
+
+      - name: Upload everything to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+          files: |
+            artifacts/lib${{ inputs.display-name }}-*.so
+            artifacts/lib${{ inputs.display-name }}-*.dylib
+            artifacts/lib${{ inputs.display-name }}-*.dll
+            artifacts/release-manifest.json
+          fail_on_unmatched_files: false

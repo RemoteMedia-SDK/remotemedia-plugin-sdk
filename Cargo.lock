@@ -1949,6 +1949,7 @@ dependencies = [
  "sha2",
  "tokio",
  "url",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

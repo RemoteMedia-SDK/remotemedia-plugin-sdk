@@ -367,6 +367,17 @@ pub trait AsyncStreamingNode: Send + Sync {
         Vec::new()
     }
 
+    /// Latest-input-wins. When `true`, the session router cancels this
+    /// node's in-flight call as soon as a newer data input arrives,
+    /// instead of queueing the new input behind the running call.
+    ///
+    /// Aux-port envelopes (`barge_in`, `context`, ...) are never "newer
+    /// input". Cancellation still honours any active `ProtectGuard`.
+    /// Default `false` (inputs are processed strictly in order).
+    fn supersede_on_new_input(&self) -> bool {
+        false
+    }
+
     /// May run concurrently with media and other RPCs. Host context owns identity.
     async fn call_rpc(
         &self,
@@ -539,6 +550,17 @@ pub trait StreamingNode: Send + Sync {
         Vec::new()
     }
 
+    /// Latest-input-wins. When `true`, the session router cancels this
+    /// node's in-flight call as soon as a newer data input arrives,
+    /// instead of queueing the new input behind the running call.
+    ///
+    /// Aux-port envelopes (`barge_in`, `context`, ...) are never "newer
+    /// input". Cancellation still honours any active `ProtectGuard`.
+    /// Default `false` (inputs are processed strictly in order).
+    fn supersede_on_new_input(&self) -> bool {
+        false
+    }
+
     /// May run concurrently with media and other RPCs. Host context owns identity.
     async fn call_rpc(
         &self,
@@ -620,6 +642,27 @@ pub trait StreamingNode: Send + Sync {
     /// Configure this node based on upstream capabilities (spec 025).
     fn configure_from_upstream(&self, _upstream_caps: &MediaCapabilities) -> Result<(), Error> {
         Ok(())
+    }
+
+    /// Runtime capability handshake, the backward half (`Adaptive` nodes).
+    ///
+    /// After every node is initialized, the runtime collects what the nodes
+    /// downstream of this one accept (their `actual_capabilities()` inputs,
+    /// e.g. the rates a speaker's device takes) and passes their
+    /// intersection as `accepted` (input constraints). The node picks the
+    /// output it will produce, keeping each upstream value it already has
+    /// when `accepted` allows it (mono stays mono, 48 kHz stays 48 kHz) and
+    /// otherwise the nearest accepted value, and returns that output so the
+    /// runtime can check the connections after it. An explicit param that
+    /// `accepted` rules out is an error, not something to override.
+    ///
+    /// Called after `configure_from_upstream`, before any data flows.
+    /// Default: `Ok(None)` (the node does not adapt to downstream).
+    fn configure_for_downstream(
+        &self,
+        _accepted: &MediaCapabilities,
+    ) -> Result<Option<MediaCapabilities>, Error> {
+        Ok(None)
     }
 
     // =========================================================================
@@ -754,6 +797,10 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
 
     fn rpc_methods(&self) -> Vec<crate::rpc::RpcMethod> {
         self.0.rpc_methods()
+    }
+
+    fn supersede_on_new_input(&self) -> bool {
+        self.0.supersede_on_new_input()
     }
 
     async fn call_rpc(

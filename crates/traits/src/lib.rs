@@ -124,3 +124,9 @@ pub use rpc::{
     CallContext, RpcEvent, RpcId, RpcMethod, RpcMode, RpcReply, RpcReplySink, RpcRequest,
     RpcResponder,
 };
+
+pub mod call;
+pub use call::{
+    call_reply_method, CallErrorKind, CallReplyEnvelope, CallReplyEvent, CallRequestEnvelope,
+    CALL_AUX_PORT, CALL_REPLY_METHOD,
+};

@@ -26,3 +26,5 @@ jobs:
         run: cargo test --workspace
       - name: cargo test python plugin feature
         run: cargo test -p remotemedia-plugin-sdk --features python-plugin
+      - name: cargo test bundled uv feature
+        run: cargo test -p remotemedia-py-env --features bundled-uv

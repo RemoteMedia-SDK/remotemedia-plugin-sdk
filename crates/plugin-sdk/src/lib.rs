@@ -19,6 +19,7 @@ pub use rmp_serde;
 
 pub mod adapter;
 pub mod buffer_contract;
+pub mod endpoint_call;
 pub mod params;
 
 #[cfg(all(feature = "mapped-python", any(windows, target_os = "linux")))]

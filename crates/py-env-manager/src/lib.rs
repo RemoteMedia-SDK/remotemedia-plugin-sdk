@@ -842,6 +842,14 @@ impl PythonEnvManager {
                 Some((src, origin)) => {
                     // Single requirements.txt line — the `-e <path>` form
                     // must not be split across lines or `pip` rejects it.
+                    // pip splits option lines shell-style, which eats the
+                    // backslashes of a Windows path (`D:\a\b` -> `D:ab`);
+                    // forward slashes work for pip and uv on every OS.
+                    let src = if cfg!(windows) {
+                        src.replace('\\', "/")
+                    } else {
+                        src
+                    };
                     config.base_deps = vec![format!("-e {}", src)];
                     tracing::info!(
                         src = %src,
@@ -1098,6 +1106,31 @@ fn default_cache_dir() -> PathBuf {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// `CREATE_NO_WINDOW` when this process has no console of its own (a GUI app
+/// such as face-desktop), so each child (python, uv) does not open a console
+/// window; `None` in a console app, whose children keep sharing its console.
+#[cfg(windows)]
+pub(crate) fn no_window_flag() -> Option<u32> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetConsoleWindow() -> *mut core::ffi::c_void;
+    }
+    // SAFETY: takes no arguments; returns this process's console window or null.
+    unsafe { GetConsoleWindow() }
+        .is_null()
+        .then_some(0x0800_0000)
+}
+
+/// A tokio `Command` that opens no console window (see [`no_window_flag`]).
+#[cfg_attr(not(windows), allow(unused_mut))]
+pub(crate) fn hidden(mut cmd: tokio::process::Command) -> tokio::process::Command {
+    #[cfg(windows)]
+    if let Some(flags) = no_window_flag() {
+        cmd.creation_flags(flags);
+    }
+    cmd
+}
 
 #[cfg(test)]
 mod tests {
