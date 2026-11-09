@@ -63,6 +63,11 @@ mod output_allocator;
 mod provenance;
 mod payload_layout;
 mod shared_buffer;
+mod device;
+pub use device::{
+    contiguous_strides, Device, DeviceAllocation, DeviceBuffer, DeviceCompletion, DeviceKind,
+    DeviceReady, DlDtype, TransferError,
+};
 pub use copy_policy::{
     CopyCompletionError, CopyContext, CopyCounts, CopyEvent, CopyLedger, CopyOperation, CopyPolicy,
     CopyReason, CopyRejected, CopyReport, COPY_REASONS,
@@ -691,6 +696,26 @@ pub enum RuntimeData {
         /// Whether array is Fortran-contiguous
         f_contiguous: bool,
     },
+    /// Tensor resident in device memory (task 6.4). Never a host slice:
+    /// in-process consumers on the same device share the allocation, and any
+    /// boundary needing host bytes must call `device_to_host`, a counted
+    /// `DeviceTransfer` that strict policy rejects. Serde refuses this variant.
+    DeviceTensor {
+        /// Shared device allocation.
+        buffer: DeviceBuffer,
+        /// DLPack element type.
+        dtype: DlDtype,
+        /// Shape in elements.
+        shape: Vec<i64>,
+        /// Strides in elements; `None` means C-contiguous.
+        strides: Option<Vec<i64>>,
+        /// Byte offset of the first element within the allocation.
+        byte_offset: u64,
+        /// Readiness event recorded on the producer's stream, if any.
+        ready: Option<DeviceReady>,
+        /// Optional extensible metadata.
+        metadata: Option<serde_json::Value>,
+    },
     /// JSON data
     Json(serde_json::Value),
     /// Text data
@@ -769,6 +794,7 @@ impl RuntimeData {
             RuntimeData::Binary(_) => "binary",
             RuntimeData::ControlMessage { .. } => "control_message",
             RuntimeData::File { .. } => "file",
+            RuntimeData::DeviceTensor { .. } => "device_tensor",
         }
     }
 
@@ -873,6 +899,9 @@ impl RuntimeData {
             RuntimeData::Binary(b) => b.len(),
             RuntimeData::ControlMessage { .. } => 1,
             RuntimeData::File { .. } => 1, // One file reference
+            RuntimeData::DeviceTensor { shape, .. } => {
+                shape.iter().map(|&d| d.max(0) as usize).product()
+            }
         }
     }
 
@@ -888,6 +917,9 @@ impl RuntimeData {
             | Self::Numpy { data, .. }
             | Self::Binary(data) => data.len(),
             Self::Json(_) | Self::Text(_) | Self::ControlMessage { .. } | Self::File { .. } => 0,
+            // Device-resident data has no host bytes; host copy accounting never
+            // counts it. Host access is a separate, counted DeviceTransfer.
+            Self::DeviceTensor { .. } => 0,
         }
     }
 
@@ -938,6 +970,11 @@ impl RuntimeData {
                     + mime_type.as_ref().map(|s| s.len()).unwrap_or(0)
                     + stream_id.as_ref().map(|s| s.len()).unwrap_or(0)
                     + 24 // 3 u64 fields (size, offset, length)
+            }
+            // Device memory of the visible view; none of it is host memory.
+            RuntimeData::DeviceTensor { dtype, shape, .. } => {
+                shape.iter().map(|&d| d.max(0) as usize).product::<usize>()
+                    * dtype.item_bytes().unwrap_or(0)
             }
         }
     }

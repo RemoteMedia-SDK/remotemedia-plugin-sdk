@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use remotemedia_types::{Error, RuntimeData};
+use remotemedia_types::{Device, Error, RuntimeData};
 
 use crate::capabilities::{CapabilityBehavior, MediaCapabilities};
 use crate::ports::{PortKind, SnapshotPort};
@@ -170,6 +170,14 @@ pub trait SyncStreamingNode: Send + Sync {
     /// Get the node type name.
     fn node_type(&self) -> &str;
 
+    /// Whether this node consumes [`RuntimeData::DeviceTensor`] values resident
+    /// on `device` in place. Default `false`: the runtime transfers device
+    /// tensors to host before delivery (a counted `DeviceTransfer`, rejected
+    /// under strict policy), so existing nodes never see device memory.
+    fn accepts_device(&self, _device: Device) -> bool {
+        false
+    }
+
     /// Process single-input data.
     fn process(&self, data: RuntimeData) -> Result<RuntimeData, Error>;
 
@@ -259,6 +267,14 @@ pub trait AsyncStreamingNode: Send + Sync {
     }
     /// Get the node type name.
     fn node_type(&self) -> &str;
+
+    /// Whether this node consumes [`RuntimeData::DeviceTensor`] values resident
+    /// on `device` in place. Default `false`: the runtime transfers device
+    /// tensors to host before delivery (a counted `DeviceTransfer`, rejected
+    /// under strict policy), so existing nodes never see device memory.
+    fn accepts_device(&self, _device: Device) -> bool {
+        false
+    }
 
     /// Initialize the node (load models, resources, etc.).
     ///
@@ -461,6 +477,14 @@ pub trait StreamingNode: Send + Sync {
     /// Get the node type name.
     fn node_type(&self) -> &str;
 
+    /// Whether this node consumes [`RuntimeData::DeviceTensor`] values resident
+    /// on `device` in place. Default `false`: the runtime transfers device
+    /// tensors to host before delivery (a counted `DeviceTransfer`, rejected
+    /// under strict policy), so existing nodes never see device memory.
+    fn accepts_device(&self, _device: Device) -> bool {
+        false
+    }
+
     /// Get the node ID. Default empty — overridden by nodes that
     /// have IDs.
     fn node_id(&self) -> &str {
@@ -639,6 +663,9 @@ impl<T: SyncStreamingNode + 'static> StreamingNode for SyncNodeWrapper<T> {
     fn node_type(&self) -> &str {
         self.0.node_type()
     }
+    fn accepts_device(&self, device: Device) -> bool {
+        self.0.accepts_device(device)
+    }
 
     async fn process_async(
         &self,
@@ -683,6 +710,9 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
     }
     fn node_type(&self) -> &str {
         self.0.node_type()
+    }
+    fn accepts_device(&self, device: Device) -> bool {
+        self.0.accepts_device(device)
     }
 
     async fn initialize(&self, ctx: &dyn InitializeContextRead) -> Result<(), Error> {

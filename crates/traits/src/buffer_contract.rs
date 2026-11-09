@@ -31,6 +31,9 @@ pub enum BufferLayout {
     NumpyCContiguous,
     NumpyFContiguous,
     Binary,
+    /// A device-resident tensor (`RuntimeData::DeviceTensor`), shared by
+    /// owner on the device named by the port's `Device` domain.
+    TensorDevice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

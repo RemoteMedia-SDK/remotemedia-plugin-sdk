@@ -1901,6 +1901,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "remotemedia-device-cuda"
+version = "0.1.0"
+dependencies = [
+ "libloading 0.8.9",
+ "remotemedia-types",
+]
+
+[[package]]
 name = "remotemedia-modality"
 version = "0.4.0"
 dependencies = [

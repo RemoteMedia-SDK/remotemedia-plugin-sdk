@@ -154,6 +154,11 @@ impl RuntimeData {
         tensor_encoding: TensorEncoding,
     ) -> Result<(RuntimeMetadata, PayloadStorage)> {
         let (metadata, payload) = match self {
+            Self::DeviceTensor { .. } => {
+                return Err(PayloadLayoutError::Invalid(
+                    "device tensors need an explicit DeviceTransfer before host transport",
+                ))
+            }
             Self::Audio {
                 sample_rate,
                 channels,

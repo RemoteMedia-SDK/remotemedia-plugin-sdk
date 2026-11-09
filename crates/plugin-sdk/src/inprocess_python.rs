@@ -408,6 +408,9 @@ mod inner {
     ) -> PyResult<Py<PyAny>> {
         let shared = mode.is_shared();
         match data {
+            RuntimeData::DeviceTensor { .. } => Err(pyo3::exceptions::PyTypeError::new_err(
+                "device tensors are not exported to this Python node",
+            )),
             RuntimeData::Audio {
                 samples,
                 sample_rate,

@@ -37,6 +37,26 @@ impl BufferPortContract {
         data: &RuntimeData,
         verified_domain: &BufferDomain,
     ) -> Result<(), String> {
+        if let Some(device) = data.device() {
+            // A device owner identifies its own domain; no host domain applies.
+            if !self.layouts.contains(&BufferLayout::TensorDevice) {
+                return Err("undeclared payload layout TensorDevice".into());
+            }
+            let domain = device.domain();
+            if !self.domains.contains(&BufferDomain::Device(domain.clone())) {
+                return Err(format!(
+                    "device tensor on {domain} needs a DeviceTransfer to this port's memory domain"
+                ));
+            }
+            let bytes = data.size_bytes() as u64;
+            if bytes > self.max_payload_bytes {
+                return Err(format!(
+                    "payload has {bytes} bytes; declared maximum is {}",
+                    self.max_payload_bytes
+                ));
+            }
+            return Ok(());
+        }
         let Some((layout, encoding)) = self.payload_layout(data)? else {
             return Ok(());
         };

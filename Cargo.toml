@@ -9,6 +9,7 @@ members = [
     "crates/core-derive",
     "crates/shared-memory",
     "crates/python-buffers",
+    "crates/device-cuda",
     "integration/shared-buffer-plugin",
     "integration/abi-v05-fixture",
 ]

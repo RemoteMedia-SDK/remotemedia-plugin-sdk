@@ -35,6 +35,8 @@ impl SharedPool {
             | RuntimeData::Json(_)
             | RuntimeData::File { .. }
             | RuntimeData::ControlMessage { .. } => true,
+            // Device memory is never host pool storage.
+            RuntimeData::DeviceTensor { .. } => false,
         }
     }
 }
