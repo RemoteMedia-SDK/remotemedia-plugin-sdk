@@ -564,68 +564,78 @@ pub fn spawn_runner_and_ipc(
     // Reply is via std::sync::mpsc which is safe to `recv()` from
     // any thread (including a tokio worker — std::sync::mpsc isn't
     // a tokio primitive).
-    let (rdy_tx, rdy_rx) = std::sync::mpsc::channel::<Result<(), String>>();
-    cmd_tx
-        .try_send(IpcCommand::WaitForReady {
-            timeout: ready_timeout(),
-            reply: rdy_tx,
-        })
-        .map_err(|e| format!("dispatch WaitForReady: {e}"))?;
+    // Every failure after spawn must terminate the runner: a READY timeout,
+    // error or dispatch failure otherwise leaves a live, unowned process.
+    let ready = (|| -> Result<(), String> {
+        let (rdy_tx, rdy_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        cmd_tx
+            .try_send(IpcCommand::WaitForReady {
+                timeout: ready_timeout(),
+                reply: rdy_tx,
+            })
+            .map_err(|e| format!("dispatch WaitForReady: {e}"))?;
 
-    // Poll for READY OR subprocess death, whichever lands first.
-    // Without the death check, a Python crash (ModuleNotFoundError,
-    // venv missing `remotemedia`, iceoryx2 version skew, segfault, …)
-    // would silently wait the full READY timeout (default 300s) before
-    // surfacing — long enough to look like a hang in test harnesses
-    // with shorter deadlines (jest beforeAll @ 90s). Polling
-    // `try_wait()` makes the failure visible quickly; the user can then
-    // check the runner's stderr (or `REMOTEMEDIA_PLUGIN_STDERR_FILE`)
-    // for the real cause.
-    //
-    // Two safeguards against false positives:
-    //   1. After observing an exit status, drain the READY channel one
-    //      more time (with a short timeout) — if Python published READY
-    //      and *then* exited (close-on-success scenarios), the READY
-    //      message is still in the queue and we should honor it.
-    //   2. Use a 250ms poll interval so a Python that pegs the CPU
-    //      during startup doesn't get racy `waitpid(WNOHANG)` reads
-    //      between SIGCHLD bookkeeping and actual reap.
-    let death_poll = Duration::from_millis(250);
-    loop {
-        match rdy_rx.recv_timeout(death_poll) {
-            Ok(result) => {
-                result?;
-                break;
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let exit = child
-                    .lock()
-                    .ok()
-                    .and_then(|mut g| g.try_wait().ok().flatten());
-                if let Some(status) = exit {
-                    // Last-chance drain: READY may have been published
-                    // in the same window the child exited. Give the IPC
-                    // thread up to 200ms more to deliver it before
-                    // declaring failure.
-                    if let Ok(result) = rdy_rx.recv_timeout(Duration::from_millis(200)) {
-                        result?;
-                        break;
+        // Poll for READY OR subprocess death, whichever lands first.
+        // Without the death check, a Python crash (ModuleNotFoundError,
+        // venv missing `remotemedia`, iceoryx2 version skew, segfault, …)
+        // would silently wait the full READY timeout (default 300s) before
+        // surfacing — long enough to look like a hang in test harnesses
+        // with shorter deadlines (jest beforeAll @ 90s). Polling
+        // `try_wait()` makes the failure visible quickly; the user can then
+        // check the runner's stderr (or `REMOTEMEDIA_PLUGIN_STDERR_FILE`)
+        // for the real cause.
+        //
+        // Two safeguards against false positives:
+        //   1. After observing an exit status, drain the READY channel one
+        //      more time (with a short timeout) — if Python published READY
+        //      and *then* exited (close-on-success scenarios), the READY
+        //      message is still in the queue and we should honor it.
+        //   2. Use a 250ms poll interval so a Python that pegs the CPU
+        //      during startup doesn't get racy `waitpid(WNOHANG)` reads
+        //      between SIGCHLD bookkeeping and actual reap.
+        let death_poll = Duration::from_millis(250);
+        loop {
+            match rdy_rx.recv_timeout(death_poll) {
+                Ok(result) => {
+                    result?;
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let exit = child
+                        .lock()
+                        .ok()
+                        .and_then(|mut g| g.try_wait().ok().flatten());
+                    if let Some(status) = exit {
+                        // Last-chance drain: READY may have been published
+                        // in the same window the child exited. Give the IPC
+                        // thread up to 200ms more to deliver it before
+                        // declaring failure.
+                        if let Ok(result) = rdy_rx.recv_timeout(Duration::from_millis(200)) {
+                            result?;
+                            break;
+                        }
+                        return Err(format!(
+                            "runner process exited before publishing READY (status: {status}). \
+                             Common causes: managed venv missing the `remotemedia` package \
+                             (set REMOTEMEDIA_PYTHON_SRC=/path/to/clients/python), \
+                             iceoryx2 version skew between Rust workspace and the plugin's \
+                             @python_requires pin, or an unhandled ImportError. \
+                             Set REMOTEMEDIA_PLUGIN_STDERR_FILE=<path> to capture the \
+                             runner's stderr for diagnosis."
+                        ));
                     }
-                    return Err(format!(
-                        "runner process exited before publishing READY (status: {status}). \
-                         Common causes: managed venv missing the `remotemedia` package \
-                         (set REMOTEMEDIA_PYTHON_SRC=/path/to/clients/python), \
-                         iceoryx2 version skew between Rust workspace and the plugin's \
-                         @python_requires pin, or an unhandled ImportError. \
-                         Set REMOTEMEDIA_PLUGIN_STDERR_FILE=<path> to capture the \
-                         runner's stderr for diagnosis."
-                    ));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("WaitForReady reply channel disconnected".into());
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Err("WaitForReady reply channel disconnected".into());
-            }
         }
+
+        Ok(())
+    })();
+    if let Err(error) = ready {
+        terminate_runner(&child);
+        return Err(error);
     }
 
     Ok((cmd_tx, child))
@@ -1326,6 +1336,66 @@ mod runner_lifecycle_tests {
             }
         };
         assert!(error.contains("exited before EndOfInput"), "{error}");
+    }
+
+    fn alive(pid: u32) -> bool {
+        if cfg!(windows) {
+            let out = Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
+        } else {
+            Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .unwrap()
+                .success()
+        }
+    }
+
+    #[test]
+    fn runner_that_never_becomes_ready_is_terminated_not_leaked() {
+        let dir = std::env::temp_dir().join(format!(
+            "rm-ready-leak-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("pid");
+        // A runner that records its PID and never publishes READY.
+        let argv: Vec<String> = if cfg!(windows) {
+            vec![
+                "powershell".into(),
+                "-NoProfile".into(),
+                "-Command".into(),
+                format!(
+                    "$PID | Out-File -Encoding ascii '{}'; Start-Sleep 120",
+                    pid_file.display()
+                ),
+            ]
+        } else {
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("echo $$ > '{}'; exec sleep 120", pid_file.display()),
+            ]
+        };
+        std::env::set_var(READY_TIMEOUT_ENV, "3");
+        let session = format!("readyleak{}", std::process::id());
+        let result = spawn_runner_and_ipc(&argv, &session, "node");
+        std::env::remove_var(READY_TIMEOUT_ENV);
+        assert!(result.is_err(), "a runner without READY must fail");
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("runner started and recorded its pid")
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!alive(pid), "runner {pid} leaked after READY failure");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -15,10 +15,43 @@ fn wheel_requirement(name: &str, path: &Path) -> Result<(String, String)> {
         )));
     }
     let digest = file_digest(&path)?;
+    if let Some(expected) = pinned_digest(&path) {
+        if expected != digest {
+            return Err(Error::ConfigError(format!(
+                "{name} wheel changed after its runtime bundle was verified: {}",
+                path.display()
+            )));
+        }
+    }
     let mut url = url::Url::from_file_path(path)
         .map_err(|_| Error::ConfigError(format!("{name} wheel path cannot become a file URL")))?;
     url.set_fragment(Some(&format!("sha256={digest}")));
     Ok((format!("{name} @ {url}"), digest))
+}
+
+/// Wheels verified by a loaded runtime bundle, keyed by canonical path. A
+/// later launch must install exactly the verified bytes, not whatever file
+/// has since replaced them at that path.
+fn pinned() -> &'static std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, String>> {
+    static PINNED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, String>>,
+    > = std::sync::OnceLock::new();
+    PINNED.get_or_init(Default::default)
+}
+
+pub(super) fn pin_wheel(canonical: &Path, digest: &str) {
+    pinned()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(canonical.to_path_buf(), digest.to_owned());
+}
+
+fn pinned_digest(canonical: &Path) -> Option<String> {
+    pinned()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(canonical)
+        .cloned()
 }
 
 pub(super) fn file_digest(path: &Path) -> Result<String> {
@@ -137,4 +170,37 @@ pub(super) async fn provision(
     let context =
         remotemedia_py_env::ProvisioningContext::new(manager.config().process_namespace.clone());
     super::launch::prepare(venv, &client_hash, &buffers_hash, protocols, &context).await
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    #[test]
+    fn bundle_pinned_wheel_rejects_replacement_before_install() {
+        let dir = std::env::temp_dir().join(format!(
+            "rm-wheel-pin-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wheel = dir.join("remotemedia_client-0.0.0-py3-none-any.whl");
+        std::fs::write(&wheel, b"verified bytes").unwrap();
+        let canonical = wheel.canonicalize().unwrap();
+        pin_wheel(&canonical, &file_digest(&canonical).unwrap());
+        let (requirement, _) = wheel_requirement("remotemedia-client", &wheel).unwrap();
+        assert!(requirement.starts_with("remotemedia-client @ file:"));
+        std::fs::write(&wheel, b"replaced bytes").unwrap();
+        let error = wheel_requirement("remotemedia-client", &wheel)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("changed after its runtime bundle was verified"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

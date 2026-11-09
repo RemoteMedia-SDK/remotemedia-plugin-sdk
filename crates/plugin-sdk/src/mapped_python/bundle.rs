@@ -44,6 +44,8 @@ impl Artifact {
 
     fn wheel(&self, root: &Path, distribution: &str) -> Result<PathBuf> {
         let path = self.resolve(root)?;
+        // Every later launch must install exactly these verified bytes.
+        super::provisioning::pin_wheel(&path, &self.sha256);
         let name = path
             .file_name()
             .and_then(|name| name.to_str())
