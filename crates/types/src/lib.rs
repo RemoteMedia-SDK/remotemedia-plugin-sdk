@@ -69,7 +69,10 @@ pub use copy_policy::{
 };
 pub use message::{PayloadKind, PayloadStorage, RuntimeMetadata, TensorEncoding};
 pub use buffer_budget::{BufferBudget, BufferBudgetUsage};
-pub use output_allocator::{BufferAllocationError, HeapOutputAllocator, OutputAllocator};
+pub use output_allocator::{
+    AssumePreparedRealtime, BufferAllocationError, HeapOutputAllocator, OutputAllocator,
+    PreparedRealtimeSupport,
+};
 pub use provenance::{BoundOutputAllocator, ForwardingScope};
 pub use payload_layout::PayloadLayoutError;
 pub use shared_buffer::{BufferLoan, BufferRangeError, SharedBuffer};

@@ -12,6 +12,21 @@ pub enum BufferAllocationError {
     Unavailable,
 }
 
+/// Whether a provider has been validated for prepared real-time producers.
+///
+/// Prepared producers allocate loans on a worker thread and hand them to a
+/// real-time callback, which only writes through the loan's mutable slice and
+/// returns it. `Verified` means that slice access and the hand-back never
+/// allocate, block or lock on the callback thread for this provider, as shown
+/// by allocation-counting tests. Everything else is `Unverified`, and prepared
+/// spawns reject it unless the caller opts in with
+/// [`AssumePreparedRealtime`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparedRealtimeSupport {
+    Verified,
+    Unverified,
+}
+
 /// Supplies initialized, exclusive output storage in the selected memory domain.
 /// Providers must return an error on exhaustion, never overwrite a live buffer.
 /// Allocation itself is not a real-time-safe operation; prepare loans beforehand.
@@ -19,6 +34,27 @@ pub enum BufferAllocationError {
 pub trait OutputAllocator: Send + Sync {
     fn allocate_bytes(&self, len: usize) -> Result<BufferLoan<u8>, BufferAllocationError>;
     fn allocate_audio(&self, samples: usize) -> Result<BufferLoan<f32>, BufferAllocationError>;
+
+    /// Prepared real-time validation status. Unknown providers are unverified.
+    fn prepared_realtime_support(&self) -> PreparedRealtimeSupport {
+        PreparedRealtimeSupport::Unverified
+    }
+}
+
+/// Explicit caller opt-in: treat `provider` as validated for prepared
+/// real-time use. The caller takes responsibility for that validation.
+pub struct AssumePreparedRealtime(pub std::sync::Arc<dyn OutputAllocator>);
+
+impl OutputAllocator for AssumePreparedRealtime {
+    fn allocate_bytes(&self, len: usize) -> Result<BufferLoan<u8>, BufferAllocationError> {
+        self.0.allocate_bytes(len)
+    }
+    fn allocate_audio(&self, samples: usize) -> Result<BufferLoan<f32>, BufferAllocationError> {
+        self.0.allocate_audio(samples)
+    }
+    fn prepared_realtime_support(&self) -> PreparedRealtimeSupport {
+        PreparedRealtimeSupport::Verified
+    }
 }
 
 /// Local heap allocation. This does not provide cross-process shareable storage.
@@ -44,5 +80,10 @@ impl OutputAllocator for HeapOutputAllocator {
 
     fn allocate_audio(&self, samples: usize) -> Result<BufferLoan<f32>, BufferAllocationError> {
         allocate(samples)
+    }
+
+    /// Prepared loans are plain heap storage: slice access never allocates.
+    fn prepared_realtime_support(&self) -> PreparedRealtimeSupport {
+        PreparedRealtimeSupport::Verified
     }
 }

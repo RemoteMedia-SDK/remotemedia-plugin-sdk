@@ -307,6 +307,11 @@ impl OutputAllocator for SharedPool {
     ) -> std::result::Result<BufferLoan<f32>, BufferAllocationError> {
         self.allocate(samples).map_err(allocation_error)
     }
+    /// Mapping happens at allocation (worker thread); slice access is plain
+    /// shared memory. Verified by the prepared heap/mapped bridge tests.
+    fn prepared_realtime_support(&self) -> remotemedia_types::PreparedRealtimeSupport {
+        remotemedia_types::PreparedRealtimeSupport::Verified
+    }
 }
 
 struct Writer<T> {

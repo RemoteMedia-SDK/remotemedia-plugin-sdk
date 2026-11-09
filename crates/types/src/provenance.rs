@@ -123,6 +123,11 @@ impl OutputAllocator for BoundOutputAllocator {
         loan.buffer.provenance.allocation = Some(self.token.clone());
         Ok(loan)
     }
+    /// Budget reservation and release run where loans are allocated and
+    /// dropped (the bridge worker), so the binding inherits its provider.
+    fn prepared_realtime_support(&self) -> crate::PreparedRealtimeSupport {
+        self.provider.prepared_realtime_support()
+    }
 }
 
 /// Opaque admission scope for one node instance. It does not retain payloads.
