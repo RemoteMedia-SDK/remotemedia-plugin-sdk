@@ -194,7 +194,13 @@ impl StreamingNode for Fixture {
         }
         assert_eq!(inputs.len(), 2);
         assert!(inputs.contains_key("right"));
-        Ok(inputs.remove("left").unwrap())
+        let left = inputs.remove("left").unwrap();
+        if self.forward {
+            // Fan-in forwarding through the multi-input hook; `probe_copy`
+            // deliberately materializes the payload first.
+            return forward_probe(left, self.probe_copy);
+        }
+        Ok(left)
     }
     async fn process_streaming_async(
         &self,
@@ -240,6 +246,9 @@ impl StreamingNode for Fixture {
                 .is_cancelled());
             return Ok(1);
         }
+        // Multi-output streaming hook; `probe_copy` deliberately materializes
+        // the payload before slicing it.
+        let data = forward_probe(data, self.probe_copy)?;
         let RuntimeData::Binary(data) = data else {
             return Err(Error::Execution("binary stream input required".into()));
         };
