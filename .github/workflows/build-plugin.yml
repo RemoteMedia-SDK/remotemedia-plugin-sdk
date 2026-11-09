@@ -237,7 +237,7 @@ jobs:
               "--format-version",
               "1",
               "--no-deps",
-          ], text=True))
+          ], encoding="utf-8"))
           package_ids = set(metadata.get("workspace_members") or [])
 
           full = json.loads(subprocess.check_output([
@@ -245,7 +245,7 @@ jobs:
               "metadata",
               "--format-version",
               "1",
-          ], text=True))
+          ], encoding="utf-8"))
           packages = {pkg["id"]: pkg for pkg in full.get("packages", [])}
           nodes = {node["id"]: node for node in full.get("resolve", {}).get("nodes", [])}
 
