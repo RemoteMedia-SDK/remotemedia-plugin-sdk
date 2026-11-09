@@ -452,6 +452,13 @@ impl WorkerProcess {
     /// Linux namespace launches confirm init pidfd readiness. A timeout or query
     /// failure is not evidence that remote buffer owners are gone.
     pub fn terminate(&mut self) -> io::Result<ExitStatus> {
+        #[cfg(feature = "test-faults")]
+        if test_faults::termination_unconfirmed(self.child.id()) {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "injected unconfirmed worker termination",
+            ));
+        }
         let status = self.terminate_owned_processes()?;
         self.resources.release();
         Ok(status)
@@ -475,6 +482,40 @@ impl WorkerProcess {
             self.child.kill()?;
             self.child.wait()
         }
+    }
+}
+
+/// Fault injection for lifecycle tests: make every termination of a worker
+/// fail as if its exit could not be confirmed (a timeout or query failure).
+/// The process is left untouched, so callers must clean it up themselves.
+#[cfg(feature = "test-faults")]
+pub mod test_faults {
+    use std::{collections::HashSet, sync::Mutex};
+
+    static UNCONFIRMED: Mutex<Option<HashSet<u32>>> = Mutex::new(None);
+
+    /// Simulate unconfirmable termination for the original child `pid`.
+    pub fn simulate_unconfirmed_termination(pid: u32) {
+        UNCONFIRMED
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashSet::new)
+            .insert(pid);
+    }
+
+    /// Stop simulating for `pid` (OS process IDs can be reused).
+    pub fn clear(pid: u32) {
+        if let Some(set) = UNCONFIRMED.lock().unwrap().as_mut() {
+            set.remove(&pid);
+        }
+    }
+
+    pub(super) fn termination_unconfirmed(pid: u32) -> bool {
+        UNCONFIRMED
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|set| set.contains(&pid))
     }
 }
 

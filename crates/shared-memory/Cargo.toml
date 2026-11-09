@@ -31,6 +31,8 @@ libc = { workspace = true, optional = true }
 worker-channel = ["dep:libc", "dep:windows-sys"]
 worker-protocol = ["worker-channel", "dep:serde_json", "dep:remotemedia-traits"]
 test-peer = ["worker-protocol"]
+# Lifecycle fault injection (e.g. unconfirmable worker termination) for tests.
+test-faults = ["worker-channel"]
 linux-worker-supervisor = ["worker-channel"]
 test-linux-namespace = ["test-peer", "linux-worker-supervisor"]
 

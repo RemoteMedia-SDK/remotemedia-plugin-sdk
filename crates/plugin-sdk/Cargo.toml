@@ -33,7 +33,7 @@ test-mapped-probe = ["mapped-python", "remotemedia-py-env/test-probe"]
 default = []
 native-worker = ["dep:remotemedia-shared-memory", "remotemedia-shared-memory/worker-protocol", "tokio/sync", "dep:futures"]
 linux-worker-supervisor = ["native-worker", "remotemedia-shared-memory/linux-worker-supervisor"]
-test-native-worker = ["native-worker"]
+test-native-worker = ["native-worker", "remotemedia-shared-memory/test-faults"]
 mapped-python = ["native-worker", "dep:remotemedia-py-env", "dep:sha2", "dep:hex", "dep:url"]
 mapped-python-uv = ["mapped-python", "remotemedia-py-env/bundled-uv"]
 # Enables `python_plugin_export!` and `PythonSubprocessFactory`. Off by

@@ -722,8 +722,19 @@ impl Shared {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        let terminated = self.process.lock().unwrap().terminate().is_ok();
-        let mut ledger = self.ledger.lock().unwrap();
+        // Close also runs from Drop while a panic unwinds. A lock poisoned by
+        // that panic must not abort here: termination and the release-or-
+        // quarantine decision still apply, and the ledger is only emptied.
+        let terminated = self
+            .process
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .terminate()
+            .is_ok();
+        let mut ledger = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if terminated {
             // SAFETY: spawn's contract forbids delegation; the original child
             // handle confirmed termination; Windows jobs have no active members,
