@@ -37,7 +37,7 @@ homepage = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk"
 async-trait = "0.1"
 futures = "0.3"
 hex = "0.4"
-iceoryx2 = "0.9.3"
+iceoryx2 = "0.10.0"
 inventory = "0.3"
 libc = "0.2"
 schemars = "0.8"
@@ -52,9 +52,3 @@ pyo3 = { version = "0.28", features = ["abi3-py311", "auto-initialize"], default
 pyo3-async-runtimes = { version = "0.28", features = ["tokio-runtime"] }
 numpy = "0.28"
 
-# Vendored iceoryx2 0.9.3 Windows repairs (from a9b23afd; see
-# crates/patches/README.md): dead-node port-tag cleanup so Windows node
-# directories are actually removed, plus enumeration/diagnostic fixes.
-[patch.crates-io]
-iceoryx2-pal-posix = { path = "../remotemedia-sdk/crates/patches/iceoryx2-pal-posix" }
-iceoryx2 = { path = "../remotemedia-sdk/crates/patches/iceoryx2" }
