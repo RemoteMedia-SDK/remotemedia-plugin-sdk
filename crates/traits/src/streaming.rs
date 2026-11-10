@@ -76,6 +76,38 @@ impl Default for PacingNature {
     }
 }
 
+/// How many instances of a node one session runs when several participants
+/// send input (openspec: add-multi-participant-sessions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceScope {
+    /// One instance processes every participant's frames (today's behaviour).
+    #[default]
+    Shared,
+    /// One instance per participant, created on its first frame: each
+    /// participant gets its own node state.
+    PerParticipant,
+}
+
+impl InstanceScope {
+    /// The manifest / serde spelling.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Shared => "shared",
+            Self::PerParticipant => "per_participant",
+        }
+    }
+
+    /// Parse the manifest / serde spelling.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "shared" => Some(Self::Shared),
+            "per_participant" => Some(Self::PerParticipant),
+            _ => None,
+        }
+    }
+}
+
 /// Node execution status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -176,6 +208,11 @@ pub trait SyncStreamingNode: Send + Sync {
     /// under strict policy), so existing nodes never see device memory.
     fn accepts_device(&self, _device: Device) -> bool {
         false
+    }
+
+    /// See [`StreamingNode::instance_scope`].
+    fn instance_scope(&self) -> Option<InstanceScope> {
+        None
     }
 
     /// Process single-input data.
@@ -378,6 +415,16 @@ pub trait AsyncStreamingNode: Send + Sync {
         false
     }
 
+    /// How many instances of this node a session runs when several
+    /// participants send input (openspec: add-multi-participant-sessions):
+    /// [`InstanceScope::Shared`] (one for the session) or
+    /// [`InstanceScope::PerParticipant`] (one per participant, for nodes that
+    /// keep per-user state such as VAD or utterance buffers). A manifest node's
+    /// `instance_scope` overrides this. `None` (default) declares nothing.
+    fn instance_scope(&self) -> Option<InstanceScope> {
+        None
+    }
+
     /// May run concurrently with media and other RPCs. Host context owns identity.
     async fn call_rpc(
         &self,
@@ -561,6 +608,16 @@ pub trait StreamingNode: Send + Sync {
         false
     }
 
+    /// How many instances of this node a session runs when several
+    /// participants send input (openspec: add-multi-participant-sessions):
+    /// [`InstanceScope::Shared`] (one for the session) or
+    /// [`InstanceScope::PerParticipant`] (one per participant, for nodes that
+    /// keep per-user state such as VAD or utterance buffers). A manifest node's
+    /// `instance_scope` overrides this. `None` (default) declares nothing.
+    fn instance_scope(&self) -> Option<InstanceScope> {
+        None
+    }
+
     /// May run concurrently with media and other RPCs. Host context owns identity.
     async fn call_rpc(
         &self,
@@ -709,6 +766,9 @@ impl<T: SyncStreamingNode + 'static> StreamingNode for SyncNodeWrapper<T> {
     fn accepts_device(&self, device: Device) -> bool {
         self.0.accepts_device(device)
     }
+    fn instance_scope(&self) -> Option<InstanceScope> {
+        self.0.instance_scope()
+    }
 
     async fn process_async(
         &self,
@@ -803,6 +863,10 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
         self.0.supersede_on_new_input()
     }
 
+    fn instance_scope(&self) -> Option<InstanceScope> {
+        self.0.instance_scope()
+    }
+
     async fn call_rpc(
         &self,
         request: crate::rpc::RpcRequest,
@@ -887,6 +951,13 @@ pub trait StreamingNodeFactory: Send + Sync {
     /// Check if this factory creates multi-output streaming nodes.
     fn is_multi_output_streaming(&self) -> bool {
         false
+    }
+
+    /// The instance scope of the nodes this factory creates, when known
+    /// without creating one. A node instance's own declaration takes
+    /// precedence; a manifest node's `instance_scope` overrides both.
+    fn instance_scope(&self) -> Option<InstanceScope> {
+        None
     }
 
     /// Get the node schema for type generation.

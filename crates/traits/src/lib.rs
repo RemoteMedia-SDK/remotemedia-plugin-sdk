@@ -111,7 +111,8 @@ pub use schema::{
 };
 
 pub use streaming::{
-    AnySessionState, AsyncNodeWrapper, AsyncStreamingNode, NodeStatus, PacingNature, StreamingNode,
+    AnySessionState, AsyncNodeWrapper, AsyncStreamingNode, InstanceScope, NodeStatus, PacingNature,
+    StreamingNode,
     StreamingNodeFactory, SyncNodeWrapper, SyncStreamingNode, Tick,
 };
 pub use stt::{

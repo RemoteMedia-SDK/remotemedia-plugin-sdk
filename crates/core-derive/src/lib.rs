@@ -98,6 +98,9 @@ struct NodeArgs {
     input_caps: Option<String>,
     /// Output capability constraints DSL (e.g., "audio(sample_rate=16000..48000)")
     output_caps: Option<String>,
+    /// Instance scope: "shared" or "per_participant" (openspec:
+    /// add-multi-participant-sessions).
+    instance_scope: Option<String>,
 }
 
 /// Classification of a field as either config or state
@@ -135,6 +138,7 @@ fn parse_node_args(args: &[NestedMeta]) -> Result<NodeArgs, syn::Error> {
     let mut capabilities = None;
     let mut input_caps = None;
     let mut output_caps = None;
+    let mut instance_scope = None;
 
     for arg in args {
         match arg {
@@ -195,6 +199,17 @@ fn parse_node_args(args: &[NestedMeta]) -> Result<NodeArgs, syn::Error> {
                             output_caps = Some(s.value());
                         }
                     }
+                    "instance_scope" => match &nv.lit {
+                        Lit::Str(s) if matches!(s.value().as_str(), "shared" | "per_participant") => {
+                            instance_scope = Some(s.value());
+                        }
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.lit,
+                                "instance_scope must be \"shared\" or \"per_participant\"",
+                            ));
+                        }
+                    },
                     other => {
                         return Err(syn::Error::new_spanned(
                             &nv.path,
@@ -225,6 +240,7 @@ fn parse_node_args(args: &[NestedMeta]) -> Result<NodeArgs, syn::Error> {
         capabilities,
         input_caps,
         output_caps,
+        instance_scope,
     })
 }
 
@@ -627,6 +643,20 @@ fn generate_trait_impl(struct_name: &syn::Ident, args: &NodeArgs) -> proc_macro2
     let multi_output = args.multi_output;
     let streaming = args.streaming;
 
+    let instance_scope_impl = match args.instance_scope.as_deref() {
+        Some("per_participant") => quote! {
+            fn instance_scope(&self) -> Option<remotemedia_traits::streaming::InstanceScope> {
+                Some(remotemedia_traits::streaming::InstanceScope::PerParticipant)
+            }
+        },
+        Some(_) => quote! {
+            fn instance_scope(&self) -> Option<remotemedia_traits::streaming::InstanceScope> {
+                Some(remotemedia_traits::streaming::InstanceScope::Shared)
+            }
+        },
+        None => quote! {},
+    };
+
     // For multi_output nodes, process() returns an error, process_streaming is used.
     // For nodes with `streaming = true` (additive form), process() still maps to
     // `process_impl` — the user-provided single-output implementation — and
@@ -686,6 +716,8 @@ fn generate_trait_impl(struct_name: &syn::Ident, args: &NodeArgs) -> proc_macro2
             #process_impl
 
             #streaming_impl
+
+            #instance_scope_impl
         }
     }
 }
