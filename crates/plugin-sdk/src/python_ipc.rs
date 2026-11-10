@@ -539,6 +539,7 @@ struct Side<'a> {
     cmd_rx: &'a mut mpsc::Receiver<IpcCommand>,
     stash: &'a mut std::collections::VecDeque<IpcCommand>,
     turn: &'a mut TurnState,
+    wake: Option<&'a WakeEvents>,
 }
 
 // ── Turn tags (openspec: add-node-initiated-output) ───────────────────
@@ -704,6 +705,74 @@ impl TurnState {
     }
 }
 
+/// Wake events beside the input and output channels (`{channel}_event`): the
+/// services the in-host executor also creates, which the runner opens when
+/// they exist. This thread signals the input event after each publish, so the
+/// runner blocks for input instead of polling; the runner signals the output
+/// event after each of its publishes, so this thread blocks for output
+/// instead of spinning. `REMOTEMEDIA_IPC_WAKE_EVENTS=0` turns them off.
+struct WakeEvents {
+    input: iceoryx2::port::notifier::Notifier<ipc::Service>,
+    output: iceoryx2::port::listener::Listener<ipc::Service>,
+    _services: [iceoryx2::service::port_factory::event::PortFactory<ipc::Service>; 2],
+}
+
+/// Longest single block on the output event. Out-of-band sends, control
+/// messages and the runner liveness check are looked at between blocks, and
+/// a runner that never signals is still served within this time.
+const WAKE_SLICE: Duration = Duration::from_millis(1);
+
+fn wake_events_enabled() -> bool {
+    std::env::var("REMOTEMEDIA_IPC_WAKE_EVENTS").map_or(true, |v| v != "0")
+}
+
+fn create_wake_events(
+    node: &iceoryx2::node::Node<ipc::Service>,
+    in_channel: &str,
+    out_channel: &str,
+) -> Result<WakeEvents, String> {
+    let event = |channel: &str| {
+        let name = format!("{channel}_event");
+        node.service_builder(
+            &ServiceName::new(&name).map_err(|e| format!("event service name {name}: {e:?}"))?,
+        )
+        .event()
+        // The two peers, plus a restarted peer whose old port is still registered.
+        .max_notifiers(4)
+        .max_listeners(2)
+        .open_or_create()
+        .map_err(|e| format!("event service {name}: {e:?}"))
+    };
+    let (input_service, output_service) = (event(in_channel)?, event(out_channel)?);
+    let input = input_service
+        .notifier_builder()
+        .create()
+        .map_err(|e| format!("input notifier: {e:?}"))?;
+    let output = output_service
+        .listener_builder()
+        .create()
+        .map_err(|e| format!("output listener: {e:?}"))?;
+    Ok(WakeEvents {
+        input,
+        output,
+        _services: [input_service, output_service],
+    })
+}
+
+/// Publish on the input channel and wake the runner.
+fn publish_input(
+    publisher: &iceoryx2::port::publisher::Publisher<ipc::Service, [u8], ()>,
+    wake: Option<&WakeEvents>,
+    bytes: &[u8],
+) -> Result<(), String> {
+    publish_bytes(publisher, bytes)?;
+    if let Some(wake) = wake {
+        // A missed signal only delays the runner by its wait timeout.
+        let _ = wake.input.notify();
+    }
+    Ok(())
+}
+
 fn publish_bytes(
     publisher: &iceoryx2::port::publisher::Publisher<ipc::Service, [u8], ()>,
     bytes: &[u8],
@@ -722,7 +791,7 @@ impl Side<'_> {
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             match cmd {
                 IpcCommand::Send { req_bytes } => {
-                    if let Err(e) = publish_bytes(publisher, &req_bytes) {
+                    if let Err(e) = publish_input(publisher, self.wake, &req_bytes) {
                         eprintln!("[plugin-sdk python_ipc] out-of-band send failed: {e}");
                     }
                 }
@@ -1120,9 +1189,10 @@ impl RunnerLiveness {
         let _ = self.0.set(child);
     }
 
-    fn poll(&self) -> IdlePoll<'_> {
+    fn poll<'a>(&'a self, wake: Option<&'a WakeEvents>) -> IdlePoll<'a> {
         IdlePoll {
             runner: self,
+            output: wake.map(|w| &w.output),
             next_check: std::time::Instant::now() + RUNNER_LIVENESS_INTERVAL,
         }
     }
@@ -1134,17 +1204,23 @@ const RUNNER_LIVENESS_INTERVAL: Duration = Duration::from_millis(250);
 /// emitted on its own. Bounds how late such a frame is noticed while idle.
 const BETWEEN_ROUNDS_POLL: Duration = Duration::from_millis(2);
 
-/// Idle step of a turn: yield, and periodically confirm the runner is alive.
-/// Only called when no sample is queued, so frames a runner published before
-/// exiting are still delivered first.
+/// Idle step of a turn: wait for the runner's output signal (or yield, without
+/// wake events), and periodically confirm the runner is alive. Only called
+/// when no sample is queued, so frames a runner published before exiting are
+/// still delivered first.
 struct IdlePoll<'a> {
     runner: &'a RunnerLiveness,
+    output: Option<&'a iceoryx2::port::listener::Listener<ipc::Service>>,
     next_check: std::time::Instant,
 }
 
 impl IdlePoll<'_> {
     fn wait(&mut self) -> Result<(), String> {
-        std::thread::yield_now();
+        // Signals latch, so one sent after the empty receive is not missed.
+        match self.output {
+            Some(listener) if listener.timed_wait(|_| {}, WAKE_SLICE).is_ok() => {}
+            _ => std::thread::yield_now(),
+        }
         let now = std::time::Instant::now();
         if now < self.next_check {
             return Ok(());
@@ -1370,10 +1446,20 @@ fn spawn_ipc_thread(
                     .subscriber_builder()
                     .create()
                     .map_err(|e| format!("subscriber create: {e:?}"))?;
-                Ok((publisher, subscriber, control_subscriber, control_service))
+                // Created before the runner starts, so it finds them on connect.
+                let wake = if wake_events_enabled() {
+                    create_wake_events(&node, &in_channel, &out_channel)
+                        .map_err(|e| {
+                            eprintln!("[plugin-sdk python_ipc] no wake events, polling: {e}")
+                        })
+                        .ok()
+                } else {
+                    None
+                };
+                Ok((publisher, subscriber, control_subscriber, control_service, wake))
             };
 
-            let (publisher, subscriber, control_subscriber, _control_service) = match setup() {
+            let (publisher, subscriber, control_subscriber, _control_service, wake) = match setup() {
                 Ok(ps) => {
                     let _ = ready_tx.send(Ok(()));
                     ps
@@ -1393,7 +1479,8 @@ fn spawn_ipc_thread(
             let mut stash = std::collections::VecDeque::<IpcCommand>::new();
             let mut turn = TurnState::default();
             // Between rounds: notice a runner that exited, once.
-            let mut idle = liveness.poll();
+            // Its loop sleeps between polls, so it does not wait on the wake event.
+            let mut idle = liveness.poll(None);
             let mut exit_reported = false;
             loop {
                 turn.current = None;
@@ -1449,10 +1536,11 @@ fn spawn_ipc_thread(
                     cmd_rx: &mut cmd_rx,
                     stash: &mut stash,
                     turn: &mut turn,
+                    wake: wake.as_ref(),
                 };
                 match cmd {
                     IpcCommand::Send { req_bytes } => {
-                        if let Err(e) = publish_bytes(&publisher, &req_bytes) {
+                        if let Err(e) = publish_input(&publisher, side.wake, &req_bytes) {
                             eprintln!("[plugin-sdk python_ipc] out-of-band send failed: {e}");
                         }
                     }
@@ -1620,8 +1708,8 @@ fn round_trip(
     liveness: &RunnerLiveness,
     side: &mut Side<'_>,
 ) -> Result<Vec<u8>, String> {
-    publish_bytes(publisher, &side.turn.begin(req))?;
-    let mut idle = liveness.poll();
+    publish_input(publisher, side.wake, &side.turn.begin(req))?;
+    let mut idle = liveness.poll(side.wake);
 
     let mut first: Option<Vec<u8>> = None;
     loop {
@@ -1678,8 +1766,8 @@ fn round_trip_multi(
     liveness: &RunnerLiveness,
     side: &mut Side<'_>,
 ) -> Result<Vec<Vec<u8>>, String> {
-    publish_bytes(publisher, &side.turn.begin(req))?;
-    let mut idle = liveness.poll();
+    publish_input(publisher, side.wake, &side.turn.begin(req))?;
+    let mut idle = liveness.poll(side.wake);
 
     let mut outputs: Vec<Vec<u8>> = Vec::new();
     loop {
@@ -1738,8 +1826,8 @@ fn round_trip_streaming(
     liveness: &RunnerLiveness,
     side: &mut Side<'_>,
 ) -> Result<(), String> {
-    publish_bytes(publisher, &side.turn.begin_from(req, origin))?;
-    let mut idle = liveness.poll();
+    publish_input(publisher, side.wake, &side.turn.begin_from(req, origin))?;
+    let mut idle = liveness.poll(side.wake);
 
     let mut consumer_alive = true;
     loop {
@@ -2156,9 +2244,50 @@ mod runner_lifecycle_tests {
     }
 
     #[test]
+    fn wake_events_connect_the_host_and_the_runner_ports() {
+        let node = NodeBuilder::new()
+            .create::<ipc::Service>()
+            .expect("iceoryx2 node");
+        let base = format!("wake_test_{}_{}", std::process::id(), WireRuntimeData::now_us());
+        let (in_channel, out_channel) = (format!("{base}_input"), format!("{base}_output"));
+        let wake = create_wake_events(&node, &in_channel, &out_channel).expect("wake events");
+        // The runner's side, opened by name the way runner.py does.
+        let open = |name: String| {
+            node.service_builder(&ServiceName::new(&name).unwrap())
+                .event()
+                .open()
+                .expect("open event service")
+        };
+        let runner_input = open(format!("{in_channel}_event"));
+        let runner_output = open(format!("{out_channel}_event"));
+        let input_listener = runner_input.listener_builder().create().unwrap();
+        let output_notifier = runner_output.notifier_builder().create().unwrap();
+
+        // Host -> runner: a signal sent before the wait is not lost.
+        wake.input.notify().unwrap();
+        let mut woke = 0;
+        input_listener
+            .timed_wait(|_| woke += 1, Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(woke, 1);
+
+        // Runner -> host: the idle step returns on the signal, well before
+        // the liveness interval, and without one it blocks about one slice.
+        let liveness = RunnerLiveness::default();
+        let mut idle = liveness.poll(Some(&wake));
+        output_notifier.notify().unwrap();
+        let start = std::time::Instant::now();
+        idle.wait().unwrap();
+        assert!(start.elapsed() < Duration::from_millis(100));
+        let start = std::time::Instant::now();
+        idle.wait().unwrap();
+        assert!(start.elapsed() < Duration::from_millis(200));
+    }
+
+    #[test]
     fn idle_poll_reports_a_runner_that_exits_mid_turn() {
         let liveness = RunnerLiveness::default();
-        let mut idle = liveness.poll();
+        let mut idle = liveness.poll(None);
         // No child installed yet (startup window): never an error.
         assert!(idle.wait().is_ok());
         let child = shell("exit 3", "exit 3");
