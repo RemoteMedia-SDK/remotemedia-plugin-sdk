@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use remotemedia_types::{Error, RuntimeData};
+use remotemedia_types::{Device, Error, RuntimeData};
 
 use crate::capabilities::{CapabilityBehavior, MediaCapabilities};
 use crate::ports::{PortKind, SnapshotPort};
@@ -170,8 +170,50 @@ pub trait SyncStreamingNode: Send + Sync {
     /// Get the node type name.
     fn node_type(&self) -> &str;
 
+    /// Whether this node consumes [`RuntimeData::DeviceTensor`] values resident
+    /// on `device` in place. Default `false`: the runtime transfers device
+    /// tensors to host before delivery (a counted `DeviceTransfer`, rejected
+    /// under strict policy), so existing nodes never see device memory.
+    fn accepts_device(&self, _device: Device) -> bool {
+        false
+    }
+
     /// Process single-input data.
     fn process(&self, data: RuntimeData) -> Result<RuntimeData, Error>;
+
+    /// Context-bearing single-output entrypoint. Override the context-bearing
+    /// streaming/multi entrypoints too when those lanes need the same behavior.
+    fn process_with_ctx(
+        &self,
+        data: RuntimeData,
+        _ctx: &dyn NodeRuntimeContextRead,
+    ) -> Result<RuntimeData, Error> {
+        self.process(data)
+    }
+
+    fn process_multi_with_ctx(
+        &self,
+        inputs: HashMap<String, RuntimeData>,
+        _ctx: &dyn NodeRuntimeContextRead,
+    ) -> Result<RuntimeData, Error> {
+        self.process_multi(inputs)
+    }
+
+    /// Defaults to the existing streaming override, preserving legacy multi-output
+    /// behavior. Context-aware nodes override this lane explicitly.
+    fn process_streaming_with_ctx(
+        &self,
+        data: RuntimeData,
+        ctx: &dyn NodeRuntimeContextRead,
+        callback: &mut dyn FnMut(RuntimeData) -> Result<(), Error>,
+    ) -> Result<usize, Error> {
+        let session_id = if ctx.session_id().is_empty() {
+            None
+        } else {
+            Some(ctx.session_id())
+        };
+        self.process_streaming(data, session_id, callback)
+    }
 
     /// Process multi-input data (for nodes that require multiple named
     /// inputs).
@@ -211,8 +253,28 @@ pub trait SyncStreamingNode: Send + Sync {
 /// [`AsyncNodeWrapper`].
 #[async_trait::async_trait]
 pub trait AsyncStreamingNode: Send + Sync {
+    /// Validate a bound reader before media execution. Foreign adapters can
+    /// reject payload contracts they cannot transport without materialization.
+    fn validate_snapshot_input(
+        &self,
+        _port: &str,
+        _reader: &dyn SnapshotPort,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+    fn snapshot_outputs(&self) -> HashMap<String, Arc<dyn SnapshotPort>> {
+        HashMap::new()
+    }
     /// Get the node type name.
     fn node_type(&self) -> &str;
+
+    /// Whether this node consumes [`RuntimeData::DeviceTensor`] values resident
+    /// on `device` in place. Default `false`: the runtime transfers device
+    /// tensors to host before delivery (a counted `DeviceTransfer`, rejected
+    /// under strict policy), so existing nodes never see device memory.
+    fn accepts_device(&self, _device: Device) -> bool {
+        false
+    }
 
     /// Initialize the node (load models, resources, etc.).
     ///
@@ -223,6 +285,25 @@ pub trait AsyncStreamingNode: Send + Sync {
 
     /// Process single-input data asynchronously.
     async fn process(&self, data: RuntimeData) -> Result<RuntimeData, Error>;
+
+    /// Context-bearing single-output entrypoint, including direct allocation.
+    async fn process_with_ctx(
+        &self,
+        data: RuntimeData,
+        _ctx: &dyn NodeRuntimeContextRead,
+    ) -> Result<RuntimeData, Error> {
+        self.process(data).await
+    }
+
+    /// Context-bearing named-input entrypoint. Existing nodes keep their
+    /// established multi-input behavior through the default delegation.
+    async fn process_multi_with_ctx(
+        &self,
+        inputs: HashMap<String, RuntimeData>,
+        _ctx: &dyn NodeRuntimeContextRead,
+    ) -> Result<RuntimeData, Error> {
+        self.process_multi(inputs).await
+    }
 
     /// Process multi-input data asynchronously.
     async fn process_multi(
@@ -347,6 +428,35 @@ pub trait AsyncStreamingNode: Send + Sync {
     ) -> Result<(), Error> {
         Ok(())
     }
+
+    /// Source/tick producers receive the same allocator and identity as media
+    /// calls. Default delegation preserves existing session-only source nodes.
+    async fn tick_with_ctx(
+        &self,
+        tick: Tick,
+        ctx: &dyn NodeRuntimeContextRead,
+        callback: Box<dyn FnMut(RuntimeData) -> Result<(), Error> + Send>,
+    ) -> Result<(), Error> {
+        let session_id = if ctx.session_id().is_empty() {
+            None
+        } else {
+            Some(ctx.session_id().to_string())
+        };
+        self.tick(tick, session_id, callback).await
+    }
+
+    async fn process_control_with_ctx(
+        &self,
+        message: RuntimeData,
+        ctx: &dyn NodeRuntimeContextRead,
+    ) -> Result<bool, Error> {
+        let session_id = if ctx.session_id().is_empty() {
+            None
+        } else {
+            Some(ctx.session_id().to_string())
+        };
+        self.process_control_message(message, session_id).await
+    }
 }
 
 /// Unified streaming node trait used by the registry and pipeline
@@ -357,8 +467,34 @@ pub trait AsyncStreamingNode: Send + Sync {
 /// [`AsyncNodeWrapper`]).
 #[async_trait::async_trait]
 pub trait StreamingNode: Send + Sync {
+    /// Bind the reader actually delivered to runtime contexts. Validation
+    /// adapters may retain a checked view; ordinary nodes keep the same owner.
+    fn bind_snapshot_input(
+        &self,
+        port: &str,
+        reader: Arc<dyn SnapshotPort>,
+    ) -> Result<Arc<dyn SnapshotPort>, Error> {
+        self.validate_snapshot_input(port, reader.as_ref())?;
+        Ok(reader)
+    }
+
+    fn validate_snapshot_input(
+        &self,
+        _port: &str,
+        _reader: &dyn SnapshotPort,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
     /// Get the node type name.
     fn node_type(&self) -> &str;
+
+    /// Whether this node consumes [`RuntimeData::DeviceTensor`] values resident
+    /// on `device` in place. Default `false`: the runtime transfers device
+    /// tensors to host before delivery (a counted `DeviceTransfer`, rejected
+    /// under strict policy), so existing nodes never see device memory.
+    fn accepts_device(&self, _device: Device) -> bool {
+        false
+    }
 
     /// Get the node ID. Default empty — overridden by nodes that
     /// have IDs.
@@ -554,6 +690,9 @@ pub trait StreamingNode: Send + Sync {
 
     /// Type-erased read handles for this node's snapshot output ports,
     /// keyed by output port name.
+    /// The session binds these after initialize completes and retains the chosen
+    /// handles. Publish new values through those ports; do not replace their
+    /// identity after session binding.
     fn snapshot_outputs(&self) -> HashMap<String, Arc<dyn SnapshotPort>> {
         HashMap::new()
     }
@@ -567,21 +706,24 @@ impl<T: SyncStreamingNode + 'static> StreamingNode for SyncNodeWrapper<T> {
     fn node_type(&self) -> &str {
         self.0.node_type()
     }
+    fn accepts_device(&self, device: Device) -> bool {
+        self.0.accepts_device(device)
+    }
 
     async fn process_async(
         &self,
         data: RuntimeData,
-        _ctx: &dyn NodeRuntimeContextRead,
+        ctx: &dyn NodeRuntimeContextRead,
     ) -> Result<RuntimeData, Error> {
-        self.0.process(data)
+        self.0.process_with_ctx(data, ctx)
     }
 
     async fn process_multi_async(
         &self,
         inputs: HashMap<String, RuntimeData>,
-        _ctx: &dyn NodeRuntimeContextRead,
+        ctx: &dyn NodeRuntimeContextRead,
     ) -> Result<RuntimeData, Error> {
-        self.0.process_multi(inputs)
+        self.0.process_multi_with_ctx(inputs, ctx)
     }
 
     fn is_multi_input(&self) -> bool {
@@ -594,12 +736,7 @@ impl<T: SyncStreamingNode + 'static> StreamingNode for SyncNodeWrapper<T> {
         ctx: &dyn NodeRuntimeContextRead,
         mut callback: Box<dyn FnMut(RuntimeData) -> Result<(), Error> + Send>,
     ) -> Result<usize, Error> {
-        let session_id = if ctx.session_id().is_empty() {
-            None
-        } else {
-            Some(ctx.session_id())
-        };
-        self.0.process_streaming(data, session_id, &mut *callback)
+        self.0.process_streaming_with_ctx(data, ctx, &mut *callback)
     }
 }
 
@@ -608,8 +745,17 @@ pub struct AsyncNodeWrapper<T: AsyncStreamingNode>(pub Arc<T>);
 
 #[async_trait::async_trait]
 impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
+    fn validate_snapshot_input(&self, port: &str, reader: &dyn SnapshotPort) -> Result<(), Error> {
+        self.0.validate_snapshot_input(port, reader)
+    }
+    fn snapshot_outputs(&self) -> HashMap<String, Arc<dyn SnapshotPort>> {
+        self.0.snapshot_outputs()
+    }
     fn node_type(&self) -> &str {
         self.0.node_type()
+    }
+    fn accepts_device(&self, device: Device) -> bool {
+        self.0.accepts_device(device)
     }
 
     async fn initialize(&self, ctx: &dyn InitializeContextRead) -> Result<(), Error> {
@@ -619,17 +765,17 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
     async fn process_async(
         &self,
         data: RuntimeData,
-        _ctx: &dyn NodeRuntimeContextRead,
+        ctx: &dyn NodeRuntimeContextRead,
     ) -> Result<RuntimeData, Error> {
-        self.0.process(data).await
+        self.0.process_with_ctx(data, ctx).await
     }
 
     async fn process_multi_async(
         &self,
         inputs: HashMap<String, RuntimeData>,
-        _ctx: &dyn NodeRuntimeContextRead,
+        ctx: &dyn NodeRuntimeContextRead,
     ) -> Result<RuntimeData, Error> {
-        self.0.process_multi(inputs).await
+        self.0.process_multi_with_ctx(inputs, ctx).await
     }
 
     fn is_multi_input(&self) -> bool {
@@ -673,12 +819,7 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
         message: RuntimeData,
         ctx: &dyn NodeRuntimeContextRead,
     ) -> Result<bool, Error> {
-        let session_id = if ctx.session_id().is_empty() {
-            None
-        } else {
-            Some(ctx.session_id().to_string())
-        };
-        self.0.process_control_message(message, session_id).await
+        self.0.process_control_with_ctx(message, ctx).await
     }
 
     fn pacing_nature(&self) -> PacingNature {
@@ -699,17 +840,34 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
         ctx: &dyn NodeRuntimeContextRead,
         callback: Box<dyn FnMut(RuntimeData) -> Result<(), Error> + Send>,
     ) -> Result<(), Error> {
-        let session_id = if ctx.session_id().is_empty() {
-            None
-        } else {
-            Some(ctx.session_id().to_string())
-        };
-        self.0.tick(tick, session_id, callback).await
+        self.0.tick_with_ctx(tick, ctx, callback).await
     }
 }
 
 /// Factory trait for creating streaming node instances.
 pub trait StreamingNodeFactory: Send + Sync {
+    /// Pure declaration for the exact parameters, before create/initialize.
+    /// None means unknown, never implicit support. Must cover every execution
+    /// lane and output port; callers still validate actual payloads at runtime.
+    fn buffer_contract(&self, _params: &Value) -> Option<crate::buffer_contract::BufferContract> {
+        None
+    }
+
+    /// Fallible inspection used by hosts. Foreign factories must preserve
+    /// transport/metadata errors rather than silently returning an unknown.
+    fn try_buffer_contract(
+        &self,
+        params: &Value,
+    ) -> Result<Option<crate::buffer_contract::BufferContract>, Error> {
+        Ok(self.buffer_contract(params))
+    }
+
+    /// Which declared protocol this concrete adapter can bind. A transport
+    /// adapter must override the local-Rust default and verify its created node.
+    fn supports_buffer_protocol(&self, protocol: &crate::buffer_contract::BufferProtocol) -> bool {
+        matches!(protocol, crate::buffer_contract::BufferProtocol::RustOwners)
+    }
+
     /// Create a new streaming node instance.
     fn create(
         &self,

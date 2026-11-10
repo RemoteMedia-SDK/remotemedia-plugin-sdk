@@ -4,11 +4,11 @@
 //! crosses the `dlopen` boundary is defined here and uses `abi_stable`
 //! types (`RVec`, `RString`, `RResult`, `RBox`, sabi-trait objects).
 //!
-//! `RuntimeData` itself is **not** in this surface — instead it is
-//! serialized to msgpack bytes (`RVec<u8>` via `rmp-serde::to_vec_named`)
-//! at the boundary. That keeps `remotemedia-core` out of the FFI
-//! contract entirely, so a plugin built against a different rustc /
-//! feature set can still load.
+//! `RuntimeData` itself never crosses the ABI as a native Rust enum. ABI 0.7
+//! carries payload-free JSON metadata and retained immutable buffer owners in
+//! `buffer::FfiMessage`. Its optional `runtime` bridge reconstructs local types
+//! without copying bulk media. Legacy hooks retain MessagePack compatibility;
+//! RPC uses its separate MessagePack reply contract.
 //!
 //! For the full contract — wire format, versioning policy, plugin
 //! author rules, change history — see
@@ -23,6 +23,12 @@ use abi_stable::{
     StableAbi,
 };
 use async_ffi::{FfiFuture, FutureExt};
+
+pub mod buffer;
+pub mod copy_ledger;
+#[cfg(feature = "runtime")]
+pub mod runtime_buffer;
+pub mod snapshot;
 
 /// Host clock signal, preserved across the plugin boundary.
 #[repr(C)]
@@ -54,11 +60,11 @@ pub struct FfiCallContext {
 /// # Forward compatibility (multi-output extension)
 ///
 /// `process` is marked `#[sabi(last_prefix_field)]` — that's the cut
-/// between the original FFI surface (1.x) and any methods added in
+/// between the original FFI surface (0.1) and any methods added in
 /// minor versions. Methods added below it must carry a default impl
 /// so source implementations may omit the new hooks. Compiled vtables
 /// still undergo ABI layout and version checks; defaults alone are
-/// not a binary compatibility guarantee. Rebuild plugins for ABI 0.5.
+/// not a binary compatibility guarantee. Rebuild plugins for ABI 0.7.
 ///
 /// `process_multi` is the multi-output sibling of `process`: a node's
 /// `process_streaming` callback can fire N times per input (think
@@ -77,6 +83,10 @@ pub trait FfiNode: Send + Sync + 'static {
 
     #[sabi(last_prefix_field)]
     fn process(&self, input: RVec<u8>) -> FfiFuture<RResult<RVec<u8>, RString>>;
+
+    fn snapshot_outputs(&self) -> RResult<RVec<snapshot::FfiSnapshotPort>, RString> {
+        ROk(RVec::new())
+    }
 
     /// Multi-output process. Returns ALL emissions from one input as
     /// a flat `RVec<RVec<u8>>` (each inner vec is one rmp-serde
@@ -226,6 +236,94 @@ pub trait FfiNode: Send + Sync + 'static {
     ) -> FfiFuture<RResult<(), RString>> {
         async { RErr("dedicated RPC is not supported".into()) }.into_ffi()
     }
+
+    /// RPC payloads retain their dedicated codec; the execution context carries
+    /// the owning allocator, snapshots and materialization ledger. No fallback
+    /// to identity-only RPC is permitted when this hook is selected.
+    fn call_rpc_shared(
+        &self,
+        _request: RVec<u8>,
+        _context: buffer::FfiExecutionContext,
+        _sink: RpcReplySinkBox,
+    ) -> FfiFuture<RResult<(), RString>> {
+        async { RErr("RPC execution context is not supported".into()) }.into_ffi()
+    }
+
+    /// 0 means explicit legacy-only media transport. Version 2 retains owners
+    /// using buffer::FfiMessage; shared calls never fall back to MessagePack.
+    fn shared_buffer_protocol(&self) -> u16 {
+        0
+    }
+
+    fn is_multi_input(&self) -> bool {
+        false
+    }
+
+    fn process_shared(
+        &self,
+        _input: buffer::FfiMessage,
+        _context: buffer::FfiExecutionContext,
+    ) -> FfiFuture<RResult<buffer::FfiMessage, RString>> {
+        async { RErr("plugin does not support shared buffer processing".into()) }.into_ffi()
+    }
+
+    fn process_inputs_shared(
+        &self,
+        _inputs: RVec<buffer::FfiNamedInput>,
+        _context: buffer::FfiExecutionContext,
+    ) -> FfiFuture<RResult<buffer::FfiMessage, RString>> {
+        async { RErr("plugin does not support shared multi-input processing".into()) }.into_ffi()
+    }
+
+    fn process_many_shared(
+        &self,
+        input: buffer::FfiMessage,
+        context: buffer::FfiExecutionContext,
+    ) -> FfiFuture<RResult<RVec<buffer::FfiMessage>, RString>> {
+        let future = self.process_shared(input, context);
+        async move { future.await.map(|message| vec![message].into()) }.into_ffi()
+    }
+
+    fn process_streaming_shared(
+        &self,
+        input: buffer::FfiMessage,
+        context: buffer::FfiExecutionContext,
+        sink: buffer::SharedOutputSinkBox,
+    ) -> FfiFuture<RResult<usize, RString>> {
+        let future = self.process_many_shared(input, context);
+        async move {
+            match future.await {
+                ROk(messages) => {
+                    let count = messages.len();
+                    for message in messages {
+                        if let RErr(error) = sink.push(message) {
+                            return RErr(error);
+                        }
+                    }
+                    ROk(count)
+                }
+                RErr(error) => RErr(error),
+            }
+        }
+        .into_ffi()
+    }
+
+    fn tick_shared(
+        &self,
+        _tick: FfiTick,
+        _context: buffer::FfiExecutionContext,
+        _sink: buffer::SharedOutputSinkBox,
+    ) -> FfiFuture<RResult<usize, RString>> {
+        async { RErr("plugin does not support shared tick output".into()) }.into_ffi()
+    }
+
+    fn process_control_shared(
+        &self,
+        _input: buffer::FfiMessage,
+        _context: buffer::FfiExecutionContext,
+    ) -> FfiFuture<RResult<bool, RString>> {
+        async { RErr("plugin does not support shared controls".into()) }.into_ffi()
+    }
 }
 
 /// Owned trait object for an FFI node.
@@ -272,10 +370,29 @@ pub type RpcReplySinkBox = RpcReplySink_TO<RBox<()>>;
 pub trait FfiNodeFactory: Send + Sync + 'static {
     fn node_type(&self) -> RString;
     fn create(&self, params: RString) -> RResult<FfiNodeBox, RString>;
+    /// Pure capability declaration for these exact JSON parameters, before
+    /// creating/initializing nodes. None is unknown. Some is BufferContract v1
+    /// JSON, bounded to MAX_BUFFER_CONTRACT_BYTES by the host. Errors must not
+    /// be converted to implicit support or cause a copying execution fallback.
+    fn buffer_contract(
+        &self,
+        _params: RString,
+    ) -> RResult<abi_stable::std_types::ROption<RString>, RString> {
+        abi_stable::std_types::ROk(abi_stable::std_types::ROption::RNone)
+    }
+    fn input_ports(&self) -> RVec<snapshot::FfiPortDeclaration> {
+        RVec::new()
+    }
+    fn output_ports(&self) -> RVec<snapshot::FfiPortDeclaration> {
+        RVec::new()
+    }
 }
 
 /// Owned trait object for an FFI factory.
 pub type FfiNodeFactoryBox = FfiNodeFactory_TO<RBox<()>>;
+
+pub const ABI_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const MAX_BUFFER_CONTRACT_BYTES: usize = 1024 * 1024;
 
 // Android plugins sometimes need to force instantiation of certain libc++
 // iostream template symbols, otherwise `dlopen` can fail at runtime with

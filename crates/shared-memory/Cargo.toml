@@ -1,0 +1,56 @@
+[package]
+name = "remotemedia-shared-memory"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Session-scoped mapped storage and delivery leases for RemoteMedia"
+
+[dependencies]
+remotemedia-types = { path = "../types", version = "0.4.0" }
+remotemedia-traits = { path = "../traits", version = "0.4.0", optional = true }
+serde.workspace = true
+thiserror.workspace = true
+memmap2 = "0.9.12"
+tempfile = "3"
+
+[dev-dependencies]
+serde_json.workspace = true
+futures.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_Security"] }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Memory"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true, optional = true }
+
+[features]
+worker-channel = ["dep:libc", "dep:windows-sys"]
+worker-protocol = ["worker-channel", "dep:serde_json", "dep:remotemedia-traits"]
+test-peer = ["worker-protocol"]
+# Lifecycle fault injection (e.g. unconfirmable worker termination) for tests.
+test-faults = ["worker-channel"]
+linux-worker-supervisor = ["worker-channel"]
+test-linux-namespace = ["test-peer", "linux-worker-supervisor"]
+
+[dependencies.serde_json]
+workspace = true
+optional = true
+
+[[bin]]
+name = "shared-memory-test-peer"
+path = "tests/support/mapping_peer.rs"
+required-features = ["test-peer"]
+
+[[bin]]
+name = "shared-memory-linux-supervisor-probe"
+path = "tests/support/linux_supervisor_probe.rs"
+required-features = ["test-linux-namespace"]
+
+[[bin]]
+name = "remotemedia-worker-supervisor"
+path = "src/bin/worker_supervisor.rs"
+required-features = ["linux-worker-supervisor"]

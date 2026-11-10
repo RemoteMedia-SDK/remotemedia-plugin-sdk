@@ -247,14 +247,34 @@ async fn error_is_correlated_and_sink_failure_is_propagated() {
 
 #[tokio::test]
 async fn dropping_ffi_future_cancels_plugin_runtime_task() {
-    let (node, started, stopped) = node();
-    let (sink, _rx) = replies();
-    let mut future = Box::pin(node.call_rpc(request("wait"), context("session"), sink));
-    tokio::select! { _ = started.notified() => {}, _ = &mut future => panic!("wait returned") }
-    drop(future);
-    tokio::time::timeout(std::time::Duration::from_secs(2), stopped.notified())
-        .await
-        .unwrap();
+    for shared in [false, true] {
+        let (node, started, stopped) = node();
+        let (sink, _rx) = replies();
+        let future = if shared {
+            node.call_rpc_shared(
+                request("wait"),
+                buffer::FfiExecutionContext {
+                    identity: context("session"),
+                    allocator: None.into(),
+                    snapshots: Default::default(),
+                    materialization: Some(copy_ledger::runtime::export(types::CopyContext::new(
+                        types::CopyPolicy::RequireZeroCopy,
+                        "rpc-cancel",
+                    )))
+                    .into(),
+                },
+                sink,
+            )
+        } else {
+            node.call_rpc(request("wait"), context("session"), sink)
+        };
+        let mut future = Box::pin(future);
+        tokio::select! { _ = started.notified() => {}, _ = &mut future => panic!("wait returned") }
+        drop(future);
+        tokio::time::timeout(std::time::Duration::from_secs(2), stopped.notified())
+            .await
+            .unwrap();
+    }
 }
 
 #[test]

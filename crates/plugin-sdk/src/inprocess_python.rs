@@ -4,13 +4,19 @@
 //! directly in the host process using PyO3, without subprocess IPC.
 
 #[cfg(feature = "inprocess-python")]
+mod conversion;
+
+#[cfg(feature = "inprocess-python")]
 mod inner {
+    use super::conversion::{require_legacy, Conversion};
+    use _remotemedia_buffers::{recover_bytes, OutputAllocator as PythonAllocator};
     use pyo3::prelude::*;
     use pyo3::types::{PyBytes, PyDict, PyList, PyString};
     use remotemedia_types::{
-        AudioSamples, ControlMessageType, ImageFormat, PixelFormat, RuntimeData, VideoCodec,
+        ControlMessageType, CopyContext, ImageFormat, PixelFormat, RuntimeData, VideoCodec,
     };
     use std::collections::HashMap;
+    use std::sync::Arc;
 
     /// Handle to a loaded Python plugin node
     pub struct PythonNodeHandle {
@@ -53,18 +59,40 @@ mod inner {
 
         /// Call process(input_data) on the Python plugin
         pub fn process(&self, input_data: &RuntimeData) -> PyResult<RuntimeData> {
+            self.process_with_copy_context(input_data, CopyContext::legacy())
+        }
+
+        /// Legacy dictionary/list/bytes contract with explicit caller accounting.
+        pub fn process_with_copy_context(
+            &self,
+            input_data: &RuntimeData,
+            copies: &CopyContext,
+        ) -> PyResult<RuntimeData> {
+            require_legacy(copies)?;
             Python::attach(|py| {
-                let py_input = runtime_data_to_python(py, input_data)?;
+                let mode = Conversion::Legacy(copies);
+                let py_input = runtime_data_to_python(py, input_data, mode)?;
                 let instance = self.instance.bind(py);
                 let py_output = instance.call_method1("process", (py_input,))?;
-                python_to_runtime_data(py, &py_output)
+                python_to_runtime_data(py, &py_output, mode)
             })
         }
 
         /// Call process_streaming(input_data) on the Python plugin
         pub fn process_streaming(&self, input_data: &RuntimeData) -> PyResult<Vec<RuntimeData>> {
+            self.process_streaming_with_copy_context(input_data, CopyContext::legacy())
+        }
+
+        /// Legacy streaming conversion retains the same ledger for every output.
+        pub fn process_streaming_with_copy_context(
+            &self,
+            input_data: &RuntimeData,
+            copies: &CopyContext,
+        ) -> PyResult<Vec<RuntimeData>> {
+            require_legacy(copies)?;
             Python::attach(|py| {
-                let py_input = runtime_data_to_python(py, input_data)?;
+                let mode = Conversion::Legacy(copies);
+                let py_input = runtime_data_to_python(py, input_data, mode)?;
                 let instance = self.instance.bind(py);
                 let py_gen = instance.call_method1("process_streaming", (py_input,))?;
 
@@ -72,10 +100,138 @@ mod inner {
                 let iterator = py_gen.try_iter()?;
                 for item in iterator {
                     let item = item?;
-                    let py_data = python_to_runtime_data(py, &item)?;
+                    let py_data = python_to_runtime_data(py, &item, mode)?;
                     results.push(py_data);
                 }
                 Ok(results)
+            })
+        }
+
+        /// Invoke the explicit owning-buffer Python contract. The node implements
+        /// process_shared(data, ctx), and publishes ctx-allocated outputs. Private
+        /// arrays and writable/unpublished outputs fail instead of being copied.
+        /// Tensor integers use RuntimeData's documented convention (0=f32, 1=i32),
+        /// not the incompatible Python IPC or protobuf dtype numbering.
+        pub fn process_shared(
+            &self,
+            input: RuntimeData,
+            allocator: Arc<dyn remotemedia_types::OutputAllocator>,
+        ) -> PyResult<RuntimeData> {
+            self.process_shared_context(input, PythonAllocator::new(allocator))
+        }
+
+        fn process_shared_context(
+            &self,
+            input: RuntimeData,
+            context: PythonAllocator,
+        ) -> PyResult<RuntimeData> {
+            Python::attach(|py| {
+                let output = self.invoke_shared(py, input, context, "process_shared")?;
+                validate_shared(python_to_runtime_data(py, &output, Conversion::Shared)?)
+            })
+        }
+
+        fn invoke_shared<'py>(
+            &self,
+            py: Python<'py>,
+            input: RuntimeData,
+            context: PythonAllocator,
+            method: &str,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            let input = validate_shared(input)?;
+            let data = runtime_data_to_python(py, &input, Conversion::Shared)?;
+            let context = Py::new(py, context)?;
+            self.instance.bind(py).call_method1(method, (data, context))
+        }
+
+        /// Runtime entrypoint: require the call-selected provider and preserve
+        /// session/node identity. No implicit heap or copying fallback.
+        pub fn process_shared_with_ctx(
+            &self,
+            input: RuntimeData,
+            ctx: &dyn remotemedia_traits::runtime_context::NodeRuntimeContextRead,
+        ) -> remotemedia_types::Result<RuntimeData> {
+            self.process_shared_context(input, shared_context(ctx)?)
+                .map_err(shared_error)
+        }
+
+        /// Deliver each yield before advancing Python again. A rejected output
+        /// stops iteration and closes generators, running their finally blocks.
+        /// Calls are synchronous: no detached task can outlive this invocation.
+        pub fn process_streaming_shared_with_ctx<F>(
+            &self,
+            input: RuntimeData,
+            ctx: &dyn remotemedia_traits::runtime_context::NodeRuntimeContextRead,
+            callback: F,
+        ) -> remotemedia_types::Result<usize>
+        where
+            F: FnMut(RuntimeData) -> remotemedia_types::Result<()> + Send,
+        {
+            let context = shared_context(ctx)?;
+            Python::attach(|py| {
+                let output = self
+                    .invoke_shared(py, input, context, "process_streaming_shared")
+                    .map_err(shared_error)?;
+                deliver_shared(py, output, callback)
+            })
+        }
+
+        /// Invoke a source tick with the actual clock values and session provider.
+        /// Quiet ticks return an empty iterable; generator completion ends only
+        /// this tick. Outputs follow the same owning contract as reactive calls.
+        pub fn tick_shared_with_ctx<F>(
+            &self,
+            tick: remotemedia_traits::streaming::Tick,
+            ctx: &dyn remotemedia_traits::runtime_context::NodeRuntimeContextRead,
+            callback: F,
+        ) -> remotemedia_types::Result<usize>
+        where
+            F: FnMut(RuntimeData) -> remotemedia_types::Result<()> + Send,
+        {
+            let context = shared_context(ctx)?;
+            Python::attach(|py| {
+                let fields = PyDict::new(py);
+                fields
+                    .set_item("clock_id", tick.clock_id)
+                    .map_err(shared_error)?;
+                fields
+                    .set_item("pts_us", tick.pts_us)
+                    .map_err(shared_error)?;
+                fields
+                    .set_item("frame_idx", tick.frame_idx)
+                    .map_err(shared_error)?;
+                fields
+                    .set_item("deadline_us", tick.deadline_us)
+                    .map_err(shared_error)?;
+                let context = Py::new(py, context).map_err(shared_error)?;
+                let output = self
+                    .instance
+                    .bind(py)
+                    .call_method1("tick_shared", (fields, context))
+                    .map_err(shared_error)?;
+                deliver_shared(py, output, callback)
+            })
+        }
+
+        /// Generator counterpart; each yielded view retains its own owner.
+        pub fn process_streaming_shared(
+            &self,
+            input: RuntimeData,
+            allocator: Arc<dyn remotemedia_types::OutputAllocator>,
+        ) -> PyResult<Vec<RuntimeData>> {
+            Python::attach(|py| {
+                let output = self.invoke_shared(
+                    py,
+                    input,
+                    PythonAllocator::new(allocator),
+                    "process_streaming_shared",
+                )?;
+                output
+                    .try_iter()?
+                    .map(|item| {
+                        validate_shared(python_to_runtime_data(py, &item?, Conversion::Shared)?)
+                    })
+                    .collect()
             })
         }
 
@@ -87,6 +243,52 @@ mod inner {
                 Ok(())
             })
         }
+    }
+
+    fn deliver_shared<F>(
+        py: Python<'_>,
+        output: Bound<'_, PyAny>,
+        mut callback: F,
+    ) -> remotemedia_types::Result<usize>
+    where
+        F: FnMut(RuntimeData) -> remotemedia_types::Result<()> + Send,
+    {
+        let result = (|| {
+            let mut count = 0;
+            for item in output.try_iter().map_err(shared_error)? {
+                let item = item.map_err(shared_error)?;
+                let data = python_to_runtime_data(py, &item, Conversion::Shared)
+                    .and_then(validate_shared)
+                    .map_err(shared_error)?;
+                py.detach(|| callback(data))?;
+                count += 1;
+            }
+            Ok(count)
+        })();
+        if result.is_err() && output.hasattr("close").map_err(shared_error)? {
+            if let Err(close) = output.call_method0("close") {
+                return Err(remotemedia_types::Error::Execution(format!(
+                    "{}; Python generator close failed: {close}",
+                    result.unwrap_err()
+                )));
+            }
+        }
+        result
+    }
+
+    fn shared_error(error: PyErr) -> remotemedia_types::Error {
+        remotemedia_types::Error::Execution(format!("Python shared-buffer call failed: {error}"))
+    }
+
+    fn shared_context(
+        ctx: &dyn remotemedia_traits::runtime_context::NodeRuntimeContextRead,
+    ) -> remotemedia_types::Result<PythonAllocator> {
+        let allocator = ctx.output_allocator().ok_or_else(|| {
+            remotemedia_types::Error::Execution(
+                "Python shared-buffer call requires an output allocator".into(),
+            )
+        })?;
+        Ok(PythonAllocator::new(allocator).with_identity(ctx.session_id(), ctx.node_id()))
     }
 
     fn dict_from_json(
@@ -137,8 +339,78 @@ mod inner {
         }
     }
 
-    fn runtime_data_to_python(py: Python<'_>, data: &RuntimeData) -> PyResult<Py<PyAny>> {
+    fn validate_shared(data: RuntimeData) -> PyResult<RuntimeData> {
+        let encoding = remotemedia_types::TensorEncoding::Runtime;
+        let (metadata, storage) = data
+            .into_shared_parts(encoding)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        metadata
+            .attach(storage, encoding)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+    }
+
+    fn field<'py>(obj: &Bound<'py, PyAny>, name: &str) -> PyResult<Bound<'py, PyAny>> {
+        if let Ok(dict) = obj.cast::<PyDict>() {
+            dict.get_item(name)?
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err(name.to_owned()))
+        } else {
+            obj.getattr(name)
+        }
+    }
+
+    fn json_from_python(obj: &Bound<'_, PyAny>, shared: bool) -> PyResult<serde_json::Value> {
+        if !shared {
+            return py_any_to_json(obj);
+        }
+        // Strict metadata must actually be JSON. Do not stringify an ndarray
+        // or arbitrary object (which could materialize an entire hidden payload).
+        let py = obj.py();
+        let options = PyDict::new(py);
+        options.set_item("allow_nan", false)?;
+        let encoded: String = py
+            .import("json")?
+            .call_method("dumps", (obj,), Some(&options))?
+            .extract()?;
+        serde_json::from_str(&encoded)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    fn optional_metadata(
+        obj: &Bound<'_, PyAny>,
+        shared: bool,
+    ) -> PyResult<Option<serde_json::Value>> {
+        if !shared {
+            // A missing field means no metadata; a present value that is not
+            // JSON is an error rather than silently dropped metadata.
+            return match field(obj, "metadata") {
+                Ok(value) if value.is_none() => Ok(None),
+                Ok(value) => py_any_to_json(&value).map(Some),
+                Err(_) => Ok(None),
+            };
+        }
+        match field(obj, "metadata") {
+            Ok(value) if value.is_none() => Ok(None),
+            Ok(value) => json_from_python(&value, true).map(Some),
+            Err(error)
+                if error.is_instance_of::<pyo3::exceptions::PyKeyError>(obj.py())
+                    || error.is_instance_of::<pyo3::exceptions::PyAttributeError>(obj.py()) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn runtime_data_to_python(
+        py: Python<'_>,
+        data: &RuntimeData,
+        mode: Conversion<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        let shared = mode.is_shared();
         match data {
+            RuntimeData::DeviceTensor { .. } => Err(pyo3::exceptions::PyTypeError::new_err(
+                "device tensors are not exported to this Python node",
+            )),
             RuntimeData::Audio {
                 samples,
                 sample_rate,
@@ -149,7 +421,7 @@ mod inner {
                 metadata,
             } => {
                 let dict = PyDict::new(py);
-                let samples_list = PyList::new(py, samples.as_slice().iter().cloned())?;
+                let samples_list = mode.export_audio(py, samples)?;
                 dict.set_item("data_type", "audio")?;
                 dict.set_item("samples", samples_list)?;
                 dict.set_item("sample_rate", *sample_rate)?;
@@ -182,13 +454,7 @@ mod inner {
             } => {
                 let dict = PyDict::new(py);
                 dict.set_item("data_type", "video")?;
-                dict.set_item(
-                    "pixel_data",
-                    PyBytes::new(py, pixel_data)
-                        .into_pyobject(py)?
-                        .into_any()
-                        .unbind(),
-                )?;
+                dict.set_item("pixel_data", mode.export_bytes(py, pixel_data)?)?;
                 dict.set_item("width", *width)?;
                 dict.set_item("height", *height)?;
                 dict.set_item("pixel_format", *format as u8)?;
@@ -217,13 +483,7 @@ mod inner {
             } => {
                 let dict = PyDict::new(py);
                 dict.set_item("data_type", "image")?;
-                dict.set_item(
-                    "data",
-                    PyBytes::new(py, data)
-                        .into_pyobject(py)?
-                        .into_any()
-                        .unbind(),
-                )?;
+                dict.set_item("data", mode.export_bytes(py, data)?)?;
                 // Convert ImageFormat to string
                 let format_str = match format {
                     ImageFormat::Jpeg => "jpeg",
@@ -263,13 +523,7 @@ mod inner {
             } => {
                 let dict = PyDict::new(py);
                 dict.set_item("data_type", "tensor")?;
-                dict.set_item(
-                    "data",
-                    PyBytes::new(py, data)
-                        .into_pyobject(py)?
-                        .into_any()
-                        .unbind(),
-                )?;
+                dict.set_item("data", mode.export_bytes(py, data)?)?;
                 dict.set_item("shape", PyList::new(py, shape.iter().cloned())?)?;
                 dict.set_item("dtype", *dtype)?;
                 if let Some(m) = metadata {
@@ -287,13 +541,7 @@ mod inner {
             } => {
                 let dict = PyDict::new(py);
                 dict.set_item("data_type", "numpy")?;
-                dict.set_item(
-                    "data",
-                    PyBytes::new(py, data)
-                        .into_pyobject(py)?
-                        .into_any()
-                        .unbind(),
-                )?;
+                dict.set_item("data", mode.export_bytes(py, data)?)?;
                 dict.set_item("shape", PyList::new(py, shape.iter().cloned())?)?;
                 dict.set_item("dtype", dtype.clone())?;
                 dict.set_item("strides", PyList::new(py, strides.iter().cloned())?)?;
@@ -301,11 +549,15 @@ mod inner {
                 dict.set_item("f_contiguous", *f_contiguous)?;
                 Ok(dict.unbind().into())
             }
+            RuntimeData::Json(v) if shared => {
+                let dict = PyDict::new(py);
+                dict.set_item("data_type", "json")?;
+                dict.set_item("data", json_to_python(py, v)?)?;
+                Ok(dict.into_any().unbind())
+            }
             RuntimeData::Json(v) => json_to_python(py, v),
             RuntimeData::Text(s) => Ok(s.clone().into_pyobject(py)?.into_any().unbind()),
-            RuntimeData::Binary(b) => {
-                Ok(PyBytes::new(py, b).into_pyobject(py)?.into_any().unbind())
-            }
+            RuntimeData::Binary(b) => mode.export_bytes(py, b),
             RuntimeData::ControlMessage {
                 message_type,
                 segment_id,
@@ -321,6 +573,21 @@ mod inner {
                     ControlMessageType::DeadlineWarning { .. } => "DeadlineWarning",
                 };
                 dict.set_item("message_type", msg_type_str)?;
+                match message_type {
+                    ControlMessageType::CancelSpeculation {
+                        from_timestamp,
+                        to_timestamp,
+                    } => {
+                        dict.set_item("from_timestamp", *from_timestamp)?;
+                        dict.set_item("to_timestamp", *to_timestamp)?;
+                    }
+                    ControlMessageType::BatchHint {
+                        suggested_batch_size,
+                    } => dict.set_item("suggested_batch_size", *suggested_batch_size)?,
+                    ControlMessageType::DeadlineWarning { deadline_us } => {
+                        dict.set_item("deadline_us", *deadline_us)?
+                    }
+                }
                 if let Some(sid) = segment_id {
                     dict.set_item("segment_id", sid.as_str())?;
                 }
@@ -363,30 +630,33 @@ mod inner {
         }
     }
 
-    fn python_to_runtime_data(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<RuntimeData> {
+    fn python_to_runtime_data(
+        _py: Python<'_>,
+        obj: &Bound<'_, PyAny>,
+        mode: Conversion<'_>,
+    ) -> PyResult<RuntimeData> {
+        let shared = mode.is_shared();
         // Try to extract data_type field
-        let data_type: Option<String> =
-            obj.getattr("data_type").ok().and_then(|v| v.extract().ok());
+        let data_type: Option<String> = field(obj, "data_type").ok().and_then(|v| v.extract().ok());
 
         match data_type.as_deref() {
+            Some("json") => Ok(RuntimeData::Json(json_from_python(
+                &field(obj, "data")?,
+                shared,
+            )?)),
             Some("audio") => {
-                let samples: Vec<f32> = obj.getattr("samples")?.extract()?;
-                let sample_rate: u32 = obj.getattr("sample_rate")?.extract()?;
-                let channels: u32 = obj.getattr("channels")?.extract()?;
-                let timestamp_us: Option<u64> = obj
-                    .getattr("timestamp_us")
+                let samples = mode.import_audio(&field(obj, "samples")?)?;
+                let sample_rate: u32 = field(obj, "sample_rate")?.extract()?;
+                let channels: u32 = field(obj, "channels")?.extract()?;
+                let timestamp_us: Option<u64> = field(obj, "timestamp_us")
                     .ok()
                     .and_then(|v| v.extract().ok());
                 let stream_id: Option<String> =
-                    obj.getattr("stream_id").ok().and_then(|v| v.extract().ok());
-                let arrival_ts_us: Option<u64> = obj
-                    .getattr("arrival_ts_us")
+                    field(obj, "stream_id").ok().and_then(|v| v.extract().ok());
+                let arrival_ts_us: Option<u64> = field(obj, "arrival_ts_us")
                     .ok()
                     .and_then(|v| v.extract().ok());
-                let metadata: Option<serde_json::Value> = obj
-                    .getattr("metadata")
-                    .ok()
-                    .and_then(|v| py_any_to_json(&v).ok());
+                let metadata = optional_metadata(obj, shared)?;
                 Ok(RuntimeData::Audio {
                     samples: samples.into(),
                     sample_rate,
@@ -398,30 +668,27 @@ mod inner {
                 })
             }
             Some("video") => {
-                let pixel_data: Vec<u8> = obj.getattr("pixel_data")?.extract()?;
-                let width: u32 = obj.getattr("width")?.extract()?;
-                let height: u32 = obj.getattr("height")?.extract()?;
-                let pixel_format: u8 = obj.getattr("pixel_format")?.extract()?;
-                let codec: Option<u8> = obj.getattr("codec").ok().and_then(|v| v.extract().ok());
-                let timestamp_us: u64 = obj.getattr("timestamp_us")?.extract()?;
-                let frame_number: u64 = obj
-                    .getattr("frame_number")
+                let pixel_data = mode.import_bytes(&field(obj, "pixel_data")?)?;
+                let width: u32 = field(obj, "width")?.extract()?;
+                let height: u32 = field(obj, "height")?.extract()?;
+                let pixel_format: u8 = field(obj, "pixel_format")?.extract()?;
+                let codec: Option<u8> = field(obj, "codec").ok().and_then(|v| v.extract().ok());
+                let timestamp_us: u64 = field(obj, "timestamp_us")?.extract()?;
+                let frame_number: u64 = field(obj, "frame_number")
                     .ok()
                     .and_then(|v| v.extract().ok())
                     .unwrap_or(0);
-                let is_keyframe: bool = obj
-                    .getattr("is_keyframe")
+                let is_keyframe: bool = field(obj, "is_keyframe")
                     .ok()
                     .and_then(|v| v.extract().ok())
                     .unwrap_or(false);
                 let stream_id: Option<String> =
-                    obj.getattr("stream_id").ok().and_then(|v| v.extract().ok());
-                let arrival_ts_us: Option<u64> = obj
-                    .getattr("arrival_ts_us")
+                    field(obj, "stream_id").ok().and_then(|v| v.extract().ok());
+                let arrival_ts_us: Option<u64> = field(obj, "arrival_ts_us")
                     .ok()
                     .and_then(|v| v.extract().ok());
                 Ok(RuntimeData::Video {
-                    pixel_data,
+                    pixel_data: pixel_data.into(),
                     width,
                     height,
                     format: pixel_format_to_pixel_format(pixel_format),
@@ -434,22 +701,18 @@ mod inner {
                 })
             }
             Some("image") => {
-                let data: Vec<u8> = obj.getattr("data")?.extract()?;
-                let format: String = obj.getattr("format")?.extract()?;
-                let width: u32 = obj.getattr("width")?.extract()?;
-                let height: u32 = obj.getattr("height")?.extract()?;
-                let timestamp_us: Option<u64> = obj
-                    .getattr("timestamp_us")
+                let data = mode.import_bytes(&field(obj, "data")?)?;
+                let format: String = field(obj, "format")?.extract()?;
+                let width: u32 = field(obj, "width")?.extract()?;
+                let height: u32 = field(obj, "height")?.extract()?;
+                let timestamp_us: Option<u64> = field(obj, "timestamp_us")
                     .ok()
                     .and_then(|v| v.extract().ok());
                 let stream_id: Option<String> =
-                    obj.getattr("stream_id").ok().and_then(|v| v.extract().ok());
-                let metadata: Option<serde_json::Value> = obj
-                    .getattr("metadata")
-                    .ok()
-                    .and_then(|v| py_any_to_json(&v).ok());
+                    field(obj, "stream_id").ok().and_then(|v| v.extract().ok());
+                let metadata = optional_metadata(obj, shared)?;
                 Ok(RuntimeData::Image {
-                    data,
+                    data: data.into(),
                     format: string_to_image_format(&format),
                     width,
                     height,
@@ -459,29 +722,26 @@ mod inner {
                 })
             }
             Some("tensor") => {
-                let data: Vec<u8> = obj.getattr("data")?.extract()?;
-                let shape: Vec<i32> = obj.getattr("shape")?.extract()?;
-                let dtype: i32 = obj.getattr("dtype")?.extract()?;
-                let metadata: Option<serde_json::Value> = obj
-                    .getattr("metadata")
-                    .ok()
-                    .and_then(|v| py_any_to_json(&v).ok());
+                let data = mode.import_bytes(&field(obj, "data")?)?;
+                let shape: Vec<i32> = field(obj, "shape")?.extract()?;
+                let dtype: i32 = field(obj, "dtype")?.extract()?;
+                let metadata = optional_metadata(obj, shared)?;
                 Ok(RuntimeData::Tensor {
-                    data,
+                    data: data.into(),
                     shape,
                     dtype,
                     metadata,
                 })
             }
             Some("numpy") => {
-                let data: Vec<u8> = obj.getattr("data")?.extract()?;
-                let shape: Vec<usize> = obj.getattr("shape")?.extract()?;
-                let dtype: String = obj.getattr("dtype")?.extract()?;
-                let strides: Vec<isize> = obj.getattr("strides")?.extract()?;
-                let c_contiguous: bool = obj.getattr("c_contiguous")?.extract()?;
-                let f_contiguous: bool = obj.getattr("f_contiguous")?.extract()?;
+                let data = mode.import_bytes(&field(obj, "data")?)?;
+                let shape: Vec<usize> = field(obj, "shape")?.extract()?;
+                let dtype: String = field(obj, "dtype")?.extract()?;
+                let strides: Vec<isize> = field(obj, "strides")?.extract()?;
+                let c_contiguous: bool = field(obj, "c_contiguous")?.extract()?;
+                let f_contiguous: bool = field(obj, "f_contiguous")?.extract()?;
                 Ok(RuntimeData::Numpy {
-                    data,
+                    data: data.into(),
                     shape,
                     dtype,
                     strides,
@@ -489,27 +749,21 @@ mod inner {
                     f_contiguous,
                 })
             }
-            Some("control_message") => {
-                let v = py_any_to_json(obj)?;
-                Ok(RuntimeData::Json(v))
-            }
             Some("text") => {
                 let s: String = obj.extract()?;
                 Ok(RuntimeData::Text(s))
             }
             Some("binary") => {
-                let b: Vec<u8> = obj.extract()?;
-                Ok(RuntimeData::Binary(b))
+                let b = mode.import_bytes(&field(obj, "data")?)?;
+                Ok(RuntimeData::Binary(b.into()))
             }
             Some("control_message") => {
-                let message_type_str: String = obj.getattr("message_type")?.extract()?;
+                let message_type_str: String = field(obj, "message_type")?.extract()?;
                 let message_type = string_to_control_message_type(&message_type_str, &obj)?;
-                let segment_id: Option<String> = obj
-                    .getattr("segment_id")
-                    .ok()
-                    .and_then(|v| v.extract().ok());
-                let timestamp_ms: u64 = obj.getattr("timestamp_ms")?.extract()?;
-                let metadata = py_any_to_json(&obj.getattr("metadata")?)?;
+                let segment_id: Option<String> =
+                    field(obj, "segment_id").ok().and_then(|v| v.extract().ok());
+                let timestamp_ms: u64 = field(obj, "timestamp_ms")?.extract()?;
+                let metadata = json_from_python(&field(obj, "metadata")?, shared)?;
                 Ok(RuntimeData::ControlMessage {
                     message_type,
                     segment_id,
@@ -518,16 +772,16 @@ mod inner {
                 })
             }
             Some("file") => {
-                let path: String = obj.getattr("path")?.extract()?;
+                let path: String = field(obj, "path")?.extract()?;
                 let filename: Option<String> =
-                    obj.getattr("filename").ok().and_then(|v| v.extract().ok());
+                    field(obj, "filename").ok().and_then(|v| v.extract().ok());
                 let mime_type: Option<String> =
-                    obj.getattr("mime_type").ok().and_then(|v| v.extract().ok());
-                let size: Option<u64> = obj.getattr("size").ok().and_then(|v| v.extract().ok());
-                let offset: Option<u64> = obj.getattr("offset").ok().and_then(|v| v.extract().ok());
-                let length: Option<u64> = obj.getattr("length").ok().and_then(|v| v.extract().ok());
+                    field(obj, "mime_type").ok().and_then(|v| v.extract().ok());
+                let size: Option<u64> = field(obj, "size").ok().and_then(|v| v.extract().ok());
+                let offset: Option<u64> = field(obj, "offset").ok().and_then(|v| v.extract().ok());
+                let length: Option<u64> = field(obj, "length").ok().and_then(|v| v.extract().ok());
                 let stream_id: Option<String> =
-                    obj.getattr("stream_id").ok().and_then(|v| v.extract().ok());
+                    field(obj, "stream_id").ok().and_then(|v| v.extract().ok());
                 Ok(RuntimeData::File {
                     path,
                     filename,
@@ -543,15 +797,22 @@ mod inner {
                 if obj.is_instance_of::<PyString>() {
                     Ok(RuntimeData::Text(obj.extract()?))
                 } else if obj.is_instance_of::<PyBytes>() {
-                    Ok(RuntimeData::Binary(obj.extract()?))
+                    Ok(RuntimeData::Binary(mode.import_bytes(obj)?))
                 } else if obj.is_instance_of::<PyDict>() {
-                    let v = py_dict_to_json(obj)?;
+                    let v = json_from_python(obj, shared)?;
                     Ok(RuntimeData::Json(v))
                 } else if obj.is_instance_of::<PyList>() {
-                    let v = py_list_to_json(obj)?;
+                    let v = json_from_python(obj, shared)?;
                     Ok(RuntimeData::Json(v))
                 } else {
-                    Err(pyo3::exceptions::PyTypeError::new_err("Unknown RuntimeData type").into())
+                    if shared {
+                        Ok(RuntimeData::Binary(recover_bytes(obj)?))
+                    } else {
+                        Err(
+                            pyo3::exceptions::PyTypeError::new_err("Unknown RuntimeData type")
+                                .into(),
+                        )
+                    }
                 }
             }
         }
@@ -592,12 +853,22 @@ mod inner {
             Ok(serde_json::Value::String(s))
         } else if obj.is_instance_of::<PyList>() {
             py_list_to_json(obj)
+        } else if obj.is_instance_of::<pyo3::types::PyTuple>() {
+            let tuple = obj.downcast::<pyo3::types::PyTuple>()?;
+            tuple
+                .iter()
+                .map(|item| py_any_to_json(&item))
+                .collect::<PyResult<Vec<_>>>()
+                .map(serde_json::Value::Array)
         } else if obj.is_instance_of::<PyDict>() {
             py_dict_to_json(obj)
         } else {
-            // Fallback to string representation
-            let s: String = obj.str()?.to_string();
-            Ok(serde_json::Value::String(s))
+            // Stringifying an ndarray, bytes or arbitrary object silently
+            // materializes (and corrupts) a hidden payload; reject instead.
+            Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "cannot convert Python {} to JSON; carry bulk data as a RuntimeData payload",
+                obj.get_type().name()?
+            )))
         }
     }
 
@@ -660,13 +931,11 @@ mod inner {
     ) -> PyResult<ControlMessageType> {
         match s {
             "CancelSpeculation" => {
-                let from_timestamp: u64 = obj
-                    .getattr("from_timestamp")
+                let from_timestamp: u64 = field(obj, "from_timestamp")
                     .ok()
                     .and_then(|v| v.extract().ok())
                     .unwrap_or(0);
-                let to_timestamp: u64 = obj
-                    .getattr("to_timestamp")
+                let to_timestamp: u64 = field(obj, "to_timestamp")
                     .ok()
                     .and_then(|v| v.extract().ok())
                     .unwrap_or(0);
@@ -676,8 +945,7 @@ mod inner {
                 })
             }
             "BatchHint" => {
-                let suggested_batch_size: usize = obj
-                    .getattr("suggested_batch_size")
+                let suggested_batch_size: usize = field(obj, "suggested_batch_size")
                     .ok()
                     .and_then(|v| v.extract().ok())
                     .unwrap_or(0);
@@ -686,8 +954,7 @@ mod inner {
                 })
             }
             "DeadlineWarning" => {
-                let deadline_us: u64 = obj
-                    .getattr("deadline_us")
+                let deadline_us: u64 = field(obj, "deadline_us")
                     .ok()
                     .and_then(|v| v.extract().ok())
                     .unwrap_or(0);
@@ -698,6 +965,35 @@ mod inner {
                 s
             ))
             .into()),
+        }
+    }
+
+    #[cfg(test)]
+    mod json_conversion_tests {
+        use super::*;
+
+        #[test]
+        fn legacy_json_rejects_bulk_objects_instead_of_stringifying_them() {
+            Python::attach(|py| {
+                let value = py
+                    .eval(
+                        c"{'n': 1, 'pair': (2, 3), 'tags': ['a'], 'payload': b'raw'}",
+                        None,
+                        None,
+                    )
+                    .unwrap();
+                let error = py_any_to_json(&value).unwrap_err().to_string();
+                assert!(error.contains("bytes"), "{error}");
+                assert!(error.contains("RuntimeData"), "{error}");
+                let value = py
+                    .eval(c"{'n': 1, 'pair': (2, 3), 'tags': ['a']}", None, None)
+                    .unwrap();
+                assert_eq!(
+                    py_any_to_json(&value).unwrap(),
+                    serde_json::json!({"n": 1, "pair": [2, 3], "tags": ["a"]}),
+                    "tuples become JSON arrays, not their repr"
+                );
+            });
         }
     }
 }

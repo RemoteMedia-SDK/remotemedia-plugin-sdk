@@ -20,6 +20,9 @@ repository = "https://github.com/RemoteMedia-SDK/remotemedia-sdk"
 
 [features]
 default = []
+# Process integration tests require the separately built matching supervisor.
+test-linux-namespace = []
+test-probe = []
 # Use `uv` for venv provisioning instead of system `python -m venv` + `pip`.
 # Activates reqwest (blocking + rustls-tls), flate2, tar, and zip (Windows) as optional deps.
 bundled-uv = ["dep:reqwest", "dep:flate2", "dep:tar", "dep:zip"]
@@ -31,6 +34,7 @@ embedded-python = ["bundled-uv"]
 
 [dependencies]
 remotemedia-types = { path = "../types", version = "0.4.0" }
+remotemedia-shared-memory = { path = "../shared-memory", features = ["worker-channel", "linux-worker-supervisor"] }
 tokio = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
@@ -38,6 +42,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 tracing = { workspace = true }
+fs2 = "0.4.3"
 
 # HTTP download for uv binary (blocking client, rustls for no-OpenSSL manylinux CI).
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
@@ -56,3 +61,14 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 flate2 = "1"
 tar = "0.4"
 zip = "2"
+
+[[bin]]
+name = "python-probe-fixture"
+path = "tests/support/probe_fixture.rs"
+required-features = ["test-probe"]
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }

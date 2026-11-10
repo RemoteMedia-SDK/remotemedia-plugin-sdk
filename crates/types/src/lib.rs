@@ -26,18 +26,11 @@
 //!
 //! ## A2 design decisions
 //!
-//! - **`AudioSamples`** is defined here with only `Vec` and `Arc`
-//!   variants. The `Pooled` variant + `AudioBufferPool` /
-//!   `PooledAudioBuf` machinery stays in core; core bridges pool
-//!   buffers into `AudioSamples::Arc` via `From<PooledAudioBuf>`
-//!   when they cross the wire-typed boundary. That bridge is a
-//!   single shrink-to-fit memcpy when `len < capacity` (the
-//!   common case after partial fill — e.g. a 480-sample chunk in
-//!   a 1600-cap buffer); `len == capacity` is copy-free. The
-//!   trade-off is one bounded heap copy at the wire boundary in
-//!   exchange for letting `RuntimeData::Audio` carry a stable
-//!   `Arc<[f32]>` shape that survives FFI. The wire format is
-//!   unchanged because `Pooled` already serialized as `Vec<f32>`.
+//! - **`AudioSamples`** supports legacy Vec/Arc storage and a shared owner.
+//!   Shared owners preserve vector allocations, mapped storage, and pool-return
+//!   behavior without importing those backends into this skinny types crate.
+//!   Portable serialization remains a flat sample sequence; shared-memory
+//!   transports carry allocation descriptors instead of serializing the samples.
 //! - **Control messages**: only [`ControlMessageType`] (the type
 //!   tag enum) is needed by `RuntimeData::ControlMessage` field
 //!   types, so only the enum is moved here. The richer
@@ -63,6 +56,34 @@
 
 pub mod validation_error;
 pub use validation_error::{ValidationConstraint, ValidationError, ValidationWarning, WarningType};
+mod copy_policy;
+mod buffer_budget;
+mod message;
+mod output_allocator;
+mod provenance;
+mod payload_layout;
+mod shared_buffer;
+mod device;
+pub use device::{
+    contiguous_strides, Device, DeviceAllocation, DeviceBuffer, DeviceCompletion, DeviceKind,
+    DeviceReady, DlDtype, TransferError,
+};
+pub use copy_policy::{
+    CopyCompletionError, CopyContext, CopyCounts, CopyEvent, CopyLedger, CopyOperation, CopyPolicy,
+    CopyReason, CopyRejected, CopyReport, COPY_REASONS,
+};
+pub use message::{PayloadKind, PayloadStorage, RuntimeMetadata, TensorEncoding};
+pub use buffer_budget::{BufferBudget, BufferBudgetUsage};
+pub use output_allocator::{
+    AssumePreparedRealtime, BufferAllocationError, HeapOutputAllocator, OutputAllocator,
+    PreparedRealtimeSupport,
+};
+pub use provenance::{BoundOutputAllocator, ForwardingScope};
+pub use payload_layout::PayloadLayoutError;
+pub use shared_buffer::{BufferLoan, BufferRangeError, SharedBuffer};
+
+/// Immutable shared storage for byte-oriented runtime payloads.
+pub type SharedBytes = SharedBuffer<u8>;
 
 use serde::{Deserialize, Serialize};
 use std::ops::Deref;
@@ -74,29 +95,20 @@ use std::sync::Arc;
 
 /// Backing storage for `RuntimeData::Audio` samples.
 ///
-/// Only the wire-relevant variants live in `remotemedia-types`:
-/// `Vec` (owned) and `Arc` (zero-copy shared). The `Pooled` variant
-/// (returns to an `AudioBufferPool` on drop) is core-only — core
-/// owns the pool machinery and bridges pool buffers into
-/// `AudioSamples::Arc` when handing them to the pipeline.
+/// All variants dereference to an immutable sample slice. Normal Vec/Box
+/// conversions use Shared storage, preserving the payload allocation and making
+/// subsequent clones copy-free. Explicit legacy Vec construction still deep
+/// copies on clone; move it through `into_shared` before fan-out.
 ///
-/// All variants `Deref` to `&[f32]`, so read-only consumers
-/// (`.len()`, `.iter()`, indexing, slicing, `.to_vec()`) work
-/// unchanged regardless of storage. Only code that previously
-/// consumed a `Vec<f32>` by value needs to call
-/// [`AudioSamples::into_vec`] explicitly.
-///
-/// # Clone cost
-///
-/// | variant | clone |
-/// |---------|-------|
-/// | `Vec`    | full `Vec<f32>` copy |
-/// | `Arc`    | ref-count bump (zero copy) |
+/// Pool and mapping implementations stay outside this crate and can provide an
+/// immutable owner through [`SharedBuffer::from_owner`].
 pub enum AudioSamples {
     /// Owned heap vector. Historical form; `Clone` copies.
     Vec(Vec<f32>),
     /// Shared immutable slice. `Clone` bumps ref count — zero copy.
     Arc(Arc<[f32]>),
+    /// Shared storage retaining its allocator or pool owner. Clone is copy-free.
+    Shared(SharedBuffer<f32>),
 }
 
 impl AudioSamples {
@@ -109,13 +121,17 @@ impl AudioSamples {
     /// Number of samples.
     #[inline]
     pub fn len(&self) -> usize {
-        self.as_slice().len()
+        match self {
+            Self::Vec(samples) => samples.len(),
+            Self::Arc(samples) => samples.len(),
+            Self::Shared(samples) => samples.len(),
+        }
     }
 
     /// Whether the sample buffer is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.as_slice().is_empty()
+        self.len() == 0
     }
 
     /// Consume and return a `Vec<f32>`.
@@ -124,19 +140,54 @@ impl AudioSamples {
     /// * `Arc` — O(n) copy.
     pub fn into_vec(self) -> Vec<f32> {
         match self {
-            AudioSamples::Vec(v) => v,
-            AudioSamples::Arc(a) => a.to_vec(),
+            Self::Vec(value) => value,
+            Self::Arc(value) => SharedBuffer::from(value).into_vec(),
+            Self::Shared(value) => value.into_vec(),
+        }
+    }
+
+    pub fn try_into_vec(
+        self,
+        context: &CopyContext,
+    ) -> std::result::Result<Vec<f32>, CopyRejected> {
+        match self {
+            AudioSamples::Vec(v) => Ok(v),
+            AudioSamples::Arc(a) => SharedBuffer::from(a).try_into_vec(context),
+            AudioSamples::Shared(buffer) => buffer.try_into_vec(context),
         }
     }
 
     /// Consume and return an `Arc<[f32]>`.
     ///
     /// * `Arc` — O(1), returns the existing `Arc`.
-    /// * `Vec` — O(1) on modern stdlib (boxes the vec then wraps).
+    /// * `Vec` — O(n): Arc needs a new allocation with a reference-count header.
+    /// * `Shared` — reuses a full Arc slice, otherwise copies.
     pub fn into_arc(self) -> Arc<[f32]> {
         match self {
-            AudioSamples::Vec(v) => Arc::from(v.into_boxed_slice()),
-            AudioSamples::Arc(a) => a,
+            Self::Vec(value) => SharedBuffer::from(value).into_arc(),
+            Self::Arc(value) => value,
+            Self::Shared(value) => value.into_arc(),
+        }
+    }
+
+    pub fn try_into_arc(
+        self,
+        context: &CopyContext,
+    ) -> std::result::Result<Arc<[f32]>, CopyRejected> {
+        match self {
+            AudioSamples::Vec(v) => SharedBuffer::from(v).try_into_arc(context),
+            AudioSamples::Arc(a) => Ok(a),
+            AudioSamples::Shared(buffer) => buffer.try_into_arc(context),
+        }
+    }
+
+    /// Retain any existing allocation in shareable storage without copying.
+    /// Prefer this over `into_arc` when routing or retaining audio samples.
+    pub fn into_shared(self) -> SharedBuffer<f32> {
+        match self {
+            Self::Vec(value) => value.into(),
+            Self::Arc(value) => value.into(),
+            Self::Shared(value) => value,
         }
     }
 
@@ -145,6 +196,7 @@ impl AudioSamples {
         match self {
             AudioSamples::Vec(_) => "Vec",
             AudioSamples::Arc(_) => "Arc",
+            AudioSamples::Shared(_) => "Shared",
         }
     }
 }
@@ -157,6 +209,7 @@ impl Deref for AudioSamples {
         match self {
             AudioSamples::Vec(v) => v.as_slice(),
             AudioSamples::Arc(a) => &a[..],
+            AudioSamples::Shared(buffer) => buffer.as_slice(),
         }
     }
 }
@@ -184,8 +237,17 @@ impl Clone for AudioSamples {
     /// - `Arc` → ref-count bump (zero copy)
     fn clone(&self) -> Self {
         match self {
-            AudioSamples::Vec(v) => AudioSamples::Vec(v.clone()),
+            AudioSamples::Vec(v) => AudioSamples::Vec(
+                CopyContext::legacy()
+                    .materialize(
+                        CopyReason::LegacyAudioClone,
+                        std::mem::size_of_val(v.as_slice()) as u64,
+                        || v.clone(),
+                    )
+                    .expect("legacy copy policy permits materialization"),
+            ),
             AudioSamples::Arc(a) => AudioSamples::Arc(Arc::clone(a)),
+            AudioSamples::Shared(buffer) => AudioSamples::Shared(buffer.clone()),
         }
     }
 }
@@ -205,7 +267,7 @@ impl Default for AudioSamples {
 impl From<Vec<f32>> for AudioSamples {
     #[inline]
     fn from(v: Vec<f32>) -> Self {
-        AudioSamples::Vec(v)
+        AudioSamples::Shared(v.into())
     }
 }
 
@@ -219,20 +281,35 @@ impl From<Arc<[f32]>> for AudioSamples {
 impl From<Box<[f32]>> for AudioSamples {
     #[inline]
     fn from(b: Box<[f32]>) -> Self {
-        AudioSamples::Arc(Arc::from(b))
+        AudioSamples::Shared(b.into())
     }
 }
 
 impl From<&[f32]> for AudioSamples {
     #[inline]
     fn from(s: &[f32]) -> Self {
-        AudioSamples::Vec(s.to_vec())
+        AudioSamples::from(
+            CopyContext::legacy()
+                .materialize(
+                    CopyReason::BorrowedInput,
+                    std::mem::size_of_val(s) as u64,
+                    || s.to_vec(),
+                )
+                .expect("legacy copy policy permits materialization"),
+        )
+    }
+}
+
+impl From<SharedBuffer<f32>> for AudioSamples {
+    fn from(buffer: SharedBuffer<f32>) -> Self {
+        Self::Shared(buffer)
     }
 }
 
 // Serialize as a flat `[f32]` (bincode/JSON/msgpack-compatible with
-// the old `Vec<f32>` representation). Deserialize always lands in
-// the `Vec` variant — there is no wire format for `Arc`.
+// the old `Vec<f32>` representation). Decoding materializes fresh owned storage
+// under the active CopyContext, then adopts that Vec without a second payload
+// copy. There is no wire representation of an owner or mapped allocation.
 impl Serialize for AudioSamples {
     fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         self.as_slice().serialize(s)
@@ -241,7 +318,7 @@ impl Serialize for AudioSamples {
 
 impl<'de> Deserialize<'de> for AudioSamples {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        Vec::<f32>::deserialize(d).map(AudioSamples::Vec)
+        crate::copy_policy::deserialize_vec::<f32, _>(d).map(AudioSamples::from)
     }
 }
 
@@ -505,9 +582,8 @@ pub enum RuntimeData {
     Audio {
         /// Audio samples.
         ///
-        /// Backed by [`AudioSamples`], which can hold a `Vec<f32>`
-        /// or an `Arc<[f32]>` (zero-copy shared). Both variants
-        /// `Deref` to `&[f32]` so read sites work unchanged.
+        /// Backed by [`AudioSamples`]. Shared storage retains its owner across
+        /// routing and slicing; all variants dereference to `&[f32]`.
         samples: AudioSamples,
         /// Sample rate in Hz
         sample_rate: u32,
@@ -535,7 +611,7 @@ pub enum RuntimeData {
         /// Pixel data (raw or encoded)
         /// - Raw: Depends on PixelFormat (e.g., YUV420P planar, RGB24 packed)
         /// - Encoded: Codec bitstream (VP8/AV1/H.264)
-        pixel_data: Vec<u8>,
+        pixel_data: SharedBytes,
         /// Frame width in pixels
         width: u32,
         /// Frame height in pixels
@@ -571,7 +647,7 @@ pub enum RuntimeData {
     /// pipelines.
     Image {
         /// Encoded image bytes (JPEG/PNG/WebP) or raw pixels.
-        data: Vec<u8>,
+        data: SharedBytes,
         /// Image format. `Raw { pixel_format }` carries
         /// uncompressed pixels; the other variants carry
         /// container-encoded bytes ready for direct embedding
@@ -594,7 +670,7 @@ pub enum RuntimeData {
     /// Tensor data
     Tensor {
         /// Flattened tensor data
-        data: Vec<u8>,
+        data: SharedBytes,
         /// Tensor shape
         shape: Vec<i32>,
         /// Data type (0=float32, 1=int32, etc.)
@@ -604,12 +680,11 @@ pub enum RuntimeData {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
     },
-    /// Numpy array data (zero-copy passthrough until IPC boundary)
-    /// This allows numpy arrays to flow through the pipeline without conversion,
-    /// only serializing once at the IPC boundary for iceoryx2 transport.
+    /// Array data with shared immutable ownership. Shape and strides describe
+    /// the visible byte range; IPC adapters must negotiate a compatible layout.
     Numpy {
         /// Raw array data
-        data: Vec<u8>,
+        data: SharedBytes,
         /// Array shape (dimensions)
         shape: Vec<usize>,
         /// Data type string (e.g., "float32", "int16", "uint8")
@@ -621,12 +696,32 @@ pub enum RuntimeData {
         /// Whether array is Fortran-contiguous
         f_contiguous: bool,
     },
+    /// Tensor resident in device memory (task 6.4). Never a host slice:
+    /// in-process consumers on the same device share the allocation, and any
+    /// boundary needing host bytes must call `device_to_host`, a counted
+    /// `DeviceTransfer` that strict policy rejects. Serde refuses this variant.
+    DeviceTensor {
+        /// Shared device allocation.
+        buffer: DeviceBuffer,
+        /// DLPack element type.
+        dtype: DlDtype,
+        /// Shape in elements.
+        shape: Vec<i64>,
+        /// Strides in elements; `None` means C-contiguous.
+        strides: Option<Vec<i64>>,
+        /// Byte offset of the first element within the allocation.
+        byte_offset: u64,
+        /// Readiness event recorded on the producer's stream, if any.
+        ready: Option<DeviceReady>,
+        /// Optional extensible metadata.
+        metadata: Option<serde_json::Value>,
+    },
     /// JSON data
     Json(serde_json::Value),
     /// Text data
     Text(String),
     /// Binary data
-    Binary(Vec<u8>),
+    Binary(SharedBytes),
     /// Control message for pipeline flow control (spec 007)
     ControlMessage {
         /// Type of control message
@@ -673,6 +768,19 @@ pub enum RuntimeData {
 }
 
 impl RuntimeData {
+    /// Retain legacy audio vectors in shared ownership before cloning, routing
+    /// or observation. The sample allocation is moved, never copied; other
+    /// payload variants already have shareable bulk storage and are unchanged.
+    /// This does not make a private allocation exportable across processes.
+    pub fn into_shared(mut self) -> Self {
+        if let Self::Audio { samples, .. } = &mut self {
+            if matches!(samples, AudioSamples::Vec(_)) {
+                *samples = AudioSamples::Shared(std::mem::take(samples).into_shared());
+            }
+        }
+        self
+    }
+
     /// Get the type of this data as string.
     pub fn data_type(&self) -> &str {
         match self {
@@ -686,6 +794,7 @@ impl RuntimeData {
             RuntimeData::Binary(_) => "binary",
             RuntimeData::ControlMessage { .. } => "control_message",
             RuntimeData::File { .. } => "file",
+            RuntimeData::DeviceTensor { .. } => "device_tensor",
         }
     }
 
@@ -790,6 +899,27 @@ impl RuntimeData {
             RuntimeData::Binary(b) => b.len(),
             RuntimeData::ControlMessage { .. } => 1,
             RuntimeData::File { .. } => 1, // One file reference
+            RuntimeData::DeviceTensor { shape, .. } => {
+                shape.iter().map(|&d| d.max(0) as usize).product()
+            }
+        }
+    }
+
+    /// Visible bulk payload bytes, excluding metadata and serialized framing.
+    /// Unlike size_bytes, this never serializes JSON or allocates scratch storage.
+    /// Text, JSON, control and file references are metadata in the sharing protocol.
+    pub fn bulk_payload_bytes(&self) -> usize {
+        match self {
+            Self::Audio { samples, .. } => samples.len() * std::mem::size_of::<f32>(),
+            Self::Video { pixel_data, .. } => pixel_data.len(),
+            Self::Image { data, .. }
+            | Self::Tensor { data, .. }
+            | Self::Numpy { data, .. }
+            | Self::Binary(data) => data.len(),
+            Self::Json(_) | Self::Text(_) | Self::ControlMessage { .. } | Self::File { .. } => 0,
+            // Device-resident data has no host bytes; host copy accounting never
+            // counts it. Host access is a separate, counted DeviceTransfer.
+            Self::DeviceTensor { .. } => 0,
         }
     }
 
@@ -840,6 +970,11 @@ impl RuntimeData {
                     + mime_type.as_ref().map(|s| s.len()).unwrap_or(0)
                     + stream_id.as_ref().map(|s| s.len()).unwrap_or(0)
                     + 24 // 3 u64 fields (size, offset, length)
+            }
+            // Device memory of the visible view; none of it is host memory.
+            RuntimeData::DeviceTensor { dtype, shape, .. } => {
+                shape.iter().map(|&d| d.max(0) as usize).product::<usize>()
+                    * dtype.item_bytes().unwrap_or(0)
             }
         }
     }

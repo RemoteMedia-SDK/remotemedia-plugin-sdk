@@ -8,17 +8,24 @@ pub use abi_stable;
 pub use async_ffi;
 pub use inventory;
 pub use loadable_node_abi::{
-    ensure_android_libcxx_streams, FfiCallContext, FfiNode, FfiNodeBox, FfiNodeFactory,
-    FfiNodeFactoryBox, FfiNodeFactory_TO, FfiNode_TO, NodePlugin, NodePluginRef, OutputSink,
-    OutputSinkBox, OutputSink_TO, RpcReplySink, RpcReplySinkBox, RpcReplySink_TO,
+    buffer, copy_ledger, ensure_android_libcxx_streams, runtime_buffer, snapshot, FfiCallContext,
+    FfiNode, FfiNodeBox, FfiNodeFactory, FfiNodeFactoryBox, FfiNodeFactory_TO, FfiNode_TO, FfiTick,
+    NodePlugin, NodePluginRef, OutputSink, OutputSinkBox, OutputSink_TO, RpcReplySink,
+    RpcReplySinkBox, RpcReplySink_TO,
 };
 pub use remotemedia_traits as traits;
 pub use remotemedia_types as types;
 pub use rmp_serde;
 
 pub mod adapter;
+pub mod buffer_contract;
 pub mod endpoint_call;
 pub mod params;
+
+#[cfg(all(feature = "mapped-python", any(windows, target_os = "linux")))]
+pub mod mapped_python;
+#[cfg(all(feature = "native-worker", any(windows, target_os = "linux")))]
+pub mod native_worker;
 
 #[cfg(all(feature = "python-plugin", not(target_os = "android")))]
 pub mod python_subprocess;

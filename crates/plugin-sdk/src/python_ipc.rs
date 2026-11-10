@@ -529,6 +529,7 @@ pub fn spawn_runner_and_ipc(
     // Start the IPC thread FIRST so the iceoryx2 services (input,
     // output, control) exist by the time Python attaches. The thread
     // ends the runner when every `cmd_tx` is gone (node dropped).
+    let liveness = RunnerLiveness::default();
     let lifetime: Arc<Mutex<Option<RunnerLifetime>>> = Arc::new(Mutex::new(None));
     let cmd_tx = spawn_ipc_thread(
         in_channel,
@@ -536,6 +537,7 @@ pub fn spawn_runner_and_ipc(
         control_channel,
         session_id.to_string(),
         node_id.to_string(),
+        liveness.clone(),
         lifetime.clone(),
     )?;
 
@@ -571,28 +573,7 @@ pub fn spawn_runner_and_ipc(
         }
     }
 
-    // Linux-only safety net: ask the kernel to deliver SIGTERM to this
-    // child if the host process dies before Drop runs (segfault, SIGKILL,
-    // etc.). Normal teardown still relies on the child handle's `Drop`
-    // killing the runner explicitly — this is purely the adversarial
-    // parent-death path. Matches the pattern in
-    // `crates/core/src/python/multiprocess/process_manager.rs`.
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: prctl(PR_SET_PDEATHSIG) is async-signal-safe — fine to
-        // call from `pre_exec` which runs in the forked child between
-        // fork() and exec(). The libc::SIGTERM arg is a constant; no
-        // allocations.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
+    contain_runner(&mut command);
 
     // Windows: start suspended so the runner joins its kill-on-close job
     // before it can run (a venv launcher immediately starts the real
@@ -609,6 +590,7 @@ pub fn spawn_runner_and_ipc(
     #[cfg(windows)]
     let job = win_job::adopt_and_resume(&child);
     let child = Arc::new(Mutex::new(child));
+    liveness.install(child.clone());
     if let Ok(mut slot) = lifetime.lock() {
         *slot = Some(RunnerLifetime {
             child: child.clone(),
@@ -631,71 +613,218 @@ pub fn spawn_runner_and_ipc(
     // Reply is via std::sync::mpsc which is safe to `recv()` from
     // any thread (including a tokio worker — std::sync::mpsc isn't
     // a tokio primitive).
-    let (rdy_tx, rdy_rx) = std::sync::mpsc::channel::<Result<(), String>>();
-    cmd_tx
-        .try_send(IpcCommand::WaitForReady {
-            timeout: ready_timeout(),
-            reply: rdy_tx,
-        })
-        .map_err(|e| format!("dispatch WaitForReady: {e}"))?;
+    // Every failure after spawn must terminate the runner: a READY timeout,
+    // error or dispatch failure otherwise leaves a live, unowned process.
+    let ready = (|| -> Result<(), String> {
+        let (rdy_tx, rdy_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        cmd_tx
+            .try_send(IpcCommand::WaitForReady {
+                timeout: ready_timeout(),
+                reply: rdy_tx,
+            })
+            .map_err(|e| format!("dispatch WaitForReady: {e}"))?;
 
-    // Poll for READY OR subprocess death, whichever lands first.
-    // Without the death check, a Python crash (ModuleNotFoundError,
-    // venv missing `remotemedia`, iceoryx2 version skew, segfault, …)
-    // would silently wait the full READY timeout (default 300s) before
-    // surfacing — long enough to look like a hang in test harnesses
-    // with shorter deadlines (jest beforeAll @ 90s). Polling
-    // `try_wait()` makes the failure visible quickly; the user can then
-    // check the runner's stderr (or `REMOTEMEDIA_PLUGIN_STDERR_FILE`)
-    // for the real cause.
-    //
-    // Two safeguards against false positives:
-    //   1. After observing an exit status, drain the READY channel one
-    //      more time (with a short timeout) — if Python published READY
-    //      and *then* exited (close-on-success scenarios), the READY
-    //      message is still in the queue and we should honor it.
-    //   2. Use a 250ms poll interval so a Python that pegs the CPU
-    //      during startup doesn't get racy `waitpid(WNOHANG)` reads
-    //      between SIGCHLD bookkeeping and actual reap.
-    let death_poll = Duration::from_millis(250);
-    loop {
-        match rdy_rx.recv_timeout(death_poll) {
-            Ok(result) => {
-                result?;
-                break;
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let exit = child
-                    .lock()
-                    .ok()
-                    .and_then(|mut g| g.try_wait().ok().flatten());
-                if let Some(status) = exit {
-                    // Last-chance drain: READY may have been published
-                    // in the same window the child exited. Give the IPC
-                    // thread up to 200ms more to deliver it before
-                    // declaring failure.
-                    if let Ok(result) = rdy_rx.recv_timeout(Duration::from_millis(200)) {
-                        result?;
-                        break;
+        // Poll for READY OR subprocess death, whichever lands first.
+        // Without the death check, a Python crash (ModuleNotFoundError,
+        // venv missing `remotemedia`, iceoryx2 version skew, segfault, …)
+        // would silently wait the full READY timeout (default 300s) before
+        // surfacing — long enough to look like a hang in test harnesses
+        // with shorter deadlines (jest beforeAll @ 90s). Polling
+        // `try_wait()` makes the failure visible quickly; the user can then
+        // check the runner's stderr (or `REMOTEMEDIA_PLUGIN_STDERR_FILE`)
+        // for the real cause.
+        //
+        // Two safeguards against false positives:
+        //   1. After observing an exit status, drain the READY channel one
+        //      more time (with a short timeout) — if Python published READY
+        //      and *then* exited (close-on-success scenarios), the READY
+        //      message is still in the queue and we should honor it.
+        //   2. Use a 250ms poll interval so a Python that pegs the CPU
+        //      during startup doesn't get racy `waitpid(WNOHANG)` reads
+        //      between SIGCHLD bookkeeping and actual reap.
+        let death_poll = Duration::from_millis(250);
+        loop {
+            match rdy_rx.recv_timeout(death_poll) {
+                Ok(result) => {
+                    result?;
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let exit = child
+                        .lock()
+                        .ok()
+                        .and_then(|mut g| g.try_wait().ok().flatten());
+                    if let Some(status) = exit {
+                        // Last-chance drain: READY may have been published
+                        // in the same window the child exited. Give the IPC
+                        // thread up to 200ms more to deliver it before
+                        // declaring failure.
+                        if let Ok(result) = rdy_rx.recv_timeout(Duration::from_millis(200)) {
+                            result?;
+                            break;
+                        }
+                        return Err(format!(
+                            "runner process exited before publishing READY (status: {status}). \
+                             Common causes: managed venv missing the `remotemedia` package \
+                             (set REMOTEMEDIA_PYTHON_SRC=/path/to/clients/python), \
+                             iceoryx2 version skew between Rust workspace and the plugin's \
+                             @python_requires pin, or an unhandled ImportError. \
+                             Set REMOTEMEDIA_PLUGIN_STDERR_FILE=<path> to capture the \
+                             runner's stderr for diagnosis."
+                        ));
                     }
-                    return Err(format!(
-                        "runner process exited before publishing READY (status: {status}). \
-                         Common causes: managed venv missing the `remotemedia` package \
-                         (set REMOTEMEDIA_PYTHON_SRC=/path/to/clients/python), \
-                         iceoryx2 version skew between Rust workspace and the plugin's \
-                         @python_requires pin, or an unhandled ImportError. \
-                         Set REMOTEMEDIA_PLUGIN_STDERR_FILE=<path> to capture the \
-                         runner's stderr for diagnosis."
-                    ));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("WaitForReady reply channel disconnected".into());
                 }
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Err("WaitForReady reply channel disconnected".into());
-            }
         }
+
+        Ok(())
+    })();
+    if let Err(error) = ready {
+        terminate_runner(&child);
+        return Err(error);
     }
 
     Ok((cmd_tx, child))
+}
+
+/// Process containment for a runner. On Unix the runner leads its own process
+/// group, so [`terminate_runner`] ends every process it started (model worker
+/// pools, compiler helpers), not only the runner. On Linux the kernel also
+/// sends the runner SIGTERM if the host dies before teardown runs (segfault,
+/// SIGKILL): the adversarial parent-death path. On Windows the runner joins its
+/// own kill-on-close job object (`win_job`), which ends the tree when the node
+/// drops or the host exits, even on a crash; `terminate_runner` also uses
+/// `taskkill /T` for an explicit stop.
+fn contain_runner(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: prctl(PR_SET_PDEATHSIG) is async-signal-safe, so it may run
+        // in `pre_exec` between fork() and exec(). No allocations.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+/// Terminate and reap a Python runner spawned by [`spawn_runner_and_ipc`].
+/// `std::process::Child` does not stop its process on drop. The runner's whole
+/// tree is terminated before it is reaped: on Windows a venv launcher owns a
+/// second Python process, and on any platform the model may start helpers.
+/// Otherwise they survive with their GPU allocations and inherited pipe
+/// handles. Unix kills the runner's process group ([`contain_runner`]);
+/// Windows uses `taskkill /T`. A runner already reaped is left alone, since
+/// its group id may no longer be its own.
+pub fn terminate_runner(child: &Mutex<Child>) {
+    let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        // The runner is unreaped, so its pid (and group id) cannot have been
+        // reused. ESRCH means it does not lead a group: nothing more to end.
+        // SAFETY: killpg has no memory-safety preconditions.
+        let pgid = child.id() as libc::pid_t;
+        if unsafe { libc::killpg(pgid, libc::SIGKILL) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                eprintln!("[python_ipc] failed to kill runner process group {pgid}: {error}");
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let result = std::process::Command::new("taskkill.exe")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .output();
+        if !matches!(result, Ok(ref output) if output.status.success()) {
+            eprintln!(
+                "[python_ipc] failed to terminate Python runner process tree (pid {})",
+                child.id()
+            );
+        }
+    }
+    if let Err(error) = child.kill() {
+        if !matches!(child.try_wait(), Ok(Some(_))) {
+            eprintln!(
+                "[python_ipc] failed to terminate Python runner (pid {}): {error}",
+                child.id()
+            );
+            return;
+        }
+    }
+    let _ = child.wait();
+}
+
+/// Runner process handle, installed once the child spawns, so a turn can stop
+/// waiting for an `EndOfInput` that a dead runner will never publish.
+#[derive(Clone, Default)]
+pub(crate) struct RunnerLiveness(Arc<std::sync::OnceLock<Arc<Mutex<Child>>>>);
+
+impl RunnerLiveness {
+    fn install(&self, child: Arc<Mutex<Child>>) {
+        let _ = self.0.set(child);
+    }
+
+    fn poll(&self) -> IdlePoll<'_> {
+        IdlePoll {
+            runner: self,
+            next_check: std::time::Instant::now() + RUNNER_LIVENESS_INTERVAL,
+        }
+    }
+}
+
+const RUNNER_LIVENESS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Idle step of a turn: yield, and periodically confirm the runner is alive.
+/// Only called when no sample is queued, so frames a runner published before
+/// exiting are still delivered first.
+struct IdlePoll<'a> {
+    runner: &'a RunnerLiveness,
+    next_check: std::time::Instant,
+}
+
+impl IdlePoll<'_> {
+    fn wait(&mut self) -> Result<(), String> {
+        std::thread::yield_now();
+        let now = std::time::Instant::now();
+        if now < self.next_check {
+            return Ok(());
+        }
+        self.next_check = now + RUNNER_LIVENESS_INTERVAL;
+        let Some(child) = self.runner.0.get() else {
+            return Ok(());
+        };
+        let status = child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .try_wait()
+            .map_err(|e| format!("runner liveness check: {e}"))?;
+        match status {
+            Some(status) => Err(format!(
+                "Python runner exited before EndOfInput (status: {status})"
+            )),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Ends a runner subprocess when dropped (by the IPC thread once the node's
@@ -712,12 +841,8 @@ impl Drop for RunnerLifetime {
     fn drop(&mut self) {
         #[cfg(windows)]
         drop(self._job.take());
-        if let Ok(mut child) = self.child.lock() {
-            if matches!(child.try_wait(), Ok(None)) {
-                let _ = child.kill();
-            }
-            let _ = child.wait();
-        }
+        // Ends the runner's whole tree (its process group on Unix) and reaps it.
+        terminate_runner(&self.child);
     }
 }
 
@@ -826,6 +951,7 @@ fn spawn_ipc_thread(
     control_channel: String,
     session_id: String,
     node_id: String,
+    liveness: RunnerLiveness,
     lifetime: Arc<Mutex<Option<RunnerLifetime>>>,
 ) -> Result<mpsc::Sender<IpcCommand>, String> {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<IpcCommand>(64);
@@ -966,6 +1092,7 @@ fn spawn_ipc_thread(
                             &control_subscriber,
                             control_ctx,
                             &req_bytes,
+                            &liveness,
                             &mut side,
                         );
                         let _ = reply.send(result);
@@ -977,6 +1104,7 @@ fn spawn_ipc_thread(
                             &control_subscriber,
                             control_ctx,
                             &req_bytes,
+                            &liveness,
                             &mut side,
                         );
                         let _ = reply.send(result);
@@ -993,6 +1121,7 @@ fn spawn_ipc_thread(
                             control_ctx,
                             &req_bytes,
                             &frame_tx,
+                            &liveness,
                             &mut side,
                         );
                         // Drop frame_tx BEFORE replying so the consumer's
@@ -1077,9 +1206,11 @@ fn round_trip(
     control_subscriber: &iceoryx2::port::subscriber::Subscriber<ipc::Service, [u8], ()>,
     ctx: (&str, &str),
     req: &[u8],
+    liveness: &RunnerLiveness,
     side: &mut Side<'_>,
 ) -> Result<Vec<u8>, String> {
     publish_bytes(publisher, req)?;
+    let mut idle = liveness.poll();
 
     let mut first: Option<Vec<u8>> = None;
     loop {
@@ -1112,7 +1243,7 @@ fn round_trip(
                 // contract. Keep looping to consume EndOfInput so the
                 // next call doesn't see stale frames.
             }
-            None => std::thread::yield_now(),
+            None => idle.wait()?,
         }
     }
 }
@@ -1130,9 +1261,11 @@ fn round_trip_multi(
     control_subscriber: &iceoryx2::port::subscriber::Subscriber<ipc::Service, [u8], ()>,
     ctx: (&str, &str),
     req: &[u8],
+    liveness: &RunnerLiveness,
     side: &mut Side<'_>,
 ) -> Result<Vec<Vec<u8>>, String> {
     publish_bytes(publisher, req)?;
+    let mut idle = liveness.poll();
 
     let mut outputs: Vec<Vec<u8>> = Vec::new();
     loop {
@@ -1154,7 +1287,7 @@ fn round_trip_multi(
                 }
                 outputs.push(bytes);
             }
-            None => std::thread::yield_now(),
+            None => idle.wait()?,
         }
     }
 }
@@ -1182,9 +1315,11 @@ fn round_trip_streaming(
     ctx: (&str, &str),
     req: &[u8],
     frame_tx: &mpsc::Sender<Vec<u8>>,
+    liveness: &RunnerLiveness,
     side: &mut Side<'_>,
 ) -> Result<(), String> {
     publish_bytes(publisher, req)?;
+    let mut idle = liveness.poll();
 
     let mut consumer_alive = true;
     loop {
@@ -1215,7 +1350,7 @@ fn round_trip_streaming(
                 }
                 // else: drain to EndOfInput without forwarding.
             }
-            None => std::thread::yield_now(),
+            None => idle.wait()?,
         }
     }
 }
@@ -1399,5 +1534,154 @@ mod tests {
         let decoded = WireRuntimeData::from_bytes(&bytes).expect("decode");
         let out = decoded.decode_control_message().expect("decode ctrl");
         assert_eq!(out, payload);
+    }
+}
+
+#[cfg(test)]
+mod runner_lifecycle_tests {
+    use super::*;
+
+    fn shell(script_windows: &str, script_unix: &str) -> Arc<Mutex<Child>> {
+        let child = if cfg!(windows) {
+            Command::new("cmd").args(["/C", script_windows]).spawn()
+        } else {
+            Command::new("sh").args(["-c", script_unix]).spawn()
+        }
+        .expect("spawn test child");
+        Arc::new(Mutex::new(child))
+    }
+
+    #[test]
+    fn idle_poll_reports_a_runner_that_exits_mid_turn() {
+        let liveness = RunnerLiveness::default();
+        let mut idle = liveness.poll();
+        // No child installed yet (startup window): never an error.
+        assert!(idle.wait().is_ok());
+        let child = shell("exit 3", "exit 3");
+        liveness.install(child);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let error = loop {
+            match idle.wait() {
+                Err(error) => break error,
+                Ok(()) => assert!(
+                    std::time::Instant::now() < deadline,
+                    "dead runner was never reported"
+                ),
+            }
+        };
+        assert!(error.contains("exited before EndOfInput"), "{error}");
+    }
+
+    fn alive(pid: u32) -> bool {
+        if cfg!(windows) {
+            let out = Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).contains(&pid.to_string())
+        } else {
+            Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .unwrap()
+                .success()
+        }
+    }
+
+    #[test]
+    fn runner_that_never_becomes_ready_is_terminated_not_leaked() {
+        let dir = std::env::temp_dir().join(format!(
+            "rm-ready-leak-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("pid");
+        // A runner that records its PID and never publishes READY.
+        let argv: Vec<String> = if cfg!(windows) {
+            vec![
+                "powershell".into(),
+                "-NoProfile".into(),
+                "-Command".into(),
+                format!(
+                    "$PID | Out-File -Encoding ascii '{}'; Start-Sleep 120",
+                    pid_file.display()
+                ),
+            ]
+        } else {
+            vec![
+                "sh".into(),
+                "-c".into(),
+                format!("echo $$ > '{}'; exec sleep 120", pid_file.display()),
+            ]
+        };
+        std::env::set_var(READY_TIMEOUT_ENV, "3");
+        let session = format!("readyleak{}", std::process::id());
+        let result = spawn_runner_and_ipc(&argv, &session, "node");
+        std::env::remove_var(READY_TIMEOUT_ENV);
+        assert!(result.is_err(), "a runner without READY must fail");
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("runner started and recorded its pid")
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(!alive(pid), "runner {pid} leaked after READY failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn terminate_runner_kills_and_reaps_a_live_runner() {
+        let child = shell("ping -n 60 127.0.0.1 >NUL", "sleep 60");
+        let started = std::time::Instant::now();
+        terminate_runner(&child);
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert!(
+            matches!(child.lock().unwrap().try_wait(), Ok(Some(_))),
+            "runner must be reaped"
+        );
+        // Idempotent for an already-reaped runner.
+        terminate_runner(&child);
+    }
+
+    #[test]
+    fn terminate_runner_ends_processes_the_runner_started() {
+        use std::io::BufRead;
+        // The runner starts a long-lived child, prints its pid, then waits.
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("powershell");
+            command.args([
+                "-NoProfile",
+                "-Command",
+                "$p = Start-Process ping -ArgumentList '-n','60','127.0.0.1'                  -PassThru -WindowStyle Hidden; $p.Id; Wait-Process -Id $p.Id",
+            ]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 60 & echo $!; wait"]);
+            command
+        };
+        command.stdout(Stdio::piped());
+        contain_runner(&mut command);
+        let mut child = command.spawn().expect("spawn runner");
+        let mut line = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let grandchild: u32 = line.trim().parse().expect("grandchild pid");
+        assert!(alive(grandchild), "grandchild {grandchild} never started");
+        let child = Mutex::new(child);
+        terminate_runner(&child);
+        assert!(matches!(child.lock().unwrap().try_wait(), Ok(Some(_))));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while alive(grandchild) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grandchild {grandchild} outlived its runner"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }

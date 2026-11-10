@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "remotemedia-buffers"
+version = "0.1.0"
+description = "Owning views and exclusive output loans for RemoteMedia"
+requires-python = ">=3.11"
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "_remotemedia_buffers"
+features = ["extension-module", "worker"]

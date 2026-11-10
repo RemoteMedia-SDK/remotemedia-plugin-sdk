@@ -83,6 +83,7 @@
 
 #![warn(clippy::all)]
 
+pub mod buffer_contract;
 pub mod capabilities;
 pub mod llm;
 pub mod ports;

@@ -1,0 +1,13 @@
+[package]
+name = "remotemedia-device-cuda"
+description = "CUDA device owners for RemoteMedia device tensors, through the CUDA driver API loaded at run time (no toolkit needed to build)."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+remotemedia-types = { path = "../types" }
+libloading = "0.8"

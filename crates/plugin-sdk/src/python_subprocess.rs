@@ -22,7 +22,7 @@ use abi_stable::std_types::{RErr, ROk, RResult, RString, RVec};
 use async_ffi::{FfiFuture, FutureExt};
 use include_dir::Dir;
 use loadable_node_abi::{FfiNode, FfiNodeBox, FfiNodeFactory, FfiNodeFactory_TO};
-use remotemedia_py_env::{PythonEnvConfig, PythonEnvManager, VenvInfo};
+use remotemedia_py_env::{LeasedVenvInfo, PythonEnvConfig, PythonEnvManager};
 use sha2::{Digest, Sha256};
 
 /// Argv contract version the plugin-side helper emits. Matches
@@ -329,6 +329,7 @@ impl FfiNodeFactory for PythonSubprocessFactory {
             session_id,
             cmd_tx,
             _child: child,
+            _env_lease: Some(provisioning.venv.clone()),
         };
         ROk(loadable_node_abi::FfiNode_TO::from_value(
             node,
@@ -397,9 +398,11 @@ pub struct PluginProvisioning {
     /// PEP 723 deps parsed from the primary module's
     /// `@python_requires([...])` decorator.
     pub deps: Vec<String>,
-    /// Venv info returned by [`PythonEnvManager::ensure_env`].
-    /// `python_executable` is the path to invoke for the runner.
-    pub venv: VenvInfo,
+    /// Leased venv from [`PythonEnvManager::ensure_env_leased`].
+    /// `python_executable` is the path to invoke for the runner. Retain it
+    /// with the runner: the lease keeps the cache from evicting or replacing
+    /// this environment while the worker uses it.
+    pub venv: LeasedVenvInfo,
 }
 
 /// Async helper that performs the full plugin-side provisioning flow
@@ -437,7 +440,7 @@ pub async fn provision_plugin_env(
     let env_mgr =
         PythonEnvManager::new(env_config).map_err(|e| format!("PythonEnvManager::new: {e}"))?;
     let venv = env_mgr
-        .ensure_env(&deps)
+        .ensure_env_leased(&deps)
         .await
         .map_err(|e| format!("PythonEnvManager::ensure_env({deps:?}): {e}"))?;
 
@@ -554,7 +557,7 @@ pub async fn provision_plugin_env_from_path_scoped(
     let env_mgr =
         PythonEnvManager::new(env_config).map_err(|e| format!("PythonEnvManager::new: {e}"))?;
     let venv = env_mgr
-        .ensure_env_scoped(&deps, scope_context.as_deref())
+        .ensure_env_scoped_leased(&deps, scope_context.as_deref())
         .await
         .map_err(|e| format!("PythonEnvManager::ensure_env({deps:?}): {e}"))?;
 
@@ -586,6 +589,16 @@ pub struct PythonSubprocessNode {
     pub cmd_tx: tokio::sync::mpsc::Sender<crate::python_ipc::IpcCommand>,
     /// Held so the child is killed when the node is dropped.
     pub _child: std::sync::Arc<std::sync::Mutex<std::process::Child>>,
+    /// Environment lease, released after `Drop` terminates the runner.
+    pub _env_lease: Option<LeasedVenvInfo>,
+}
+
+impl Drop for PythonSubprocessNode {
+    fn drop(&mut self) {
+        // Without this the runner outlived node teardown; its parent-death
+        // watcher only fires when the whole host exits.
+        crate::python_ipc::terminate_runner(&self._child);
+    }
 }
 
 impl PythonSubprocessNode {
@@ -604,6 +617,7 @@ impl PythonSubprocessNode {
             session_id,
             cmd_tx,
             _child: child,
+            _env_lease: None,
         }
     }
 }
@@ -942,7 +956,7 @@ fn decode_output_to_ffi(resp_bytes: &[u8]) -> Result<Vec<u8>, String> {
                 other => Some(other),
             };
             remotemedia_types::RuntimeData::Tensor {
-                data,
+                data: data.into(),
                 shape: shape.into_iter().map(|d| d as i32).collect(),
                 dtype: dtype as i32,
                 metadata,
@@ -969,7 +983,7 @@ fn decode_output_to_ffi(resp_bytes: &[u8]) -> Result<Vec<u8>, String> {
                 )
             };
             remotemedia_types::RuntimeData::Video {
-                pixel_data,
+                pixel_data: pixel_data.into(),
                 width,
                 height,
                 format,

@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "abi-v05-fixture"
+version = "0.5.0"
+dependencies = [
+ "abi_stable",
+ "async-ffi",
+]
+
+[[package]]
 name = "abi_stable"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -514,6 +522,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastrand"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+
+[[package]]
 name = "filetime"
 version = "0.2.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -546,6 +560,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]
@@ -830,8 +854,6 @@ dependencies = [
 [[package]]
 name = "iceoryx2"
 version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e226c6041866b416e8c384d69a54a8578cb26619725253351e3e17ea5f32627f"
 dependencies = [
  "iceoryx2-bb-concurrency",
  "iceoryx2-bb-container",
@@ -1071,8 +1093,6 @@ dependencies = [
 [[package]]
 name = "iceoryx2-pal-posix"
 version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "717117199992be87c4c49bd058e65d470a90519274c11d4a2b004f79b20234ba"
 dependencies = [
  "bindgen",
  "cc",
@@ -1332,11 +1352,15 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "loadable-node-abi"
-version = "0.5.0"
+version = "0.9.0"
 dependencies = [
  "abi_stable",
  "async-ffi",
  "cc",
+ "remotemedia-shared-memory",
+ "remotemedia-traits",
+ "remotemedia-types",
+ "serde_json",
 ]
 
 [[package]]
@@ -1396,6 +1420,15 @@ name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
+
+[[package]]
+name = "memmap2"
+version = "0.9.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "minimal-lexical"
@@ -1868,6 +1901,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "remotemedia-device-cuda"
+version = "0.1.0"
+dependencies = [
+ "libloading 0.8.9",
+ "remotemedia-types",
+]
+
+[[package]]
 name = "remotemedia-modality"
 version = "0.4.0"
 dependencies = [
@@ -1880,12 +1921,13 @@ dependencies = [
 
 [[package]]
 name = "remotemedia-plugin-sdk"
-version = "0.7.0"
+version = "0.11.0"
 dependencies = [
  "abi_stable",
  "async-ffi",
  "async-trait",
  "dirs",
+ "fs2",
  "futures",
  "hex",
  "iceoryx2",
@@ -1897,6 +1939,8 @@ dependencies = [
  "pyo3",
  "pyo3-async-runtimes",
  "remotemedia-py-env",
+ "remotemedia-python-buffers",
+ "remotemedia-shared-memory",
  "remotemedia-traits",
  "remotemedia-types",
  "rmp-serde",
@@ -1904,6 +1948,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "url",
  "windows-sys 0.52.0",
 ]
 
@@ -1913,7 +1958,10 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "flate2",
+ "fs2",
  "hex",
+ "libc",
+ "remotemedia-shared-memory",
  "remotemedia-types",
  "reqwest",
  "serde",
@@ -1922,7 +1970,35 @@ dependencies = [
  "tar",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
  "zip",
+]
+
+[[package]]
+name = "remotemedia-python-buffers"
+version = "0.1.0"
+dependencies = [
+ "pyo3",
+ "remotemedia-shared-memory",
+ "remotemedia-traits",
+ "remotemedia-types",
+ "serde_json",
+]
+
+[[package]]
+name = "remotemedia-shared-memory"
+version = "0.1.0"
+dependencies = [
+ "futures",
+ "libc",
+ "memmap2",
+ "remotemedia-traits",
+ "remotemedia-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2247,6 +2323,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "shared-buffer-plugin-fixture"
+version = "0.1.0"
+dependencies = [
+ "abi_stable",
+ "async-trait",
+ "remotemedia-plugin-sdk",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2371,6 +2458,19 @@ name = "target-lexicon"
 version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
+
+[[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.3",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "thiserror"
