@@ -519,6 +519,27 @@ pub fn spawn_runner_and_ipc(
     session_id: &str,
     node_id: &str,
 ) -> Result<(mpsc::Sender<IpcCommand>, Arc<Mutex<Child>>), String> {
+    spawn_runner_and_ipc_with_handshake(argv, session_id, node_id)
+        .map(|(cmd_tx, child, _handshake)| (cmd_tx, child))
+}
+
+/// What the runner declared about its node before `READY`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RunnerHandshake {
+    /// The node class's `@instance_scope(...)`, from the `SCOPE:` control
+    /// message the worker sends just ahead of `READY`. `None` when the class
+    /// declares none.
+    pub instance_scope: Option<remotemedia_traits::streaming::InstanceScope>,
+}
+
+/// [`spawn_runner_and_ipc`], also returning what the runner declared during
+/// the READY handshake.
+pub fn spawn_runner_and_ipc_with_handshake(
+    argv: &[String],
+    session_id: &str,
+    node_id: &str,
+) -> Result<(mpsc::Sender<IpcCommand>, Arc<Mutex<Child>>, RunnerHandshake), String> {
     if argv.is_empty() {
         return Err("argv must not be empty".into());
     }
@@ -531,6 +552,7 @@ pub fn spawn_runner_and_ipc(
     // ends the runner when every `cmd_tx` is gone (node dropped).
     let liveness = RunnerLiveness::default();
     let lifetime: Arc<Mutex<Option<RunnerLifetime>>> = Arc::new(Mutex::new(None));
+    let handshake: Arc<Mutex<RunnerHandshake>> = Arc::default();
     let cmd_tx = spawn_ipc_thread(
         in_channel,
         out_channel,
@@ -539,6 +561,7 @@ pub fn spawn_runner_and_ipc(
         node_id.to_string(),
         liveness.clone(),
         lifetime.clone(),
+        handshake.clone(),
     )?;
 
     let mut command = Command::new(&argv[0]);
@@ -687,7 +710,8 @@ pub fn spawn_runner_and_ipc(
         return Err(error);
     }
 
-    Ok((cmd_tx, child))
+    let handshake = handshake.lock().map(|declared| *declared).unwrap_or_default();
+    Ok((cmd_tx, child, handshake))
 }
 
 /// Process containment for a runner. On Unix the runner leads its own process
@@ -953,6 +977,7 @@ fn spawn_ipc_thread(
     node_id: String,
     liveness: RunnerLiveness,
     lifetime: Arc<Mutex<Option<RunnerLifetime>>>,
+    handshake: Arc<Mutex<RunnerHandshake>>,
 ) -> Result<mpsc::Sender<IpcCommand>, String> {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<IpcCommand>(64);
     let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
@@ -1082,7 +1107,8 @@ fn spawn_ipc_thread(
                         // its `initialize()` (model-load progress
                         // updates, common in the LFM2 / Voxtral
                         // plugins) actually reaches the orb.
-                        let result = wait_for_ready(&control_subscriber, timeout, control_ctx);
+                        let result =
+                            wait_for_ready(&control_subscriber, timeout, control_ctx, &handshake);
                         let _ = reply.send(result);
                     }
                     IpcCommand::Round { req_bytes, reply } => {
@@ -1365,6 +1391,7 @@ fn wait_for_ready(
     control_subscriber: &iceoryx2::port::subscriber::Subscriber<ipc::Service, [u8], ()>,
     timeout: Duration,
     ctx: (&str, &str),
+    handshake: &Mutex<RunnerHandshake>,
 ) -> Result<(), String> {
     let deadline = std::time::Instant::now() + timeout;
     let mut polls = 0u64;
@@ -1384,6 +1411,11 @@ fn wait_for_ready(
                 if bytes == b"READY" {
                     return Ok(());
                 }
+                if let Some(declared) = bytes.strip_prefix(b"SCOPE:") {
+                    record_instance_scope(declared, ctx.1, handshake);
+                    polls += 1;
+                    continue;
+                }
                 // DEPS: / PROGRESS: / PUBLISH: / unknown — forward to
                 // the host control hook so in-initialize() taps reach
                 // the SessionControlBus before READY lands. DEPS: in
@@ -1395,6 +1427,20 @@ fn wait_for_ready(
             None => std::thread::sleep(READY_POLL_INTERVAL),
         }
         polls += 1;
+    }
+}
+
+/// Store the `@instance_scope` a worker declared in its `SCOPE:` message.
+fn record_instance_scope(declared: &[u8], node_id: &str, handshake: &Mutex<RunnerHandshake>) {
+    let declared = std::str::from_utf8(declared).unwrap_or("");
+    let scope = remotemedia_traits::streaming::InstanceScope::parse(declared);
+    if scope.is_none() {
+        eprintln!(
+            "[plugin-sdk python_ipc] node {node_id} declared an unknown instance scope {declared:?}"
+        );
+    }
+    if let Ok(mut handshake) = handshake.lock() {
+        handshake.instance_scope = scope;
     }
 }
 
@@ -1429,6 +1475,21 @@ pub fn make_runner_argv(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scope_message_is_recorded_in_the_handshake() {
+        use remotemedia_traits::streaming::InstanceScope;
+        let handshake = Mutex::new(RunnerHandshake::default());
+        record_instance_scope(b"per_participant", "node", &handshake);
+        assert_eq!(
+            handshake.lock().unwrap().instance_scope,
+            Some(InstanceScope::PerParticipant)
+        );
+        record_instance_scope(b"shared", "node", &handshake);
+        assert_eq!(handshake.lock().unwrap().instance_scope, Some(InstanceScope::Shared));
+        record_instance_scope(b"per-session", "node", &handshake);
+        assert_eq!(handshake.lock().unwrap().instance_scope, None);
+    }
 
     #[test]
     fn wire_roundtrip_text() {

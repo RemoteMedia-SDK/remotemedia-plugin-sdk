@@ -503,6 +503,34 @@ pub fn spawn_python_subprocess(
     ),
     String,
 > {
+    spawn_python_subprocess_with_handshake(
+        provisioning,
+        module,
+        node_type,
+        node_id,
+        session_id,
+        params_json,
+    )
+    .map(|(cmd_tx, child, _handshake)| (cmd_tx, child))
+}
+
+/// [`spawn_python_subprocess`], also returning what the runner declared
+/// during the READY handshake (the node class's `@instance_scope`).
+pub fn spawn_python_subprocess_with_handshake(
+    provisioning: &PluginProvisioning,
+    module: &str,
+    node_type: &str,
+    node_id: &str,
+    session_id: &str,
+    params_json: &str,
+) -> Result<
+    (
+        tokio::sync::mpsc::Sender<crate::python_ipc::IpcCommand>,
+        std::sync::Arc<std::sync::Mutex<std::process::Child>>,
+        crate::python_ipc::RunnerHandshake,
+    ),
+    String,
+> {
     let argv = build_runner_argv(
         &provisioning.venv.python_executable,
         std::path::Path::new(""),
@@ -514,7 +542,7 @@ pub fn spawn_python_subprocess(
         params_json,
         None,
     );
-    crate::python_ipc::spawn_runner_and_ipc(&argv, session_id, node_id)
+    crate::python_ipc::spawn_runner_and_ipc_with_handshake(&argv, session_id, node_id)
 }
 
 /// Async variant for the OnDisk source path (Python source-load plugins
