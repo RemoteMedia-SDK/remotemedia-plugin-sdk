@@ -217,6 +217,16 @@ pub trait SyncStreamingNode: Send + Sync {
         None
     }
 
+    /// Whether this node is self-driven: it does not take the session's
+    /// client input (openspec: add-node-initiated-output). A self-driven node
+    /// with no upstream is not an entry point for client input; it produces
+    /// through its emitter, and the session stays open while it runs. A
+    /// manifest node's `session_input` overrides this. `None` (default)
+    /// declares nothing.
+    fn self_driven(&self) -> Option<bool> {
+        None
+    }
+
     /// Process single-input data.
     fn process(&self, data: RuntimeData) -> Result<RuntimeData, Error>;
 
@@ -427,6 +437,16 @@ pub trait AsyncStreamingNode: Send + Sync {
         None
     }
 
+    /// Whether this node is self-driven: it does not take the session's
+    /// client input (openspec: add-node-initiated-output). A self-driven node
+    /// with no upstream is not an entry point for client input; it produces
+    /// through its emitter, and the session stays open while it runs. A
+    /// manifest node's `session_input` overrides this. `None` (default)
+    /// declares nothing.
+    fn self_driven(&self) -> Option<bool> {
+        None
+    }
+
     /// May run concurrently with media and other RPCs. Host context owns identity.
     async fn call_rpc(
         &self,
@@ -620,6 +640,16 @@ pub trait StreamingNode: Send + Sync {
         None
     }
 
+    /// Whether this node is self-driven: it does not take the session's
+    /// client input (openspec: add-node-initiated-output). A self-driven node
+    /// with no upstream is not an entry point for client input; it produces
+    /// through its emitter, and the session stays open while it runs. A
+    /// manifest node's `session_input` overrides this. `None` (default)
+    /// declares nothing.
+    fn self_driven(&self) -> Option<bool> {
+        None
+    }
+
     /// May run concurrently with media and other RPCs. Host context owns identity.
     async fn call_rpc(
         &self,
@@ -771,6 +801,9 @@ impl<T: SyncStreamingNode + 'static> StreamingNode for SyncNodeWrapper<T> {
     fn instance_scope(&self) -> Option<InstanceScope> {
         self.0.instance_scope()
     }
+    fn self_driven(&self) -> Option<bool> {
+        self.0.self_driven()
+    }
 
     async fn process_async(
         &self,
@@ -868,6 +901,9 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
     fn instance_scope(&self) -> Option<InstanceScope> {
         self.0.instance_scope()
     }
+    fn self_driven(&self) -> Option<bool> {
+        self.0.self_driven()
+    }
 
     async fn call_rpc(
         &self,
@@ -959,6 +995,16 @@ pub trait StreamingNodeFactory: Send + Sync {
     /// without creating one. A node instance's own declaration takes
     /// precedence; a manifest node's `instance_scope` overrides both.
     fn instance_scope(&self) -> Option<InstanceScope> {
+        None
+    }
+
+    /// Whether this node is self-driven: it does not take the session's
+    /// client input (openspec: add-node-initiated-output). A self-driven node
+    /// with no upstream is not an entry point for client input; it produces
+    /// through its emitter, and the session stays open while it runs. A
+    /// manifest node's `session_input` overrides this. `None` (default)
+    /// declares nothing.
+    fn self_driven(&self) -> Option<bool> {
         None
     }
 
