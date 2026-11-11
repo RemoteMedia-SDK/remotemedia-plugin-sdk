@@ -1456,10 +1456,17 @@ fn spawn_ipc_thread(
                 } else {
                     None
                 };
-                Ok((publisher, subscriber, control_subscriber, control_service, wake))
+                Ok((
+                    publisher,
+                    subscriber,
+                    control_subscriber,
+                    control_service,
+                    wake,
+                ))
             };
 
-            let (publisher, subscriber, control_subscriber, _control_service, wake) = match setup() {
+            let (publisher, subscriber, control_subscriber, _control_service, wake) = match setup()
+            {
                 Ok(ps) => {
                     let _ = ready_tx.send(Ok(()));
                     ps
@@ -2248,7 +2255,11 @@ mod runner_lifecycle_tests {
         let node = NodeBuilder::new()
             .create::<ipc::Service>()
             .expect("iceoryx2 node");
-        let base = format!("wake_test_{}_{}", std::process::id(), WireRuntimeData::now_us());
+        let base = format!(
+            "wake_test_{}_{}",
+            std::process::id(),
+            WireRuntimeData::now_us()
+        );
         let (in_channel, out_channel) = (format!("{base}_input"), format!("{base}_output"));
         let wake = create_wake_events(&node, &in_channel, &out_channel).expect("wake events");
         // The runner's side, opened by name the way runner.py does.
