@@ -90,6 +90,7 @@ pub mod llm;
 pub mod ports;
 pub mod runtime_context;
 pub mod schema;
+pub mod source;
 pub mod streaming;
 pub mod stt;
 
@@ -112,6 +113,8 @@ pub use schema::{
     NodeCapabilitiesSchema, NodeConfigSchema, NodeModelSourceFile, NodeModelSources, NodeParameter,
     NodeSchema, NodeSchemaRegistry, ParameterType, RegisteredNodeConfig, RuntimeDataType,
 };
+
+pub use source::{source_factory, SourceFactory, SourceNode, SourceNodeWrapper};
 
 pub use streaming::{
     AnySessionState, AsyncNodeWrapper, AsyncStreamingNode, InstanceScope, NodeStatus, PacingNature,

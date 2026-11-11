@@ -468,6 +468,68 @@ pub enum IpcCommand {
     /// own (openspec: add-node-initiated-output) to `frames`, in order. From
     /// then on the output channel is also read between rounds.
     EmitSink { frames: mpsc::Sender<EmittedFrame> },
+    /// One input's turn (openspec: add-source-node-lifecycle): publish
+    /// `req_bytes`, tagged with the participant it came from (`origin`, a
+    /// JSON object of `participant.*` fields), and forward on `frames` what
+    /// the worker sends until the turn ends, in the worker's order: the
+    /// input's replies and the frames the node emitted meanwhile. `frames`
+    /// is dropped before `reply` fires.
+    Turn {
+        req_bytes: Vec<u8>,
+        origin: Option<String>,
+        frames: mpsc::Sender<TurnFrame>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+}
+
+/// How a worker's `background()` stands, as the frames it sent say.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BodyState {
+    #[default]
+    Running,
+    /// It returned: the node has finished producing.
+    Finished,
+    /// The runner exited: a failing `background()` ends the worker.
+    Failed(String),
+}
+
+/// Start a worker's `background()` and wait for it: sends the start signal,
+/// then resolves when the body returned (`Ok`) or the runner exited
+/// (`Err`). Dropping the future does not stop the worker; stopping the
+/// runner does.
+pub async fn run_body(
+    cmd_tx: &mpsc::Sender<IpcCommand>,
+    session_id: &str,
+    body: &tokio::sync::watch::Sender<BodyState>,
+) -> Result<(), String> {
+    cmd_tx
+        .send(IpcCommand::Send {
+            req_bytes: start_frame(session_id),
+        })
+        .await
+        .map_err(|e| format!("ipc cmd send: {e}"))?;
+    let mut state = body.subscribe();
+    let outcome = state
+        .wait_for(|state| *state != BodyState::Running)
+        .await
+        .map(|state| state.clone())
+        .map_err(|_| "the node stopped".to_string())?;
+    match outcome {
+        BodyState::Failed(error) => Err(format!("background() of the Python node failed: {error}")),
+        _ => Ok(()),
+    }
+}
+
+/// How long a runner gets to run `cleanup()` after it was asked to stop.
+pub const STOP_GRACE: Duration = Duration::from_secs(3);
+
+/// What a worker sent during a [`IpcCommand::Turn`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnFrame {
+    /// An output of the input being processed.
+    Reply(Vec<u8>),
+    /// A frame the node emitted on its own while the input was processed.
+    Emitted(EmittedFrame),
 }
 
 /// Pending commands the IPC thread pulled off its channel while a round was
@@ -501,8 +563,34 @@ fn turn_tags_enabled() -> bool {
     std::env::var(TURN_TAG_ENV).map_or(true, |value| value != "0")
 }
 
+/// Environment variable telling a worker that its host sends a start signal
+/// (openspec: add-source-node-lifecycle): a node's `background()` then waits
+/// for a [`start_frame`] on its input lane, and the worker announces
+/// `START:1` before READY. Same contract as the in-tree executor.
+pub const START_ENV: &str = "REMOTEMEDIA_PY_WIRE_START";
+
+/// Whether this host sends the start signal (`REMOTEMEDIA_PY_WIRE_START=0`
+/// opts out: workers start `background()` once their node is ready).
+fn start_signal_enabled() -> bool {
+    std::env::var(START_ENV).map_or(true, |value| value != "0")
+}
+
+/// The start signal for a worker of `session_id`: a frame of wire type 9
+/// with no payload. Send it with [`IpcCommand::Send`] when the node
+/// instance starts.
+pub fn start_frame(session_id: &str) -> Vec<u8> {
+    let session = session_id.as_bytes();
+    let mut frame = Vec::with_capacity(15 + session.len());
+    frame.push(9);
+    frame.extend_from_slice(&(session.len() as u16).to_le_bytes());
+    frame.extend_from_slice(session);
+    frame.extend_from_slice(&0u64.to_le_bytes());
+    frame.extend_from_slice(&0u32.to_le_bytes());
+    frame
+}
+
 /// A frame the Python node emitted on its own.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EmittedFrame {
     /// The frame, without its tag.
     pub frame: Vec<u8>,
@@ -511,6 +599,9 @@ pub struct EmittedFrame {
     pub participant: String,
     /// An end frame: the node has finished producing.
     pub finished: bool,
+    /// Not a frame: the runner process exited while the node was idle. A
+    /// failing `background()` ends the worker this way.
+    pub failed: Option<String>,
 }
 
 /// Offset one past a frame's payload, when its header is well formed.
@@ -532,19 +623,32 @@ struct TurnState {
     current: Option<u64>,
     /// Where emitted frames go, once the node has an emitter.
     emit: Option<mpsc::Sender<EmittedFrame>>,
+    /// While a [`IpcCommand::Turn`] runs: emitted frames go here instead,
+    /// in line with the turn's replies.
+    inline: Option<mpsc::Sender<TurnFrame>>,
 }
 
 impl TurnState {
     /// Start a round: the request, tagged with its sequence number.
     fn begin(&mut self, request: &[u8]) -> Vec<u8> {
+        self.begin_from(request, None)
+    }
+
+    /// [`Self::begin`] for an input from a participant: `origin` is the JSON
+    /// object of its `participant.*` fields, which the node reads with
+    /// `input_origin()`.
+    fn begin_from(&mut self, request: &[u8], origin: Option<&str>) -> Vec<u8> {
         let mut request = request.to_vec();
         if self.enabled {
             self.seq += 1;
             self.current = Some(self.seq);
             request.extend_from_slice(&self.seq.to_le_bytes());
-            // No sender fields: the call context that crosses the plugin ABI
-            // carries no participant.
-            request.extend_from_slice(&0u16.to_le_bytes());
+            let origin = origin
+                .map(str::as_bytes)
+                .filter(|origin| origin.len() <= u16::MAX as usize)
+                .unwrap_or(&[]);
+            request.extend_from_slice(&(origin.len() as u16).to_le_bytes());
+            request.extend_from_slice(origin);
         } else {
             self.current = None;
         }
@@ -568,15 +672,27 @@ impl TurnState {
         let participant = String::from_utf8_lossy(tag.get(11..11 + id_len).unwrap_or(&[])).into_owned();
         frame.truncate(end);
         if seq == 0 {
-            if let Some(emit) = &self.emit {
-                let finished = frame.first() == Some(&(WireDataType::EndOfInput as u8));
-                // Waits when the consumer is slow: back-pressure on the node.
-                let _ = emit.blocking_send(EmittedFrame {
-                    frame,
-                    origin_mode,
-                    participant,
-                    finished,
-                });
+            let finished = frame.first() == Some(&(WireDataType::EndOfInput as u8));
+            let emitted = EmittedFrame {
+                frame,
+                origin_mode,
+                participant,
+                finished,
+                failed: None,
+            };
+            // Waits when the consumer is slow: back-pressure on the node.
+            if let Some(inline) = &self.inline {
+                // In a turn: in line with its replies, so the order the
+                // node produced them in is kept.
+                if let Err(unsent) = inline.blocking_send(TurnFrame::Emitted(emitted)) {
+                    // The turn's consumer is gone; the frame is still the
+                    // node's own output.
+                    if let (Some(emit), TurnFrame::Emitted(emitted)) = (&self.emit, unsent.0) {
+                        let _ = emit.blocking_send(emitted);
+                    }
+                }
+            } else if let Some(emit) = &self.emit {
+                let _ = emit.blocking_send(emitted);
             }
             return None;
         }
@@ -648,6 +764,9 @@ pub struct RunnerHandshake {
     pub turn_tags: bool,
     /// The node class takes no client input (`SELF:1`).
     pub self_driven: bool,
+    /// The node has a `background()` that waits for the start signal
+    /// (`START:1`): send a [`start_frame`] when the node instance starts.
+    pub background: bool,
 }
 
 /// [`spawn_runner_and_ipc`], also returning what the runner declared during
@@ -685,6 +804,8 @@ pub fn spawn_runner_and_ipc_with_handshake(
     command.args(&argv[1..]);
     // This host reads turn tags; the worker then tags its frames.
     command.env(TURN_TAG_ENV, if turn_tags_enabled() { "1" } else { "0" });
+    // This host says when the session starts; `background()` waits for it.
+    command.env(START_ENV, if start_signal_enabled() { "1" } else { "0" });
     // The runner talks to the host only over iceoryx2 (params come via
     // `--params`), so it must not inherit the host's stdin. A stdio-based
     // host (e.g. an MCP server) keeps a blocking read pending on its stdin
@@ -915,6 +1036,74 @@ pub fn terminate_runner(child: &Mutex<Child>) {
         }
     }
     let _ = child.wait();
+}
+
+/// Ask the runner of `(session_id, node_id)` to stop, wait up to `grace` for
+/// it to exit, then end whatever is left with [`terminate_runner`]. A runner
+/// that stops on request cancels its node's `background()` and runs
+/// `cleanup()`; one that is killed does neither. Blocks for up to `grace`.
+pub fn stop_runner(child: &Mutex<Child>, session_id: &str, node_id: &str, grace: Duration) {
+    let requested = {
+        let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        request_stop(&child, session_id, node_id)
+    };
+    if requested {
+        let deadline = std::time::Instant::now() + grace;
+        while std::time::Instant::now() < deadline {
+            let exited = matches!(
+                child.lock().unwrap_or_else(|e| e.into_inner()).try_wait(),
+                Ok(Some(_))
+            );
+            if exited {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    terminate_runner(child);
+}
+
+/// SIGTERM to the runner's process group.
+#[cfg(unix)]
+fn request_stop(child: &Child, _session_id: &str, _node_id: &str) -> bool {
+    // SAFETY: killpg has no memory-safety preconditions; the runner is
+    // unreaped, so its group id cannot have been reused.
+    unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGTERM) == 0 }
+}
+
+/// Windows has no SIGTERM: the worker creates a named event and the host
+/// sets it (`stop_event_name` in the Python runner).
+#[cfg(windows)]
+fn request_stop(_child: &Child, session_id: &str, node_id: &str) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent};
+    const EVENT_MODIFY_STATE: u32 = 0x0002;
+    let name: Vec<u16> = format!(
+        "Local\\remotemedia-stop-{}",
+        format!("{session_id}-{node_id}").replace('\\', "_")
+    )
+    .encode_utf16()
+    .chain(std::iter::once(0))
+    .collect();
+    // SAFETY: `name` is NUL-terminated and outlives the call; the handle is
+    // closed before returning.
+    unsafe {
+        let event = OpenEventW(EVENT_MODIFY_STATE, 0, name.as_ptr());
+        if event == 0 {
+            return false;
+        }
+        let set = SetEvent(event) != 0;
+        CloseHandle(event);
+        set
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn request_stop(_child: &Child, _session_id: &str, _node_id: &str) -> bool {
+    false
 }
 
 /// Runner process handle, installed once the child spawns, so a turn can stop
@@ -1199,8 +1388,12 @@ fn spawn_ipc_thread(
             let control_ctx = (session_id.as_str(), node_id.as_str());
             let mut stash = std::collections::VecDeque::<IpcCommand>::new();
             let mut turn = TurnState::default();
+            // Between rounds: notice a runner that exited, once.
+            let mut idle = liveness.poll();
+            let mut exit_reported = false;
             loop {
                 turn.current = None;
+                turn.inline = None;
                 let next = match stash.pop_front() {
                     Some(cmd) => Some(cmd),
                     // No emitter: nothing arrives between rounds.
@@ -1217,7 +1410,23 @@ fn spawn_ipc_thread(
                             Ok(Some(sample)) => {
                                 let _ = turn.sort(sample.payload().to_vec());
                             }
-                            _ => std::thread::sleep(BETWEEN_ROUNDS_POLL),
+                            _ => {
+                                std::thread::sleep(BETWEEN_ROUNDS_POLL);
+                                if exit_reported {
+                                    continue;
+                                }
+                                // Frames published before the exit were
+                                // delivered above; now report the exit.
+                                if let Err(error) = idle.wait() {
+                                    exit_reported = true;
+                                    if let Some(emit) = &turn.emit {
+                                        let _ = emit.blocking_send(EmittedFrame {
+                                            failed: Some(error.replace(" before EndOfInput", "")),
+                                            ..Default::default()
+                                        });
+                                    }
+                                }
+                            }
                         }
                     },
                 };
@@ -1284,6 +1493,28 @@ fn spawn_ipc_thread(
                         );
                         let _ = reply.send(result);
                     }
+                    IpcCommand::Turn {
+                        req_bytes,
+                        origin,
+                        frames,
+                        reply,
+                    } => {
+                        side.turn.inline = Some(frames.clone());
+                        let result = round_trip_streaming(
+                            &publisher,
+                            &subscriber,
+                            &control_subscriber,
+                            control_ctx,
+                            &req_bytes,
+                            origin.as_deref(),
+                            &mut |bytes| frames.blocking_send(TurnFrame::Reply(bytes)).is_ok(),
+                            &liveness,
+                            &mut side,
+                        );
+                        side.turn.inline = None;
+                        drop(frames);
+                        let _ = reply.send(result);
+                    }
                     IpcCommand::RoundStreaming {
                         req_bytes,
                         frame_tx,
@@ -1295,7 +1526,8 @@ fn spawn_ipc_thread(
                             &control_subscriber,
                             control_ctx,
                             &req_bytes,
-                            &frame_tx,
+                            None,
+                            &mut |bytes| frame_tx.blocking_send(bytes).is_ok(),
                             &liveness,
                             &mut side,
                         );
@@ -1495,11 +1727,14 @@ fn round_trip_streaming(
     control_subscriber: &iceoryx2::port::subscriber::Subscriber<ipc::Service, [u8], ()>,
     ctx: (&str, &str),
     req: &[u8],
-    frame_tx: &mpsc::Sender<Vec<u8>>,
+    origin: Option<&str>,
+    // Hands one reply to the consumer, waiting while it is slow. `false`
+    // once the consumer is gone.
+    deliver: &mut dyn FnMut(Vec<u8>) -> bool,
     liveness: &RunnerLiveness,
     side: &mut Side<'_>,
 ) -> Result<(), String> {
-    publish_bytes(publisher, &side.turn.begin(req))?;
+    publish_bytes(publisher, &side.turn.begin_from(req, origin))?;
     let mut idle = liveness.poll();
 
     let mut consumer_alive = true;
@@ -1525,7 +1760,7 @@ fn round_trip_streaming(
                     // (matches `round_trip_multi`'s implicit memory
                     // backpressure via the growing Vec, except here it
                     // propagates to the producer in real time).
-                    if frame_tx.blocking_send(bytes).is_err() {
+                    if !deliver(bytes) {
                         // Receiver dropped — silently swallow the rest
                         // of this turn so we don't leak frames into the
                         // next call.
@@ -1584,6 +1819,13 @@ fn wait_for_ready(
                 if bytes == b"SELF:1" {
                     if let Ok(mut handshake) = handshake.lock() {
                         handshake.self_driven = true;
+                    }
+                    polls += 1;
+                    continue;
+                }
+                if bytes == b"START:1" {
+                    if let Ok(mut handshake) = handshake.lock() {
+                        handshake.background = true;
                     }
                     polls += 1;
                     continue;
@@ -1698,6 +1940,7 @@ mod tests {
                 origin_mode: 2,
                 participant: "alice".into(),
                 finished: false,
+                failed: None,
             }
         );
         // An end frame that answers no input: the node finished producing.
@@ -1705,6 +1948,54 @@ mod tests {
         end[0] = WireDataType::EndOfInput as u8;
         assert_eq!(turn.sort(tagged(end, 0, 0, "")), None);
         assert!(emitted.try_recv().unwrap().finished);
+    }
+
+    #[test]
+    fn an_input_carries_the_participant_it_came_from() {
+        let mut turn = TurnState {
+            enabled: true,
+            ..Default::default()
+        };
+        let plain = text_frame("hi");
+        let origin = r#"{"participant.id":"alice"}"#;
+        let request = turn.begin_from(&plain, Some(origin));
+        let tag = &request[plain.len()..];
+        assert_eq!(&tag[..8], 1u64.to_le_bytes());
+        assert_eq!(&tag[8..10], (origin.len() as u16).to_le_bytes());
+        assert_eq!(&tag[10..], origin.as_bytes());
+    }
+
+    #[test]
+    fn in_a_turn_emitted_frames_travel_in_line_with_the_replies() {
+        let (sink, mut between) = mpsc::channel(8);
+        let (frames, mut inline) = mpsc::channel(8);
+        let mut turn = TurnState {
+            enabled: true,
+            emit: Some(sink),
+            inline: Some(frames),
+            ..Default::default()
+        };
+        turn.begin(&text_frame("in"));
+        let own = text_frame("own");
+        assert_eq!(turn.sort(tagged(own.clone(), 0, 0, "")), None);
+        // In line, not on the between-rounds sink.
+        assert!(between.try_recv().is_err());
+        assert!(matches!(
+            inline.try_recv().unwrap(),
+            TurnFrame::Emitted(EmittedFrame { frame, .. }) if frame == own
+        ));
+        // Outside a turn it goes to the sink again.
+        turn.inline = None;
+        assert_eq!(turn.sort(tagged(own.clone(), 0, 0, "")), None);
+        assert_eq!(between.try_recv().unwrap().frame, own);
+    }
+
+    #[test]
+    fn the_start_signal_is_a_frame_of_type_nine_with_no_payload() {
+        let frame = start_frame("s1");
+        assert_eq!(frame[0], 9);
+        assert_eq!(payload_end(&frame), Some(frame.len()));
+        assert_eq!(&frame[3..5], b"s1");
     }
 
     #[test]

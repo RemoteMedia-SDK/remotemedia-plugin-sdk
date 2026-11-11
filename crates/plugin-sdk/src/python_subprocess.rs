@@ -314,15 +314,21 @@ impl FfiNodeFactory for PythonSubprocessFactory {
             None,
         );
 
-        let (cmd_tx, child) =
-            match crate::python_ipc::spawn_runner_and_ipc(&argv, &session_id, &node_id) {
-                Ok(pair) => pair,
-                Err(e) => {
-                    return RErr(RString::from(format!(
-                        "PythonSubprocessFactory::create — spawn/IPC failed: {e}"
-                    )))
-                }
-            };
+        // What the worker declared before READY is kept: it is how the host
+        // learns the node's instance scope, whether it is self-driven, and
+        // whether it has a body (openspec: add-source-node-lifecycle).
+        let (cmd_tx, child, handshake) = match crate::python_ipc::spawn_runner_and_ipc_with_handshake(
+            &argv,
+            &session_id,
+            &node_id,
+        ) {
+            Ok(spawned) => spawned,
+            Err(e) => {
+                return RErr(RString::from(format!(
+                    "PythonSubprocessFactory::create — spawn/IPC failed: {e}"
+                )))
+            }
+        };
 
         let node = PythonSubprocessNode {
             node_type: self.config.node_type.to_string(),
@@ -330,6 +336,10 @@ impl FfiNodeFactory for PythonSubprocessFactory {
             cmd_tx,
             _child: child,
             _env_lease: Some(provisioning.venv.clone()),
+            node_id,
+            handshake,
+            body: Default::default(),
+            emitter: Default::default(),
         };
         ROk(loadable_node_abi::FfiNode_TO::from_value(
             node,
@@ -619,12 +629,22 @@ pub struct PythonSubprocessNode {
     pub _child: std::sync::Arc<std::sync::Mutex<std::process::Child>>,
     /// Environment lease, released after `Drop` terminates the runner.
     pub _env_lease: Option<LeasedVenvInfo>,
+    /// The id the runner was started with; empty when unknown, in which
+    /// case the runner cannot be asked to stop and is ended at once.
+    pub(crate) node_id: String,
+    /// What the worker declared before READY.
+    pub(crate) handshake: crate::python_ipc::RunnerHandshake,
+    /// How the worker's `background()` stands.
+    pub(crate) body: tokio::sync::watch::Sender<crate::python_ipc::BodyState>,
+    /// The host's emitter for this instance, once bound.
+    pub(crate) emitter: std::sync::OnceLock<std::sync::Arc<loadable_node_abi::buffer::NodeEmitterBox>>,
 }
 
 impl Drop for PythonSubprocessNode {
     fn drop(&mut self) {
         // Without this the runner outlived node teardown; its parent-death
-        // watcher only fires when the whole host exits.
+        // watcher only fires when the whole host exits. A runner that was
+        // asked to stop (the `shutdown` notice) has already exited.
         crate::python_ipc::terminate_runner(&self._child);
     }
 }
@@ -646,8 +666,37 @@ impl PythonSubprocessNode {
             cmd_tx,
             _child: child,
             _env_lease: None,
+            node_id: String::new(),
+            handshake: Default::default(),
+            body: Default::default(),
+            emitter: Default::default(),
         }
     }
+}
+
+/// Hand one frame the Python node emitted on its own to the host's emitter.
+async fn forward_emitted(
+    emitter: &loadable_node_abi::buffer::NodeEmitterBox,
+    frame: crate::python_ipc::EmittedFrame,
+) -> Result<(), String> {
+    let message = decode_output(&frame.frame).and_then(|data| {
+        loadable_node_abi::runtime_buffer::encode(data).map_err(|error| error.into_string())
+    })?;
+    emitter
+        .emit(message, frame.origin_mode, RString::from(frame.participant))
+        .await
+        .into_result()
+        .map_err(|error| error.into_string())
+}
+
+/// Whether a control message (MessagePack `RuntimeData`) is the runtime's
+/// `shutdown` notice.
+fn is_shutdown(input: &[u8]) -> bool {
+    matches!(
+        rmp_serde::from_slice::<remotemedia_types::RuntimeData>(input),
+        Ok(remotemedia_types::RuntimeData::Json(value))
+            if value.get("__aux_port__").and_then(|port| port.as_str()) == Some("shutdown")
+    )
 }
 
 /// Text JSON aux frame carrying one `__call_reply__` invocation to the Python
@@ -674,6 +723,14 @@ impl FfiNode for PythonSubprocessNode {
     /// openspec: add-node-initiated-output) go to the host's emitter for this
     /// node instance, in the order the node sent them.
     fn bind_emitter(&self, emitter: loadable_node_abi::buffer::NodeEmitterBox) {
+        let emitter = std::sync::Arc::new(emitter);
+        if self.emitter.set(emitter.clone()).is_err() {
+            return;
+        }
+        let body = self.body.clone();
+        // With a body the host runs, its return is reported through
+        // `background()`; otherwise the end frame closes the emitter here.
+        let host_runs_body = self.handshake.background;
         let (frames, mut emitted) = tokio::sync::mpsc::channel::<crate::python_ipc::EmittedFrame>(64);
         if self
             .cmd_tx
@@ -691,26 +748,21 @@ impl FfiNode for PythonSubprocessNode {
         let spawned = std::thread::Builder::new()
             .name("rm-py-plugin-emit".into())
             .spawn(move || {
-                while let Some(frame) = emitted.blocking_recv() {
-                    if frame.finished {
-                        emitter.finish();
+                while let Some(mut frame) = emitted.blocking_recv() {
+                    if let Some(error) = frame.failed.take() {
+                        body.send_replace(crate::python_ipc::BodyState::Failed(error));
                         continue;
                     }
-                    let message = decode_output(&frame.frame).and_then(|data| {
-                        loadable_node_abi::runtime_buffer::encode(data)
-                            .map_err(|error| error.into_string())
-                    });
-                    let result = match message {
-                        Ok(message) => crate::adapter::plugin_runtime()
-                            .block_on(emitter.emit(
-                                message,
-                                frame.origin_mode,
-                                RString::from(frame.participant),
-                            ))
-                            .into_result()
-                            .map_err(|error| error.into_string()),
-                        Err(error) => Err(error),
-                    };
+                    if frame.finished {
+                        if host_runs_body {
+                            body.send_replace(crate::python_ipc::BodyState::Finished);
+                        } else {
+                            emitter.finish();
+                        }
+                        continue;
+                    }
+                    let result = crate::adapter::plugin_runtime()
+                        .block_on(forward_emitted(&emitter, frame));
                     if let Err(error) = result {
                         eprintln!(
                             "[plugin-sdk python] node type {node_type}: emitted output was not delivered: {error}"
@@ -721,6 +773,66 @@ impl FfiNode for PythonSubprocessNode {
         if let Err(error) = spawned {
             eprintln!("[plugin-sdk python] could not start the emit forwarder: {error}");
         }
+    }
+
+    /// What the worker declared about its node (openspec:
+    /// add-source-node-lifecycle): instance declarations ride in this JSON.
+    fn pacing(&self) -> RString {
+        serde_json::json!({
+            "nature": "reactive",
+            "rate_hz": 30,
+            "instance_scope": self.handshake.instance_scope.map(|scope| scope.as_str()),
+            "self_driven": self.handshake.self_driven.then_some(true),
+            "background": self.handshake.background,
+        })
+        .to_string()
+        .into()
+    }
+
+    /// The Python node's `background()`: the host calls this when the
+    /// session starts. It tells the worker to start the body and resolves
+    /// when the body returned, or fails when the worker exited.
+    fn background(
+        &self,
+        _context: loadable_node_abi::FfiCallContext,
+    ) -> FfiFuture<RResult<(), RString>> {
+        let cmd_tx = self.cmd_tx.clone();
+        let session_id = self.session_id.clone();
+        let body = self.body.clone();
+        async move {
+            match crate::python_ipc::run_body(&cmd_tx, &session_id, &body).await {
+                Ok(()) => ROk(()),
+                Err(error) => RErr(error.into()),
+            }
+        }
+        .into_ffi()
+    }
+
+    /// The runtime's `shutdown` notice: ask the worker to stop, so it
+    /// cancels `background()` and runs `cleanup()`, before the node is
+    /// dropped. Other control messages are not handled here.
+    fn process_control_message(
+        &self,
+        input: RVec<u8>,
+        _session_id: RString,
+    ) -> FfiFuture<RResult<bool, RString>> {
+        let stop = (is_shutdown(input.as_slice()) && !self.node_id.is_empty())
+            .then(|| (self._child.clone(), self.session_id.clone(), self.node_id.clone()));
+        async move {
+            if let Some((child, session_id, node_id)) = stop {
+                let stopped = crate::adapter::plugin_runtime().spawn_blocking(move || {
+                    crate::python_ipc::stop_runner(
+                        &child,
+                        &session_id,
+                        &node_id,
+                        crate::python_ipc::STOP_GRACE,
+                    )
+                });
+                let _ = stopped.await;
+            }
+            ROk(false)
+        }
+        .into_ffi()
     }
 
     /// Typed-RPC passthrough for Python source plugins (task 2.6.4): the
@@ -780,19 +892,36 @@ impl FfiNode for PythonSubprocessNode {
         input: RVec<u8>,
         sink: loadable_node_abi::OutputSinkBox,
     ) -> FfiFuture<RResult<usize, RString>> {
+        self.process_streaming_with_context(input, Default::default(), sink)
+    }
+
+    /// One input's turn. The input carries the participant it came from, so
+    /// the node's `input_origin()` works; the input's replies and the frames
+    /// the node emits meanwhile are delivered in the order the node
+    /// produced them.
+    fn process_streaming_with_context(
+        &self,
+        input: RVec<u8>,
+        context: loadable_node_abi::FfiCallContext,
+        sink: loadable_node_abi::OutputSinkBox,
+    ) -> FfiFuture<RResult<usize, RString>> {
         let cmd_tx = self.cmd_tx.clone();
         let session_id = self.session_id.clone();
+        let emitter = self.emitter.get().cloned();
+        let node_type = self.node_type.clone();
         async move {
             let req_bytes = match encode_input(&input, &session_id) {
                 Ok(b) => b,
                 Err(e) => return RErr(RString::from(e)),
             };
-            let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+            let (frame_tx, mut frame_rx) =
+                tokio::sync::mpsc::channel::<crate::python_ipc::TurnFrame>(32);
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             if let Err(e) = cmd_tx
-                .send(crate::python_ipc::IpcCommand::RoundStreaming {
+                .send(crate::python_ipc::IpcCommand::Turn {
                     req_bytes,
-                    frame_tx,
+                    origin: context.origin.into_option().map(RString::into_string),
+                    frames: frame_tx,
                     reply: reply_tx,
                 })
                 .await
@@ -801,6 +930,24 @@ impl FfiNode for PythonSubprocessNode {
             }
             let mut count = 0usize;
             while let Some(frame) = frame_rx.recv().await {
+                let frame = match frame {
+                    crate::python_ipc::TurnFrame::Reply(frame) => frame,
+                    crate::python_ipc::TurnFrame::Emitted(frame) => {
+                        // The node's own output, between two replies.
+                        let delivered = match &emitter {
+                            Some(emitter) if !frame.finished => {
+                                forward_emitted(emitter, frame).await
+                            }
+                            _ => Ok(()),
+                        };
+                        if let Err(error) = delivered {
+                            eprintln!(
+                                "[plugin-sdk python] node type {node_type}: emitted output was not delivered: {error}"
+                            );
+                        }
+                        continue;
+                    }
+                };
                 let bytes = match decode_output_to_ffi(&frame) {
                     Ok(b) => b,
                     Err(e) => return RErr(RString::from(e)),
