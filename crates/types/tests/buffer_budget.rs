@@ -1,7 +1,7 @@
 use remotemedia_types::{
-    BoundOutputAllocator, BufferAllocationError, BufferBudget, BufferLoan,
-    CopyContext, CopyPolicy, CopyReason, ForwardingScope, HeapOutputAllocator, OutputAllocator,
-    RuntimeData, SharedBuffer, TensorEncoding,
+    BoundOutputAllocator, BufferAllocationError, BufferBudget, BufferLoan, CopyContext, CopyPolicy,
+    CopyReason, ForwardingScope, HeapOutputAllocator, OutputAllocator, RuntimeData, SharedBuffer,
+    TensorEncoding,
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},

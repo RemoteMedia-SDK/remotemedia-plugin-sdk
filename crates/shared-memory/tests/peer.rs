@@ -8,12 +8,12 @@ use std::process::Command;
 
 #[path = "support/output_copies.rs"]
 mod output_copies;
+#[path = "support/pressure.rs"]
+mod pressure;
 #[path = "support/selected_allocator.rs"]
 mod selected_allocator;
 #[path = "support/source_completion.rs"]
 mod source_completion;
-#[path = "support/pressure.rs"]
-mod pressure;
 
 fn pool(slots: usize) -> SharedPool {
     SharedPool::new(

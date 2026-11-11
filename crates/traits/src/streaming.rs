@@ -78,7 +78,9 @@ impl Default for PacingNature {
 
 /// How many instances of a node one session runs when several participants
 /// send input (openspec: add-multi-participant-sessions).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum InstanceScope {
     /// One instance processes every participant's frames (today's behaviour).

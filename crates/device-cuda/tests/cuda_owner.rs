@@ -24,13 +24,12 @@ const DELAY_PASSES: usize = 64;
 
 /// The producer's delay work. Kept alive until the consumer has read: freeing
 /// device memory can synchronize the device, which would hide a missing wait.
-struct Pending(#[allow(dead_code)] CudaAllocation, #[allow(dead_code)] CudaStream);
+struct Pending(
+    #[allow(dead_code)] CudaAllocation,
+    #[allow(dead_code)] CudaStream,
+);
 
-fn delayed_tensor(
-    gpu: &Arc<CudaDevice>,
-    words: usize,
-    value: u32,
-) -> (RuntimeData, bool, Pending) {
+fn delayed_tensor(gpu: &Arc<CudaDevice>, words: usize, value: u32) -> (RuntimeData, bool, Pending) {
     let scratch = gpu.alloc(DELAY_WORDS * 4).unwrap();
     let output = gpu.alloc(words * 4).unwrap();
     let stream = gpu.stream().unwrap();

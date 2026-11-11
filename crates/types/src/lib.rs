@@ -56,30 +56,30 @@
 
 pub mod validation_error;
 pub use validation_error::{ValidationConstraint, ValidationError, ValidationWarning, WarningType};
-mod copy_policy;
 mod buffer_budget;
+mod copy_policy;
+mod device;
 mod message;
 mod output_allocator;
-mod provenance;
 mod payload_layout;
+mod provenance;
 mod shared_buffer;
-mod device;
-pub use device::{
-    contiguous_strides, Device, DeviceAllocation, DeviceBuffer, DeviceCompletion, DeviceKind,
-    DeviceReady, DlDtype, TransferError,
-};
+pub use buffer_budget::{BufferBudget, BufferBudgetUsage};
 pub use copy_policy::{
     CopyCompletionError, CopyContext, CopyCounts, CopyEvent, CopyLedger, CopyOperation, CopyPolicy,
     CopyReason, CopyRejected, CopyReport, COPY_REASONS,
 };
+pub use device::{
+    contiguous_strides, Device, DeviceAllocation, DeviceBuffer, DeviceCompletion, DeviceKind,
+    DeviceReady, DlDtype, TransferError,
+};
 pub use message::{PayloadKind, PayloadStorage, RuntimeMetadata, TensorEncoding};
-pub use buffer_budget::{BufferBudget, BufferBudgetUsage};
 pub use output_allocator::{
     AssumePreparedRealtime, BufferAllocationError, HeapOutputAllocator, OutputAllocator,
     PreparedRealtimeSupport,
 };
-pub use provenance::{BoundOutputAllocator, ForwardingScope};
 pub use payload_layout::PayloadLayoutError;
+pub use provenance::{BoundOutputAllocator, ForwardingScope};
 pub use shared_buffer::{BufferLoan, BufferRangeError, SharedBuffer};
 
 /// Immutable shared storage for byte-oriented runtime payloads.

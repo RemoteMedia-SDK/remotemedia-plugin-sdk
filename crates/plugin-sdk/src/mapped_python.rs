@@ -2,9 +2,9 @@
 //! The caller supplies matching wheels and trusted node modules. This does not
 //! discover trusted code automatically or make arbitrary Python a safe mapping
 //! peer. Factory templates can be bound by the host to separate session pools.
+mod bundle;
 mod launch;
 mod provisioning;
-mod bundle;
 pub use bundle::MappedPythonBundle;
 
 use crate::native_worker::{
@@ -184,9 +184,11 @@ impl MappedPythonFactory {
         #[cfg(all(target_os = "linux", feature = "linux-worker-supervisor"))]
         {
             let mut configured = self;
-            configured.config.environment.process_namespace = Some(remotemedia_py_env::ProcessNamespace {
-                supervisor: supervisor.clone(), unshare: unshare.clone(),
-            });
+            configured.config.environment.process_namespace =
+                Some(remotemedia_py_env::ProcessNamespace {
+                    supervisor: supervisor.clone(),
+                    unshare: unshare.clone(),
+                });
             configured.namespace = Some(
                 crate::native_worker::NamespaceLaunch::new(supervisor, unshare).map_err(|e| {
                     Error::ConfigError(format!("mapped Python namespace configuration: {e}"))

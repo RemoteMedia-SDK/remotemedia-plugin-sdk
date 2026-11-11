@@ -200,7 +200,9 @@ fn parse_node_args(args: &[NestedMeta]) -> Result<NodeArgs, syn::Error> {
                         }
                     }
                     "instance_scope" => match &nv.lit {
-                        Lit::Str(s) if matches!(s.value().as_str(), "shared" | "per_participant") => {
+                        Lit::Str(s)
+                            if matches!(s.value().as_str(), "shared" | "per_participant") =>
+                        {
                             instance_scope = Some(s.value());
                         }
                         _ => {

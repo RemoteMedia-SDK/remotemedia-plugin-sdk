@@ -112,8 +112,7 @@ pub use schema::{
 
 pub use streaming::{
     AnySessionState, AsyncNodeWrapper, AsyncStreamingNode, InstanceScope, NodeStatus, PacingNature,
-    StreamingNode,
-    StreamingNodeFactory, SyncNodeWrapper, SyncStreamingNode, Tick,
+    StreamingNode, StreamingNodeFactory, SyncNodeWrapper, SyncStreamingNode, Tick,
 };
 pub use stt::{
     DecodedSegment, StreamingOptions, TranscriptEvent, Whisper, WhisperConfig,
