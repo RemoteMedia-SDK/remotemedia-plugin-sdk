@@ -330,5 +330,8 @@ fn frozen_factories() -> abi_stable::std_types::RVec<FfiNodeFactoryBox> {
 #[abi_stable::export_root_module]
 fn frozen_root() -> NodePluginRef {
     use abi_stable::prefix_type::PrefixTypeTrait;
-    NodePlugin { list_factories: frozen_factories }.leak_into_prefix()
+    NodePlugin {
+        list_factories: frozen_factories,
+    }
+    .leak_into_prefix()
 }

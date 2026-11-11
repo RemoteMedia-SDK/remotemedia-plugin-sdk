@@ -112,7 +112,8 @@ fn supervised_namespace_transfers_real_read_and_write_grants_without_staging() {
         let mut process = WorkerProcess::spawn_namespaced_with_resources(
             &mut command,
             remotemedia_shared_memory::channel::ProcessResources::new(owner.clone()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(std::sync::Arc::strong_count(&owner), 2);
         let (sender, receiver) = process.take_channel().unwrap().split().unwrap();
         transform_with_worker(audio, (process, sender, receiver));

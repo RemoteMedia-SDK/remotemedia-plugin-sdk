@@ -263,8 +263,10 @@ where
             PacingNature::ClockedToOutboundMedia => ("outbound", self.inner.fallback_rate_hz()),
             PacingNature::SourceWall(hz) => ("wall", hz),
         };
+        // `instance_scope` rides in this JSON so the ABI does not change.
         serde_json::json!({"nature":nature, "rate_hz":rate,
-            "clocked_media_addr":self.inner.clocked_media_addr()})
+            "clocked_media_addr":self.inner.clocked_media_addr(),
+            "instance_scope":self.inner.instance_scope().map(|scope| scope.as_str())})
         .to_string()
         .into()
     }
