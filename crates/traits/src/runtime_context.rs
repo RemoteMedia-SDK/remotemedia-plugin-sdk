@@ -39,6 +39,20 @@ use crate::ports::TimestampedSnapshot;
 /// helpers in this module — plugin code is expected to call those rather
 /// than handle `Arc<dyn Any>` directly.
 pub trait NodeRuntimeContextRead: Send + Sync {
+    /// The participant whose input this call is processing; `None` for an
+    /// unattributed input and outside a call (ticks, RPC, a background
+    /// body). A node keeps it to attribute a later emit (openspec:
+    /// add-node-initiated-output).
+    fn origin(&self) -> Option<Arc<crate::emit::Origin>> {
+        None
+    }
+
+    /// The instance's emitter, type-erased; hosts that provide none return
+    /// `None`. Node code uses `Emitter::for_call(ctx)` instead.
+    fn emitter_any(&self) -> Option<&(dyn Any + Send + Sync)> {
+        None
+    }
+
     /// Request completion of this paced source after the active tick succeeds.
     /// The request does not skip remaining outputs or registered work. A failed
     /// or cancelled tick cannot commit completion. Quiet ticks are not EOS.

@@ -58,6 +58,68 @@ impl InitializeContextRead for PluginInitCtx {
     }
 }
 
+/// The context of one call, or of the background body, on the legacy
+/// (MessagePack) lane: the host's identity, the participant of the input
+/// being processed, and the instance's emitter.
+pub(crate) struct PluginCallCtx {
+    identity: CallContext,
+    origin: Option<Arc<crate::Origin>>,
+    emitter: Option<crate::Emitter>,
+}
+
+impl PluginCallCtx {
+    pub(crate) fn new(context: FfiCallContext, emitter: Option<crate::Emitter>) -> Self {
+        Self {
+            origin: ffi_origin(&context),
+            identity: call_context(context),
+            emitter,
+        }
+    }
+}
+
+impl remotemedia_traits::NodeRuntimeContextRead for PluginCallCtx {
+    fn origin(&self) -> Option<Arc<crate::Origin>> {
+        self.origin.clone()
+    }
+    fn emitter_any(&self) -> Option<&(dyn Any + Send + Sync)> {
+        self.emitter
+            .as_ref()
+            .map(|emitter| emitter as &(dyn Any + Send + Sync))
+    }
+    fn session_id(&self) -> &str {
+        self.identity.session_id.as_deref().unwrap_or("")
+    }
+    fn node_id(&self) -> &str {
+        &self.identity.node_id
+    }
+    fn capability(&self, _: &str) -> Option<remotemedia_traits::MediaCapabilities> {
+        None
+    }
+    fn insert_capability(&self, _: &str, _: remotemedia_traits::MediaCapabilities) {}
+    fn snapshot_any(&self, _: &str) -> Option<Arc<dyn Any + Send + Sync>> {
+        None
+    }
+    fn state_any(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        None
+    }
+    fn try_state_any(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        None
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// The participant a call's input came from, as the host passed it.
+pub(crate) fn ffi_origin(context: &FfiCallContext) -> Option<Arc<crate::Origin>> {
+    context
+        .origin
+        .as_ref()
+        .into_option()
+        .and_then(|json| crate::Origin::from_json(json.as_str()))
+        .map(Arc::new)
+}
+
 /// Returns the plugin-side Tokio runtime, lazily constructed on first
 /// access. The runtime is owned by the dynamic library that this
 /// adapter is compiled into — each `.so`/`.dylib`/`.dll` gets its own
@@ -153,9 +215,10 @@ where
         context: FfiExecutionContext,
     ) -> FfiFuture<RResult<FfiMessage, RString>> {
         let inner = self.inner.clone();
+        let emitter = self.emitter.get().cloned();
         shared::run(async move {
             let input = shared::decode(input)?;
-            let context = shared::Context::try_from(context)?;
+            let context = shared::Context::try_from(context)?.with_emitter(emitter);
             shared::encode(inner.process_with_ctx(input, &context).await?)
         })
     }
@@ -166,6 +229,7 @@ where
         context: FfiExecutionContext,
     ) -> FfiFuture<RResult<FfiMessage, RString>> {
         let inner = self.inner.clone();
+        let emitter = self.emitter.get().cloned();
         shared::run(async move {
             let mut decoded = std::collections::HashMap::new();
             for input in inputs {
@@ -178,7 +242,7 @@ where
                     ));
                 }
             }
-            let context = shared::Context::try_from(context)?;
+            let context = shared::Context::try_from(context)?.with_emitter(emitter);
             shared::encode(inner.process_multi_with_ctx(decoded, &context).await?)
         })
     }
@@ -189,9 +253,10 @@ where
         context: FfiExecutionContext,
     ) -> FfiFuture<RResult<RVec<FfiMessage>, RString>> {
         let inner = self.inner.clone();
+        let emitter = self.emitter.get().cloned();
         shared::run(async move {
             let input = shared::decode(input)?;
-            let context = shared::Context::try_from(context)?;
+            let context = shared::Context::try_from(context)?.with_emitter(emitter);
             let mut outputs = Vec::new();
             inner
                 .process_streaming_with_ctx(input, &context, |data| {
@@ -210,9 +275,10 @@ where
         sink: SharedOutputSinkBox,
     ) -> FfiFuture<RResult<usize, RString>> {
         let inner = self.inner.clone();
+        let emitter = self.emitter.get().cloned();
         shared::run(async move {
             let input = shared::decode(input)?;
-            let context = shared::Context::try_from(context)?;
+            let context = shared::Context::try_from(context)?.with_emitter(emitter);
             inner
                 .process_streaming_with_ctx(input, &context, move |data| shared::push(&sink, data))
                 .await
@@ -226,8 +292,9 @@ where
         sink: SharedOutputSinkBox,
     ) -> FfiFuture<RResult<usize, RString>> {
         let inner = self.inner.clone();
+        let emitter = self.emitter.get().cloned();
         shared::run(async move {
-            let context = shared::Context::try_from(context)?;
+            let context = shared::Context::try_from(context)?.with_emitter(emitter);
             let tick = Tick {
                 clock_id: tick.clock_id.into_string(),
                 pts_us: tick.pts_us,
@@ -257,9 +324,10 @@ where
         context: FfiExecutionContext,
     ) -> FfiFuture<RResult<bool, RString>> {
         let inner = self.inner.clone();
+        let emitter = self.emitter.get().cloned();
         shared::run(async move {
             let input = shared::decode(input)?;
-            let context = shared::Context::try_from(context)?;
+            let context = shared::Context::try_from(context)?.with_emitter(emitter);
             inner.process_control_with_ctx(input, &context).await
         })
     }
@@ -274,10 +342,13 @@ where
             PacingNature::ClockedToOutboundMedia => ("outbound", self.inner.fallback_rate_hz()),
             PacingNature::SourceWall(hz) => ("wall", hz),
         };
-        // `instance_scope` rides in this JSON so the ABI does not change.
+        // Instance-level declarations ride in this JSON, so a node reports
+        // what only an instance knows without an ABI change.
         serde_json::json!({"nature":nature, "rate_hz":rate,
             "clocked_media_addr":self.inner.clocked_media_addr(),
-            "instance_scope":self.inner.instance_scope().map(|scope| scope.as_str())})
+            "instance_scope":self.inner.instance_scope().map(|scope| scope.as_str()),
+            "self_driven":self.inner.self_driven(),
+            "background":self.inner.has_background()})
         .to_string()
         .into()
     }
@@ -388,6 +459,26 @@ where
         let _ = self.emitter.set(crate::Emitter::bound(emitter));
     }
 
+    /// The node's body, on the plugin's runtime. Dropping the returned
+    /// future (the host cancelling the body) aborts the task.
+    fn background(&self, context: FfiCallContext) -> FfiFuture<RResult<(), RString>> {
+        let inner = Arc::clone(&self.inner);
+        let emitter = self.emitter.get().cloned();
+        async move {
+            let join = plugin_runtime().spawn(async move {
+                let context = PluginCallCtx::new(context, emitter);
+                inner.background(&context).await
+            });
+            let _abort = AbortOnDrop(join.abort_handle());
+            match join.await {
+                Ok(Ok(())) => ROk(()),
+                Ok(Err(e)) => RErr(e.to_string().into()),
+                Err(e) => RErr(format!("plugin body panicked: {e}").into()),
+            }
+        }
+        .into_ffi()
+    }
+
     fn initialize(&self, session_id: RString, node_id: RString) -> FfiFuture<RResult<(), RString>> {
         let inner = Arc::clone(&self.inner);
         let emitter = self.emitter.get().cloned();
@@ -491,13 +582,14 @@ where
         sink: OutputSinkBox,
     ) -> FfiFuture<RResult<usize, RString>> {
         let inner = Arc::clone(&self.inner);
+        let emitter = self.emitter.get().cloned();
         async move {
             let data = match rmp_serde::from_slice(input.as_slice()) {
                 Ok(data) => data,
                 Err(e) => return RErr(format!("rmp decode: {e}").into()),
             };
             let join = plugin_runtime().spawn(async move {
-                let context = call_context(context);
+                let context = PluginCallCtx::new(context, emitter);
                 inner
                     .process_streaming_with_ctx(data, &context, move |data| {
                         push_output(&sink, data)
@@ -529,7 +621,7 @@ where
         shared::rpc(
             self.inner.clone(),
             request,
-            Ok(Box::new(call_context(context))),
+            Ok(Box::new(PluginCallCtx::new(context, self.emitter.get().cloned()))),
             sink,
         )
     }
@@ -540,8 +632,10 @@ where
         context: FfiExecutionContext,
         sink: RpcReplySinkBox,
     ) -> FfiFuture<RResult<(), RString>> {
-        let context = shared::Context::try_from(context)
-            .map(|ctx| Box::new(ctx) as Box<dyn remotemedia_traits::NodeRuntimeContextRead>);
+        let emitter = self.emitter.get().cloned();
+        let context = shared::Context::try_from(context).map(|ctx| {
+            Box::new(ctx.with_emitter(emitter)) as Box<dyn remotemedia_traits::NodeRuntimeContextRead>
+        });
         shared::rpc(self.inner.clone(), request, context, sink)
     }
 }

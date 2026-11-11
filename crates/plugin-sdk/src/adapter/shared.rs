@@ -72,6 +72,8 @@ pub(super) fn push(sink: &SharedOutputSinkBox, data: RuntimeData) -> Result<(), 
 }
 
 pub(super) struct Context {
+    origin: Option<Arc<crate::Origin>>,
+    emitter: Option<crate::Emitter>,
     identity: remotemedia_traits::rpc::CallContext,
     materialization: Option<remotemedia_types::CopyContext>,
     allocator: Option<Arc<dyn OutputAllocator>>,
@@ -81,6 +83,8 @@ impl TryFrom<FfiExecutionContext> for Context {
     type Error = Error;
     fn try_from(context: FfiExecutionContext) -> Result<Self, Error> {
         Ok(Self {
+            origin: super::ffi_origin(&context.identity),
+            emitter: None,
             materialization: context
                 .materialization
                 .into_option()
@@ -94,7 +98,22 @@ impl TryFrom<FfiExecutionContext> for Context {
         })
     }
 }
+impl Context {
+    /// The instance's emitter, for `Emitter::for_call`.
+    pub(super) fn with_emitter(mut self, emitter: Option<crate::Emitter>) -> Self {
+        self.emitter = emitter;
+        self
+    }
+}
 impl NodeRuntimeContextRead for Context {
+    fn origin(&self) -> Option<Arc<crate::Origin>> {
+        self.origin.clone()
+    }
+    fn emitter_any(&self) -> Option<&(dyn Any + Send + Sync)> {
+        self.emitter
+            .as_ref()
+            .map(|emitter| emitter as &(dyn Any + Send + Sync))
+    }
     fn copy_context(&self) -> Option<remotemedia_types::CopyContext> {
         self.materialization.clone()
     }

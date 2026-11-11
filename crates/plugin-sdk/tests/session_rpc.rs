@@ -101,6 +101,7 @@ fn context(session: &str) -> FfiCallContext {
     FfiCallContext {
         session_id: Some(RString::from(session)).into(),
         node_id: "manager".into(),
+        ..Default::default()
     }
 }
 fn request(method: &str) -> RVec<u8> {

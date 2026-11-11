@@ -114,6 +114,28 @@ pub const EMIT_AS_DEFAULT: u8 = 0;
 pub const EMIT_UNATTRIBUTED: u8 = 1;
 /// `origin` of [`NodeEmitter::emit`]: the participant whose id is passed.
 pub const EMIT_AS_PARTICIPANT: u8 = 2;
+/// `origin` of [`NodeEmitter::emit`]: an origin the node read from an input
+/// (`FfiCallContext::origin`), passed back as the same JSON.
+pub const EMIT_AS_ORIGIN: u8 = 3;
+
+/// [`FfiTryEmit::status`]: the frame was queued.
+pub const TRY_EMIT_QUEUED: u8 = 0;
+/// [`FfiTryEmit::status`]: the emit queue is full.
+pub const TRY_EMIT_FULL: u8 = 1;
+/// [`FfiTryEmit::status`]: the instance has not started.
+pub const TRY_EMIT_NOT_STARTED: u8 = 2;
+/// [`FfiTryEmit::status`]: the frame cannot be emitted; see `error`.
+pub const TRY_EMIT_REJECTED: u8 = 3;
+
+/// The outcome of [`NodeEmitter::try_emit`]. A host may hand a frame it did
+/// not queue back in `message`; a plugin must not rely on it.
+#[repr(C)]
+#[derive(StableAbi)]
+pub struct FfiTryEmit {
+    pub status: u8,
+    pub message: abi_stable::std_types::ROption<FfiMessage>,
+    pub error: RString,
+}
 
 /// A node instance's handle onto its own output edge (openspec:
 /// add-node-initiated-output). Unlike a call's sink it outlives every call:
@@ -123,8 +145,8 @@ pub const EMIT_AS_PARTICIPANT: u8 = 2;
 #[sabi_trait]
 pub trait NodeEmitter: Send + Sync + 'static {
     /// Emit one frame, waiting while the emit queue is full. `origin` is one
-    /// of the `EMIT_*` constants; `participant` is read for
-    /// [`EMIT_AS_PARTICIPANT`] only. Fails once the instance has stopped, and
+    /// of the `EMIT_*` constants; `participant` is the participant's id for
+    /// [`EMIT_AS_PARTICIPANT`] and the origin's JSON for [`EMIT_AS_ORIGIN`]. Fails once the instance has stopped, and
     /// for a participant who is not in the session.
     fn emit(
         &self,
@@ -132,9 +154,10 @@ pub trait NodeEmitter: Send + Sync + 'static {
         origin: u8,
         participant: RString,
     ) -> async_ffi::FfiFuture<RResult<(), RString>>;
-    /// [`Self::emit`] without waiting: `ROk(false)` when the queue is full
-    /// and the frame was not queued.
-    fn try_emit(&self, message: FfiMessage, origin: u8, participant: RString) -> RResult<bool, RString>;
+    /// [`Self::emit`] without waiting.
+    fn try_emit(&self, message: FfiMessage, origin: u8, participant: RString) -> FfiTryEmit;
+    /// Resolves when the instance has started, or the emitter is closed.
+    fn started(&self) -> async_ffi::FfiFuture<()>;
     /// Whether emitting can no longer succeed.
     fn is_closed(&self) -> bool;
     /// Resolves when the emitter is closed.

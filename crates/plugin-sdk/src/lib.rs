@@ -21,7 +21,7 @@ pub mod adapter;
 pub mod buffer_contract;
 pub mod emitter;
 pub mod endpoint_call;
-pub use emitter::{EmitOrigin, Emitter};
+pub use emitter::{Emit, EmitOrigin, Emitter, Origin, TryEmitError};
 pub mod params;
 
 #[cfg(all(feature = "mapped-python", any(windows, target_os = "linux")))]

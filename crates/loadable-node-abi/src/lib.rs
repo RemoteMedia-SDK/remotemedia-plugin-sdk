@@ -46,6 +46,10 @@ pub struct FfiTick {
 pub struct FfiCallContext {
     pub session_id: ROption<RString>,
     pub node_id: RString,
+    /// The participant whose input this call processes: a JSON object of its
+    /// `participant.*` fields. `RNone` for an unattributed input and outside
+    /// an input (openspec: add-source-node-lifecycle).
+    pub origin: ROption<RString>,
 }
 
 /// FFI-safe node.
@@ -329,6 +333,16 @@ pub trait FfiNode: Send + Sync + 'static {
     /// `initialize` (openspec: add-node-initiated-output). A node that never
     /// produces output on its own keeps the default and drops it.
     fn bind_emitter(&self, _emitter: buffer::NodeEmitterBox) {}
+
+    /// The node's background body (openspec: add-source-node-lifecycle).
+    /// The host calls it once, when the session starts, on a node whose
+    /// `pacing()` JSON says `"background": true`, and drops the future to
+    /// cancel it when the instance stops. On a self-driven node its
+    /// completion means the node has finished producing; an error is a
+    /// failure of the node.
+    fn background(&self, _context: FfiCallContext) -> FfiFuture<RResult<(), RString>> {
+        async { ROk(()) }.into_ffi()
+    }
 }
 
 /// Owned trait object for an FFI node.
@@ -390,6 +404,14 @@ pub trait FfiNodeFactory: Send + Sync + 'static {
     }
     fn output_ports(&self) -> RVec<snapshot::FfiPortDeclaration> {
         RVec::new()
+    }
+    /// What a node created with these JSON parameters would be, declared
+    /// without creating it: a JSON object with any of `self_driven`,
+    /// `instance_scope`, `capability_behavior`, `media_capabilities`
+    /// (`remotemedia_traits::NodeDescription`). `{}` declares nothing. Later
+    /// declarations are added as fields, with no change to this interface.
+    fn describe(&self, _params: RString) -> RResult<RString, RString> {
+        ROk(RString::from("{}"))
     }
 }
 
