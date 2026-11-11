@@ -324,6 +324,11 @@ pub trait FfiNode: Send + Sync + 'static {
     ) -> FfiFuture<RResult<bool, RString>> {
         async { RErr("plugin does not support shared controls".into()) }.into_ffi()
     }
+
+    /// The host hands the node instance its emitter, once, before
+    /// `initialize` (openspec: add-node-initiated-output). A node that never
+    /// produces output on its own keeps the default and drops it.
+    fn bind_emitter(&self, _emitter: buffer::NodeEmitterBox) {}
 }
 
 /// Owned trait object for an FFI node.

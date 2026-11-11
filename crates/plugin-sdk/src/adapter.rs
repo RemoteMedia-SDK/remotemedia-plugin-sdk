@@ -29,9 +29,17 @@ mod shared;
 struct PluginInitCtx {
     session_id: String,
     node_id: String,
+    /// The emitter the host bound to this instance, if it provides one.
+    emitter: Option<crate::Emitter>,
 }
 
 impl InitializeContextRead for PluginInitCtx {
+    fn emitter_any(&self) -> Option<&(dyn Any + Send + Sync)> {
+        self.emitter
+            .as_ref()
+            .map(|emitter| emitter as &(dyn Any + Send + Sync))
+    }
+
     fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -98,6 +106,8 @@ fn plugin_runtime() -> &'static Runtime {
 pub struct StreamingNodeFfiAdapter<N> {
     inner: Arc<N>,
     node_type: String,
+    /// Bound by the host before `initialize`; read through `Emitter::of`.
+    emitter: std::sync::OnceLock<crate::Emitter>,
 }
 
 impl<N> StreamingNodeFfiAdapter<N>
@@ -112,6 +122,7 @@ where
         Self {
             inner: Arc::new(node),
             node_type,
+            emitter: std::sync::OnceLock::new(),
         }
     }
 }
@@ -373,12 +384,18 @@ where
     /// llama-cpp spawning a worker thread that loads the GGUF) —
     /// without this, `process()` runs first against an uninitialized
     /// inner node and returns "worker not running".
+    fn bind_emitter(&self, emitter: loadable_node_abi::buffer::NodeEmitterBox) {
+        let _ = self.emitter.set(crate::Emitter::bound(emitter));
+    }
+
     fn initialize(&self, session_id: RString, node_id: RString) -> FfiFuture<RResult<(), RString>> {
         let inner = Arc::clone(&self.inner);
+        let emitter = self.emitter.get().cloned();
         async move {
             let ctx = PluginInitCtx {
                 session_id: session_id.into_string(),
                 node_id: node_id.into_string(),
+                emitter,
             };
             let join = plugin_runtime().spawn(async move { inner.initialize(&ctx).await });
             match join.await {

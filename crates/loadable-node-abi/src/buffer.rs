@@ -106,3 +106,40 @@ pub trait SharedOutputSink: Send + Sync + 'static {
     fn push(&self, message: FfiMessage) -> RResult<(), RString>;
 }
 pub type SharedOutputSinkBox = SharedOutputSink_TO<RBox<()>>;
+
+/// `origin` of [`NodeEmitter::emit`]: the instance's default attribution (its
+/// participant for a per-participant instance, nobody otherwise).
+pub const EMIT_AS_DEFAULT: u8 = 0;
+/// `origin` of [`NodeEmitter::emit`]: nobody.
+pub const EMIT_UNATTRIBUTED: u8 = 1;
+/// `origin` of [`NodeEmitter::emit`]: the participant whose id is passed.
+pub const EMIT_AS_PARTICIPANT: u8 = 2;
+
+/// A node instance's handle onto its own output edge (openspec:
+/// add-node-initiated-output). Unlike a call's sink it outlives every call:
+/// the host binds it before `initialize` and closes it when the instance
+/// stops. Frames pushed into a call's sink stay that input's output; frames
+/// emitted here belong to no input.
+#[sabi_trait]
+pub trait NodeEmitter: Send + Sync + 'static {
+    /// Emit one frame, waiting while the emit queue is full. `origin` is one
+    /// of the `EMIT_*` constants; `participant` is read for
+    /// [`EMIT_AS_PARTICIPANT`] only. Fails once the instance has stopped, and
+    /// for a participant who is not in the session.
+    fn emit(
+        &self,
+        message: FfiMessage,
+        origin: u8,
+        participant: RString,
+    ) -> async_ffi::FfiFuture<RResult<(), RString>>;
+    /// [`Self::emit`] without waiting: `ROk(false)` when the queue is full
+    /// and the frame was not queued.
+    fn try_emit(&self, message: FfiMessage, origin: u8, participant: RString) -> RResult<bool, RString>;
+    /// Whether emitting can no longer succeed.
+    fn is_closed(&self) -> bool;
+    /// Resolves when the emitter is closed.
+    fn closed(&self) -> async_ffi::FfiFuture<()>;
+    /// Close the emitter: the node has finished producing.
+    fn finish(&self);
+}
+pub type NodeEmitterBox = NodeEmitter_TO<RBox<()>>;
