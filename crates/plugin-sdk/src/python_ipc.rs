@@ -646,6 +646,8 @@ pub struct RunnerHandshake {
     pub instance_scope: Option<remotemedia_traits::streaming::InstanceScope>,
     /// The worker tags its frames with the input they answer (`TURNS:1`).
     pub turn_tags: bool,
+    /// The node class takes no client input (`SELF:1`).
+    pub self_driven: bool,
 }
 
 /// [`spawn_runner_and_ipc`], also returning what the runner declared during
@@ -1575,6 +1577,13 @@ fn wait_for_ready(
                 if bytes == b"TURNS:1" {
                     if let Ok(mut handshake) = handshake.lock() {
                         handshake.turn_tags = true;
+                    }
+                    polls += 1;
+                    continue;
+                }
+                if bytes == b"SELF:1" {
+                    if let Ok(mut handshake) = handshake.lock() {
+                        handshake.self_driven = true;
                     }
                     polls += 1;
                     continue;
