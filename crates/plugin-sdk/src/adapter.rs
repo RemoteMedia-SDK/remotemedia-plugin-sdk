@@ -77,7 +77,7 @@ impl InitializeContextRead for PluginInitCtx {
 /// runtime owned by the plugin and awaiting the resulting JoinHandle.
 /// The host's outer poll then just drives the JoinHandle, while the
 /// inner future runs in a thread that *does* have a real Tokio handle.
-fn plugin_runtime() -> &'static Runtime {
+pub(crate) fn plugin_runtime() -> &'static Runtime {
     static RT: OnceLock<Runtime> = OnceLock::new();
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()

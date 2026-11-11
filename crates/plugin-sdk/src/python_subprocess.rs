@@ -670,6 +670,59 @@ impl FfiNode for PythonSubprocessNode {
         RString::from(self.node_type.clone())
     }
 
+    /// Frames the Python node emits on its own (`await self.emit(...)`,
+    /// openspec: add-node-initiated-output) go to the host's emitter for this
+    /// node instance, in the order the node sent them.
+    fn bind_emitter(&self, emitter: loadable_node_abi::buffer::NodeEmitterBox) {
+        let (frames, mut emitted) = tokio::sync::mpsc::channel::<crate::python_ipc::EmittedFrame>(64);
+        if self
+            .cmd_tx
+            .try_send(crate::python_ipc::IpcCommand::EmitSink { frames })
+            .is_err()
+        {
+            eprintln!(
+                "[plugin-sdk python] node type {}: the runner is not accepting commands; \
+                 emitted output will not be delivered",
+                self.node_type
+            );
+            return;
+        }
+        let node_type = self.node_type.clone();
+        let spawned = std::thread::Builder::new()
+            .name("rm-py-plugin-emit".into())
+            .spawn(move || {
+                while let Some(frame) = emitted.blocking_recv() {
+                    if frame.finished {
+                        emitter.finish();
+                        continue;
+                    }
+                    let message = decode_output(&frame.frame).and_then(|data| {
+                        loadable_node_abi::runtime_buffer::encode(data)
+                            .map_err(|error| error.into_string())
+                    });
+                    let result = match message {
+                        Ok(message) => crate::adapter::plugin_runtime()
+                            .block_on(emitter.emit(
+                                message,
+                                frame.origin_mode,
+                                RString::from(frame.participant),
+                            ))
+                            .into_result()
+                            .map_err(|error| error.into_string()),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result {
+                        eprintln!(
+                            "[plugin-sdk python] node type {node_type}: emitted output was not delivered: {error}"
+                        );
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            eprintln!("[plugin-sdk python] could not start the emit forwarder: {error}");
+        }
+    }
+
     /// Typed-RPC passthrough for Python source plugins (task 2.6.4): the
     /// runtime-delivered `__call_reply__` is the only method on the native
     /// lane. Every other `@rpc` method keeps reaching the runner's
@@ -958,6 +1011,12 @@ fn encode_input(input: &RVec<u8>, session_id: &str) -> Result<Vec<u8>, String> {
 /// RuntimeData ready to hand back across the FFI boundary. Variants
 /// supported: Text, Json, Audio, Tensor, Video, ControlMessage.
 fn decode_output_to_ffi(resp_bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let public = decode_output(resp_bytes)?;
+    rmp_serde::to_vec_named(&public).map_err(|e| format!("rmp encode output: {e}"))
+}
+
+/// Decode the runner's wire-format bytes into `RuntimeData`.
+fn decode_output(resp_bytes: &[u8]) -> Result<remotemedia_types::RuntimeData, String> {
     let wire = crate::python_ipc::WireRuntimeData::from_bytes(resp_bytes)
         .map_err(|e| format!("wire decode: {e}"))?;
     let public = match wire.data_type {
@@ -1055,7 +1114,7 @@ fn decode_output_to_ffi(resp_bytes: &[u8]) -> Result<Vec<u8>, String> {
             ));
         }
     };
-    rmp_serde::to_vec_named(&public).map_err(|e| format!("rmp encode output: {e}"))
+    Ok(public)
 }
 
 /// PixelFormat enum discriminant table. Matches

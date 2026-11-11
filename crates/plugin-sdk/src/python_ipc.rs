@@ -464,6 +464,10 @@ pub enum IpcCommand {
     /// Python plugin that is awaiting the reply inside `process()`
     /// (openspec: add-agent-harness-integration).
     Send { req_bytes: Vec<u8> },
+    /// The node has an emitter: deliver frames the Python node emits on its
+    /// own (openspec: add-node-initiated-output) to `frames`, in order. From
+    /// then on the output channel is also read between rounds.
+    EmitSink { frames: mpsc::Sender<EmittedFrame> },
 }
 
 /// Pending commands the IPC thread pulled off its channel while a round was
@@ -472,6 +476,112 @@ pub enum IpcCommand {
 struct Side<'a> {
     cmd_rx: &'a mut mpsc::Receiver<IpcCommand>,
     stash: &'a mut std::collections::VecDeque<IpcCommand>,
+    turn: &'a mut TurnState,
+}
+
+// ── Turn tags (openspec: add-node-initiated-output) ───────────────────
+//
+// A frame may carry a tag after its payload; the header and the payload are
+// unchanged. Same layout as the in-tree executor's `python_wire.rs` and the
+// Python client's `turns.py`:
+//
+//   input  (host → worker): seq u64 | origin_len u16 | origin JSON
+//   output (worker → host): seq u64 | origin_mode u8 | id_len u16 | id
+//
+// An output with `seq` 0 answers no input: the node emitted it. The worker
+// tags its outputs when this host set `REMOTEMEDIA_PY_WIRE_TURNS=1` in its
+// environment, and announces `TURNS:1` before READY; inputs are tagged from
+// then on.
+
+/// Environment variable telling a worker that its host reads turn tags.
+pub const TURN_TAG_ENV: &str = "REMOTEMEDIA_PY_WIRE_TURNS";
+
+/// Whether this host reads turn tags (`REMOTEMEDIA_PY_WIRE_TURNS=0` opts out).
+fn turn_tags_enabled() -> bool {
+    std::env::var(TURN_TAG_ENV).map_or(true, |value| value != "0")
+}
+
+/// A frame the Python node emitted on its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmittedFrame {
+    /// The frame, without its tag.
+    pub frame: Vec<u8>,
+    /// Attribution the node asked for: 0 default, 1 nobody, 2 `participant`.
+    pub origin_mode: u8,
+    pub participant: String,
+    /// An end frame: the node has finished producing.
+    pub finished: bool,
+}
+
+/// Offset one past a frame's payload, when its header is well formed.
+fn payload_end(frame: &[u8]) -> Option<usize> {
+    let session = u16::from_le_bytes(frame.get(1..3)?.try_into().ok()?) as usize;
+    let length_at = 3usize.checked_add(session)?.checked_add(8)?;
+    let payload = u32::from_le_bytes(frame.get(length_at..length_at + 4)?.try_into().ok()?);
+    let end = (length_at + 4).checked_add(payload as usize)?;
+    (end <= frame.len()).then_some(end)
+}
+
+/// The IPC thread's view of turns for one runner.
+#[derive(Default)]
+struct TurnState {
+    /// The worker announced `TURNS:1`: inputs carry a sequence number.
+    enabled: bool,
+    seq: u64,
+    /// The input being answered, while a round runs.
+    current: Option<u64>,
+    /// Where emitted frames go, once the node has an emitter.
+    emit: Option<mpsc::Sender<EmittedFrame>>,
+}
+
+impl TurnState {
+    /// Start a round: the request, tagged with its sequence number.
+    fn begin(&mut self, request: &[u8]) -> Vec<u8> {
+        let mut request = request.to_vec();
+        if self.enabled {
+            self.seq += 1;
+            self.current = Some(self.seq);
+            request.extend_from_slice(&self.seq.to_le_bytes());
+            // No sender fields: the call context that crosses the plugin ABI
+            // carries no participant.
+            request.extend_from_slice(&0u16.to_le_bytes());
+        } else {
+            self.current = None;
+        }
+        request
+    }
+
+    /// Sort one output frame. `Some` is a frame of the current round, with
+    /// its tag removed. An emitted frame goes to the emit sink; a frame of
+    /// another round is dropped.
+    fn sort(&mut self, mut frame: Vec<u8>) -> Option<Vec<u8>> {
+        let Some(end) = payload_end(&frame) else {
+            return Some(frame);
+        };
+        let tag = &frame[end..];
+        if tag.len() < 11 {
+            return Some(frame);
+        }
+        let seq = u64::from_le_bytes(tag[..8].try_into().expect("8 bytes"));
+        let origin_mode = tag[8];
+        let id_len = u16::from_le_bytes([tag[9], tag[10]]) as usize;
+        let participant = String::from_utf8_lossy(tag.get(11..11 + id_len).unwrap_or(&[])).into_owned();
+        frame.truncate(end);
+        if seq == 0 {
+            if let Some(emit) = &self.emit {
+                let finished = frame.first() == Some(&(WireDataType::EndOfInput as u8));
+                // Waits when the consumer is slow: back-pressure on the node.
+                let _ = emit.blocking_send(EmittedFrame {
+                    frame,
+                    origin_mode,
+                    participant,
+                    finished,
+                });
+            }
+            return None;
+        }
+        (self.current == Some(seq)).then_some(frame)
+    }
 }
 
 fn publish_bytes(
@@ -534,6 +644,8 @@ pub struct RunnerHandshake {
     /// message the worker sends just ahead of `READY`. `None` when the class
     /// declares none.
     pub instance_scope: Option<remotemedia_traits::streaming::InstanceScope>,
+    /// The worker tags its frames with the input they answer (`TURNS:1`).
+    pub turn_tags: bool,
 }
 
 /// [`spawn_runner_and_ipc`], also returning what the runner declared during
@@ -569,6 +681,8 @@ pub fn spawn_runner_and_ipc_with_handshake(
 
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
+    // This host reads turn tags; the worker then tags its frames.
+    command.env(TURN_TAG_ENV, if turn_tags_enabled() { "1" } else { "0" });
     // The runner talks to the host only over iceoryx2 (params come via
     // `--params`), so it must not inherit the host's stdin. A stdio-based
     // host (e.g. an MCP server) keeps a blocking read pending on its stdin
@@ -820,6 +934,10 @@ impl RunnerLiveness {
 }
 
 const RUNNER_LIVENESS_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How often the output channel is checked between rounds for frames a node
+/// emitted on its own. Bounds how late such a frame is noticed while idle.
+const BETWEEN_ROUNDS_POLL: Duration = Duration::from_millis(2);
 
 /// Idle step of a turn: yield, and periodically confirm the runner is alive.
 /// Only called when no sample is queued, so frames a runner published before
@@ -1078,30 +1196,53 @@ fn spawn_ipc_thread(
             // clone the strings.
             let control_ctx = (session_id.as_str(), node_id.as_str());
             let mut stash = std::collections::VecDeque::<IpcCommand>::new();
+            let mut turn = TurnState::default();
             loop {
-                let cmd = match stash.pop_front() {
-                    Some(cmd) => cmd,
-                    None => match cmd_rx.blocking_recv() {
-                        Some(cmd) => cmd,
-                        None => {
-                            // Every handle to this node is gone: end the
-                            // runner (and its process tree) now instead of
-                            // leaving it polling an orphaned channel.
-                            let ended = lifetime.lock().ok().and_then(|mut s| s.take());
-                            drop(ended);
-                            break;
+                turn.current = None;
+                let next = match stash.pop_front() {
+                    Some(cmd) => Some(cmd),
+                    // No emitter: nothing arrives between rounds.
+                    None if turn.emit.is_none() => cmd_rx.blocking_recv(),
+                    // Between rounds, forward what the node emits.
+                    None => loop {
+                        match cmd_rx.try_recv() {
+                            Ok(cmd) => break Some(cmd),
+                            Err(mpsc::error::TryRecvError::Disconnected) => break None,
+                            Err(mpsc::error::TryRecvError::Empty) => {}
+                        }
+                        drain_control_messages(&control_subscriber, control_ctx);
+                        match subscriber.receive() {
+                            Ok(Some(sample)) => {
+                                let _ = turn.sort(sample.payload().to_vec());
+                            }
+                            _ => std::thread::sleep(BETWEEN_ROUNDS_POLL),
                         }
                     },
+                };
+                let cmd = match next {
+                    Some(cmd) => cmd,
+                    None => {
+                        // Every handle to this node is gone: end the
+                        // runner (and its process tree) now instead of
+                        // leaving it polling an orphaned channel.
+                        let ended = lifetime.lock().ok().and_then(|mut s| s.take());
+                        drop(ended);
+                        break;
+                    }
                 };
                 let mut side = Side {
                     cmd_rx: &mut cmd_rx,
                     stash: &mut stash,
+                    turn: &mut turn,
                 };
                 match cmd {
                     IpcCommand::Send { req_bytes } => {
                         if let Err(e) = publish_bytes(&publisher, &req_bytes) {
                             eprintln!("[plugin-sdk python_ipc] out-of-band send failed: {e}");
                         }
+                    }
+                    IpcCommand::EmitSink { frames } => {
+                        side.turn.emit = Some(frames);
                     }
                     IpcCommand::WaitForReady { timeout, reply } => {
                         // During READY handshake we still drain
@@ -1112,6 +1253,9 @@ fn spawn_ipc_thread(
                         // plugins) actually reaches the orb.
                         let result =
                             wait_for_ready(&control_subscriber, timeout, control_ctx, &handshake);
+                        side.turn.enabled = result.is_ok()
+                            && turn_tags_enabled()
+                            && handshake.lock().map(|h| h.turn_tags).unwrap_or(false);
                         let _ = reply.send(result);
                     }
                     IpcCommand::Round { req_bytes, reply } => {
@@ -1238,7 +1382,7 @@ fn round_trip(
     liveness: &RunnerLiveness,
     side: &mut Side<'_>,
 ) -> Result<Vec<u8>, String> {
-    publish_bytes(publisher, req)?;
+    publish_bytes(publisher, &side.turn.begin(req))?;
     let mut idle = liveness.poll();
 
     let mut first: Option<Vec<u8>> = None;
@@ -1253,7 +1397,10 @@ fn round_trip(
             .map_err(|e| format!("receive: {e:?}"))?
         {
             Some(sample) => {
-                let bytes = sample.payload().to_vec();
+                // A tagging worker names the input each frame answers.
+                let Some(bytes) = side.turn.sort(sample.payload().to_vec()) else {
+                    continue;
+                };
                 // EndOfInput sentinel — drain complete, return the
                 // first real output (or error if nothing came).
                 if bytes.is_empty() || bytes[0] == WireDataType::EndOfInput as u8 {
@@ -1293,7 +1440,7 @@ fn round_trip_multi(
     liveness: &RunnerLiveness,
     side: &mut Side<'_>,
 ) -> Result<Vec<Vec<u8>>, String> {
-    publish_bytes(publisher, req)?;
+    publish_bytes(publisher, &side.turn.begin(req))?;
     let mut idle = liveness.poll();
 
     let mut outputs: Vec<Vec<u8>> = Vec::new();
@@ -1305,7 +1452,10 @@ fn round_trip_multi(
             .map_err(|e| format!("receive: {e:?}"))?
         {
             Some(sample) => {
-                let bytes = sample.payload().to_vec();
+                // A tagging worker names the input each frame answers.
+                let Some(bytes) = side.turn.sort(sample.payload().to_vec()) else {
+                    continue;
+                };
                 // Peek at type byte — if it's EndOfInput we're done.
                 // Empty payloads also count as "no more output" but the
                 // runner never sends those; treat them as EndOfInput
@@ -1347,7 +1497,7 @@ fn round_trip_streaming(
     liveness: &RunnerLiveness,
     side: &mut Side<'_>,
 ) -> Result<(), String> {
-    publish_bytes(publisher, req)?;
+    publish_bytes(publisher, &side.turn.begin(req))?;
     let mut idle = liveness.poll();
 
     let mut consumer_alive = true;
@@ -1359,7 +1509,10 @@ fn round_trip_streaming(
             .map_err(|e| format!("receive: {e:?}"))?
         {
             Some(sample) => {
-                let bytes = sample.payload().to_vec();
+                // A tagging worker names the input each frame answers.
+                let Some(bytes) = side.turn.sort(sample.payload().to_vec()) else {
+                    continue;
+                };
                 if bytes.is_empty() || bytes[0] == WireDataType::EndOfInput as u8 {
                     drain_control_messages(control_subscriber, ctx);
                     return Ok(());
@@ -1416,6 +1569,13 @@ fn wait_for_ready(
                 }
                 if let Some(declared) = bytes.strip_prefix(b"SCOPE:") {
                     record_instance_scope(declared, ctx.1, handshake);
+                    polls += 1;
+                    continue;
+                }
+                if bytes == b"TURNS:1" {
+                    if let Ok(mut handshake) = handshake.lock() {
+                        handshake.turn_tags = true;
+                    }
                     polls += 1;
                     continue;
                 }
@@ -1478,6 +1638,65 @@ pub fn make_runner_argv(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn text_frame(body: &str) -> Vec<u8> {
+        WireRuntimeData::now_text(body, "s").to_bytes()
+    }
+
+    fn tagged(mut frame: Vec<u8>, seq: u64, mode: u8, id: &str) -> Vec<u8> {
+        frame.extend_from_slice(&seq.to_le_bytes());
+        frame.push(mode);
+        frame.extend_from_slice(&(id.len() as u16).to_le_bytes());
+        frame.extend_from_slice(id.as_bytes());
+        frame
+    }
+
+    #[test]
+    fn inputs_are_tagged_once_the_worker_announced_tags() {
+        let mut turn = TurnState::default();
+        let plain = text_frame("hi");
+        assert_eq!(turn.begin(&plain), plain, "no tag before TURNS:1");
+        turn.enabled = true;
+        let request = turn.begin(&plain);
+        // seq u64 | origin_len u16 (no sender fields)
+        assert_eq!(&request[plain.len()..], [1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(turn.current, Some(1));
+    }
+
+    #[test]
+    fn a_round_keeps_its_frames_and_emits_go_to_the_sink() {
+        let (frames, mut emitted) = mpsc::channel(8);
+        let mut turn = TurnState {
+            enabled: true,
+            emit: Some(frames),
+            ..Default::default()
+        };
+        turn.begin(&text_frame("in"));
+        let reply = text_frame("reply");
+        // A frame without a tag passes through unchanged.
+        assert_eq!(turn.sort(reply.clone()), Some(reply.clone()));
+        // This round's frame comes back without its tag.
+        assert_eq!(turn.sort(tagged(reply.clone(), 1, 0, "")), Some(reply.clone()));
+        // Another round's frame is dropped.
+        assert_eq!(turn.sort(tagged(reply.clone(), 7, 0, "")), None);
+        // An emitted frame goes to the sink with its attribution.
+        let own = text_frame("own");
+        assert_eq!(turn.sort(tagged(own.clone(), 0, 2, "alice")), None);
+        assert_eq!(
+            emitted.try_recv().unwrap(),
+            EmittedFrame {
+                frame: own,
+                origin_mode: 2,
+                participant: "alice".into(),
+                finished: false,
+            }
+        );
+        // An end frame that answers no input: the node finished producing.
+        let mut end = text_frame("");
+        end[0] = WireDataType::EndOfInput as u8;
+        assert_eq!(turn.sort(tagged(end, 0, 0, "")), None);
+        assert!(emitted.try_recv().unwrap().finished);
+    }
 
     #[test]
     fn scope_message_is_recorded_in_the_handshake() {
