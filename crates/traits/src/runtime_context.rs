@@ -428,6 +428,14 @@ pub trait InitializeContextRead: Send + Sync {
     /// surfaces the messages through the `__system__` event channel.
     fn emit_progress(&self, status: &str, message: &str);
 
+    /// The node instance's output emitter, type-erased (openspec:
+    /// add-node-initiated-output). `None` when the host provides none.
+    /// Nodes use their runtime's typed accessor (the host crate's
+    /// `Emitter::of(ctx)`) instead of downcasting this themselves.
+    fn emitter_any(&self) -> Option<&(dyn Any + Send + Sync)> {
+        None
+    }
+
     /// Type-erased self handle for in-tree code that needs to downcast
     /// to the host's concrete `InitializeContext` (e.g. to grab the
     /// optional `Arc<SessionControl>` for forwarding to spawned
