@@ -140,6 +140,49 @@ impl NativeWorkerNode {
         }
     }
 
+    /// Spawn a worker and negotiate background calls (openspec:
+    /// add-source-node-lifecycle): a worker node with a body runs it in one
+    /// long-lived call, and reports whether it is self-driven. A worker that
+    /// predates the protocol rejects the handshake.
+    ///
+    /// # Safety
+    /// The complete executable ownership contract of [`Self::spawn`] applies.
+    pub unsafe fn spawn_with_background(
+        command: &mut Command,
+        pool: SharedPool,
+        identity: CallContext,
+        limits: Limits,
+        startup_timeout: Duration,
+    ) -> Result<Self, Error> {
+        let copies = input_copy_context(None, &identity)?;
+        let process = remotemedia_shared_memory::channel::WorkerProcess::spawn_with_resources(
+            command,
+            Default::default(),
+        )
+        .map_err(transport_error)?;
+        // SAFETY: the caller supplies the worker executable's ownership contract.
+        let peer = unsafe {
+            PeerConnection::from_process_with_protocols(
+                process,
+                pool,
+                limits,
+                remotemedia_shared_memory::peer::Protocols {
+                    background: true,
+                    ..Default::default()
+                },
+            )
+        }
+        .map_err(transport_error)?;
+        Self::from_peer(
+            peer,
+            identity,
+            limits,
+            startup_timeout,
+            copies,
+            SnapshotMode::Disabled,
+        )
+    }
+
     unsafe fn spawn_protocol(
         command: &mut Command,
         pool: SharedPool,

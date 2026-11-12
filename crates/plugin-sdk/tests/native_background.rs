@@ -3,7 +3,10 @@
 //! call whose outputs belong to no input.
 #![cfg(all(feature = "test-native-worker", any(windows, target_os = "linux")))]
 use remotemedia_plugin_sdk::{
-    native_worker::{NativeWorkerFactory, PoolConfig, SessionId, SharedPool, SizeClass},
+    native_worker::{
+        Limits, NativeWorkerFactory, NativeWorkerNode, PoolConfig, SessionId, SharedPool,
+        SizeClass,
+    },
     traits::{
         self,
         emit::{Emit, EmitOrigin, TryEmitError},
@@ -249,4 +252,158 @@ async fn without_the_background_protocol_a_worker_behaves_as_before() {
     assert_eq!(node.self_driven(), None);
     let ctx = Ctx(None);
     assert_eq!(stream(node.as_ref(), &ctx, "emit").await, ["unsupported"]);
+}
+
+// ── The real mapped Python worker ───────────────────────────────────────
+//
+// `MAPPED_WORKER_PYTHON`: an interpreter that imports the matching
+// `_remotemedia_buffers` extension and the Python client.
+// `MAPPED_SDK_PYTHON`: the client's `clients/python` directory.
+
+/// A Python node on the mapped runner, with background calls negotiated or
+/// not.
+async fn python_node(
+    node_type: &str,
+    params: &str,
+    background: bool,
+) -> Arc<dyn StreamingNode> {
+    let python = std::env::var("MAPPED_WORKER_PYTHON")
+        .expect("set MAPPED_WORKER_PYTHON to matching-wheel interpreter");
+    let root = std::env::var("MAPPED_SDK_PYTHON").expect("set MAPPED_SDK_PYTHON to clients/python");
+    let mut command = std::process::Command::new(python);
+    command.args([
+        "-m",
+        "remotemedia_mapped_worker",
+        "--node-type",
+        node_type,
+        "--node-id",
+        "native-node",
+        "--session-id",
+        "native-session",
+        "--params",
+        params,
+        "--module-root",
+        &format!("{root}/tests/support"),
+        "--register-module",
+        "mapped_source_fixture",
+    ]);
+    let identity = remotemedia_shared_memory::peer::CallContext {
+        session_id: Some("native-session".into()),
+        node_id: "native-node".into(),
+    };
+    // SAFETY: the checked-in Python fixture and mapped runner use owning views,
+    // never fork/delegate mappings, and run under the trusted worker contract.
+    let node = unsafe {
+        if background {
+            NativeWorkerNode::spawn_with_background(
+                &mut command,
+                pool(),
+                identity,
+                Limits::default(),
+                Duration::from_secs(60),
+            )
+        } else {
+            NativeWorkerNode::spawn(
+                &mut command,
+                pool(),
+                identity,
+                Limits::default(),
+                Duration::from_secs(60),
+            )
+        }
+    }
+    .unwrap();
+    let node: Arc<dyn StreamingNode> = Arc::new(traits::AsyncNodeWrapper(Arc::new(node)));
+    node.initialize(&Init).await.unwrap();
+    node
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MAPPED_WORKER_PYTHON and MAPPED_SDK_PYTHON"]
+async fn a_mapped_python_source_node_runs_its_background_in_a_background_call() {
+    let node = python_node("MappedSourceNode", r#"{"body":"emit"}"#, true).await;
+    // A `SourceNode` class: self-driven, with a body.
+    assert_eq!(node.self_driven(), Some(true));
+    assert!(node.has_background());
+    let collected = Arc::new(Collected::default());
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        node.background(&Ctx(Some(collected.clone()))),
+    )
+    .await
+    .expect("background() returned")
+    .unwrap();
+    assert_eq!(collected.frames(), ["body-0", "body-1", "body-2"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MAPPED_WORKER_PYTHON and MAPPED_SDK_PYTHON"]
+async fn a_failing_mapped_python_background_is_the_calls_error() {
+    let node = python_node("MappedSourceNode", r#"{"body":"fail"}"#, true).await;
+    let collected = Arc::new(Collected::default());
+    let error = tokio::time::timeout(
+        Duration::from_secs(30),
+        node.background(&Ctx(Some(collected.clone()))),
+    )
+    .await
+    .expect("background() ended")
+    .expect_err("background() failed")
+    .to_string();
+    assert!(error.contains("python body sentinel"), "{error}");
+    assert_eq!(collected.frames(), ["body-0"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MAPPED_WORKER_PYTHON and MAPPED_SDK_PYTHON"]
+async fn a_mapped_python_node_emits_between_calls_while_its_background_runs() {
+    let node = python_node("MappedSourceNode", r#"{"body":"run"}"#, true).await;
+    let collected = Arc::new(Collected::default());
+    let ctx = Ctx(Some(collected.clone()));
+    // Before the body runs, emit() has nowhere to go.
+    assert_eq!(stream(node.as_ref(), &ctx, "emit").await, ["unsupported"]);
+
+    let running = {
+        let (node, collected) = (node.clone(), collected.clone());
+        tokio::spawn(async move { node.background(&Ctx(Some(collected))).await })
+    };
+    collected.at_least(1).await;
+    // The emitted frame is not one of the call's outputs.
+    assert_eq!(stream(node.as_ref(), &ctx, "emit").await, ["emitted"]);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !collected.frames().iter().any(|frame| frame == "from a call") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the emitted frame arrived on the background call");
+
+    // The instance stops: the call is cancelled and so is background().
+    running.abort();
+    let _ = running.await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while stream(node.as_ref(), &ctx, "emit").await != ["unsupported"] {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("background() stopped after its call was cancelled");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MAPPED_WORKER_PYTHON and MAPPED_SDK_PYTHON"]
+async fn a_mapped_python_node_without_a_body_gets_emit_unsupported() {
+    let node = python_node("MappedPlainNode", "{}", true).await;
+    assert!(!node.has_background());
+    assert_eq!(node.self_driven(), None);
+    assert_eq!(stream(node.as_ref(), &Ctx(None), "emit").await, ["unsupported"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MAPPED_WORKER_PYTHON and MAPPED_SDK_PYTHON"]
+async fn a_mapped_python_worker_on_a_host_without_the_protocol_behaves_as_before() {
+    // The host did not ask for background calls: no declarations, no body.
+    let node = python_node("MappedSourceNode", r#"{"body":"emit"}"#, false).await;
+    assert!(!node.has_background());
+    assert_eq!(node.self_driven(), None);
+    assert_eq!(stream(node.as_ref(), &Ctx(None), "emit").await, ["unsupported"]);
 }
