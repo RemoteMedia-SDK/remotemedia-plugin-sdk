@@ -84,6 +84,7 @@ struct Ledger {
     outputs: HashMap<u64, u64>,
 }
 struct Shared {
+    background_protocol: u16,
     source_completion_protocol: u16,
     snapshot_protocol: u16,
     output_copy_protocol: u16,
@@ -109,6 +110,8 @@ pub struct Protocols {
     pub snapshots: u16,
     pub output_copies: bool,
     pub source_completion: bool,
+    /// Background calls ([`wire::BACKGROUND_PROTOCOL`]).
+    pub background: bool,
 }
 #[derive(Clone)]
 pub struct HostHandle {
@@ -178,6 +181,7 @@ impl PeerConnection {
                     snapshots: snapshot_protocol,
                     output_copies,
                     source_completion: false,
+                    background: false,
                 },
             )
         }
@@ -195,7 +199,7 @@ impl PeerConnection {
     ) -> io::Result<(Self, HostHandle)> {
         // SAFETY: caller supplies the same complete worker ownership contract.
         unsafe {
-            Self::spawn_protocol(
+            Self::spawn_protocols(
                 || Ok(process),
                 pool,
                 limits,
@@ -207,6 +211,11 @@ impl PeerConnection {
                 },
                 if protocols.source_completion {
                     wire::SOURCE_COMPLETION_PROTOCOL
+                } else {
+                    0
+                },
+                if protocols.background {
+                    wire::BACKGROUND_PROTOCOL
                 } else {
                     0
                 },
@@ -360,6 +369,27 @@ impl PeerConnection {
         output_copy_protocol: u16,
         source_completion_protocol: u16,
     ) -> io::Result<(Self, HostHandle)> {
+        unsafe {
+            Self::spawn_protocols(
+                launch,
+                pool,
+                limits,
+                snapshot_protocol,
+                output_copy_protocol,
+                source_completion_protocol,
+                0,
+            )
+        }
+    }
+    unsafe fn spawn_protocols(
+        launch: impl FnOnce() -> io::Result<WorkerProcess>,
+        pool: SharedPool,
+        limits: Limits,
+        snapshot_protocol: u16,
+        output_copy_protocol: u16,
+        source_completion_protocol: u16,
+        background_protocol: u16,
+    ) -> io::Result<(Self, HostHandle)> {
         if snapshot_protocol > wire::SNAPSHOT_OUTPUT_PROTOCOL
             || !(1..=64).contains(&limits.calls)
             || !(1..=64).contains(&limits.inputs_per_call)
@@ -375,6 +405,7 @@ impl PeerConnection {
         let mut process = launch()?;
         let (sender, receiver) = process.take_channel().unwrap().split()?;
         let shared = Arc::new(Shared {
+            background_protocol,
             source_completion_protocol,
             snapshot_protocol,
             output_copy_protocol,
@@ -399,6 +430,7 @@ impl PeerConnection {
         });
         shared.send(
             &HostMessage::Hello {
+                background_protocol,
                 source_completion_protocol,
                 version: wire::WIRE_VERSION,
                 snapshot_protocol,

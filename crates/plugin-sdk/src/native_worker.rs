@@ -42,6 +42,14 @@ pub struct Description {
     pub clocked_media_addr: Option<(String, String)>,
     pub fallback_rate_hz: u32,
     pub rpc_methods: Vec<RpcMethod>,
+    /// The node takes no client input. Sent only to a host that negotiated
+    /// background calls (older hosts reject unknown fields).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_driven: Option<bool>,
+    /// The node has a background body: the host opens a
+    /// [`CallKind::Background`] call for it when the instance starts.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Pacing {
@@ -102,7 +110,13 @@ pub unsafe fn run(node: Arc<dyn StreamingNode>) -> Result<(), Error> {
             CallKind::Control,
             CallKind::Rpc,
             CallKind::Snapshot,
-        ])
+            // Advertised only to a host that negotiated background calls,
+            // and only by a node that has a body.
+            CallKind::Background,
+        ]
+        .into_iter()
+        .filter(|kind| *kind != CallKind::Background || node.has_background())
+        .collect())
     }
     .map_err(transport_error)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -175,6 +189,9 @@ async fn execute(
                 clocked_media_addr: node.clocked_media_addr(),
                 fallback_rate_hz: node.fallback_rate_hz(),
                 rpc_methods: node.rpc_methods(),
+                // Older hosts reject fields they do not know.
+                self_driven: node.self_driven().filter(|_| request.supports_background()),
+                background: request.supports_background() && node.has_background(),
             },
         );
     }
@@ -218,6 +235,23 @@ async fn execute(
     }
     let ctx = WorkerContext::new(request.clone(), session);
     match request.kind {
+        CallKind::Background => {
+            require_empty(&inputs)?;
+            // The node's body. What it emits travels on this call's output
+            // lane; so does what the node emits from other calls while the
+            // body runs. The host cancels this call to stop the body.
+            let _open = session.open_background(&request)?;
+            let ctx = WorkerContext::new(request.clone(), session);
+            let cancelled = request.clone();
+            tokio::select! {
+                result = node.background(&ctx) => result,
+                _ = async move {
+                    while !cancelled.is_cancelled() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                } => Err(Error::Execution("native worker call cancelled".into())),
+            }
+        }
         CallKind::Snapshot => {
             require_empty(&inputs)?;
             snapshots::execute(&request, &session.snapshots)

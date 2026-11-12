@@ -71,4 +71,11 @@ with contextlib.redirect_stdout(sys.stderr):
         if (getattr(buffers, "SNAPSHOT_OUTPUT_PROTOCOL_VERSION", None),
                 getattr(mapped_runner, "MAPPED_SNAPSHOT_OUTPUT_PROTOCOL_VERSION", None)) != (2, 2):
             raise RuntimeError("incompatible mapped Python snapshot output protocol")
+    background = int(sys.argv[7]) if len(sys.argv) > 7 else 0
+    if background not in (0, 1):
+        raise RuntimeError("unknown mapped Python background protocol")
+    if background:
+        if (getattr(buffers, "BACKGROUND_PROTOCOL_VERSION", None),
+                getattr(mapped_runner, "MAPPED_BACKGROUND_PROTOCOL_VERSION", None)) != (1, 1):
+            raise RuntimeError("incompatible mapped Python background protocol")
 print(json.dumps({"base_executable": sys._base_executable, "pid": os.getpid()}))

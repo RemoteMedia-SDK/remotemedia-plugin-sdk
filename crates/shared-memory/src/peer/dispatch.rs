@@ -19,6 +19,7 @@ impl Shared {
                 snapshot_protocol,
                 output_copy_protocol,
                 source_completion_protocol,
+                background_protocol,
             } => {
                 let mut ledger = self.ledger.lock().unwrap();
                 self.check_open()?;
@@ -28,6 +29,12 @@ impl Shared {
                     || snapshot_protocol != self.snapshot_protocol
                     || output_copy_protocol != self.output_copy_protocol
                     || source_completion_protocol != self.source_completion_protocol
+                    // A worker may decline background calls (its node has
+                    // none to run); it may not invent them.
+                    || (background_protocol != 0
+                        && background_protocol != self.background_protocol)
+                    || (modes.contains(&CallKind::Background)
+                        != (background_protocol == wire::BACKGROUND_PROTOCOL))
                     || session != self.pool.session_id()
                     || peer != self.peer
                     || modes.is_empty()

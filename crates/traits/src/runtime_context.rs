@@ -53,6 +53,13 @@ pub trait NodeRuntimeContextRead: Send + Sync {
         None
     }
 
+    /// The instance's emitter behind the shared [`crate::emit::Emit`]
+    /// operations, for adapters that do not know the host's emitter type
+    /// (a worker-process node forwarding its body's output).
+    fn emit_handle(&self) -> Option<Arc<dyn crate::emit::Emit>> {
+        None
+    }
+
     /// Request completion of this paced source after the active tick succeeds.
     /// The request does not skip remaining outputs or registered work. A failed
     /// or cancelled tick cannot commit completion. Quiet ticks are not EOS.

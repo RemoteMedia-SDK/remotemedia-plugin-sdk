@@ -32,6 +32,9 @@ struct Endpoint {
     endpoint: Mutex<WorkerEndpoint>,
     #[pyo3(get)]
     max_calls: usize,
+    /// The host negotiated background calls.
+    #[pyo3(get)]
+    supports_background: bool,
 }
 
 #[pymethods]
@@ -98,6 +101,10 @@ impl Request {
     #[getter]
     fn supports_snapshot_outputs(&self) -> bool {
         self.request.supports_snapshot_outputs()
+    }
+    #[getter]
+    fn supports_background(&self) -> bool {
+        self.request.supports_background()
     }
     #[getter]
     fn max_snapshot_ports(&self) -> usize {
@@ -226,6 +233,7 @@ fn _connect_worker(py: Python<'_>, modes: Vec<String>) -> PyResult<Endpoint> {
     let endpoint = py.detach(|| unsafe { WorkerEndpoint::from_channel(channel, modes) })?;
     Ok(Endpoint {
         max_calls: endpoint.limits().calls,
+        supports_background: endpoint.supports_background(),
         endpoint: Mutex::new(endpoint),
     })
 }
@@ -260,5 +268,6 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("SNAPSHOT_OUTPUT_PROTOCOL_VERSION", 2)?;
     module.add("OUTPUT_COPY_PROTOCOL_VERSION", 1)?;
     module.add("SOURCE_COMPLETION_PROTOCOL_VERSION", 1)?;
+    module.add("BACKGROUND_PROTOCOL_VERSION", 1)?;
     Ok(())
 }

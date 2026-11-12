@@ -85,6 +85,7 @@ impl Outbound {
     }
 }
 struct SharedWorker {
+    background_protocol: u16,
     source_completion_protocol: u16,
     snapshot_protocol: u16,
     output_copy_protocol: u16,
@@ -153,6 +154,7 @@ impl WorkerEndpoint {
             snapshot_protocol,
             output_copy_protocol,
             source_completion_protocol,
+            background_protocol,
         } = serde_json::from_slice(&frame.metadata).map_err(other)?
         else {
             return Err(invalid("worker expected initial hello"));
@@ -163,6 +165,7 @@ impl WorkerEndpoint {
             || ![0, SNAPSHOT_PROTOCOL, SNAPSHOT_OUTPUT_PROTOCOL].contains(&snapshot_protocol)
             || ![0, OUTPUT_COPY_PROTOCOL].contains(&output_copy_protocol)
             || ![0, SOURCE_COMPLETION_PROTOCOL].contains(&source_completion_protocol)
+            || ![0, super::wire::BACKGROUND_PROTOCOL].contains(&background_protocol)
             || !(1..=64).contains(&limits.calls)
             || !(1..=64).contains(&limits.inputs_per_call)
             || !(1..=16).contains(&limits.outputs_per_call)
@@ -173,12 +176,24 @@ impl WorkerEndpoint {
         if snapshot_protocol != SNAPSHOT_OUTPUT_PROTOCOL {
             modes.retain(|kind| *kind != CallKind::Snapshot);
         }
+        // Background calls exist only for a host that asked for them: an
+        // older host does not know the operation.
+        if background_protocol != super::wire::BACKGROUND_PROTOCOL {
+            modes.retain(|kind| *kind != CallKind::Background);
+        }
+        // A worker that cannot run them acknowledges the protocol as absent.
+        let background_protocol = if modes.contains(&CallKind::Background) {
+            background_protocol
+        } else {
+            0
+        };
         let unique: HashSet<_> = modes.iter().copied().collect();
         if modes.is_empty() {
             return Err(invalid("no operations for negotiated protocol"));
         }
         let (wire_send, wire_receive) = mpsc::channel();
         let shared = Arc::new(SharedWorker {
+            background_protocol,
             source_completion_protocol,
             snapshot_protocol,
             output_copy_protocol,
@@ -223,6 +238,7 @@ impl WorkerEndpoint {
                 }
             })?;
         shared.send(&WorkerMessage::Ready {
+            background_protocol,
             source_completion_protocol,
             snapshot_protocol,
             output_copy_protocol,
@@ -250,6 +266,12 @@ impl WorkerEndpoint {
         self.shared.limits
     }
 
+    /// Whether the host negotiated background calls. See
+    /// [`WorkerRequest::supports_background`].
+    pub fn supports_background(&self) -> bool {
+        self.shared.background_protocol == super::wire::BACKGROUND_PROTOCOL
+    }
+
     /// Queued plus executing requests are bounded by the negotiated call budget.
     pub fn next_request(&self) -> io::Result<WorkerRequest> {
         self.requests
@@ -269,6 +291,12 @@ impl WorkerRequest {
     }
     pub fn supports_snapshot_outputs(&self) -> bool {
         self.shared.snapshot_protocol == SNAPSHOT_OUTPUT_PROTOCOL
+    }
+    /// Whether the host negotiated background calls: it may open a
+    /// [`CallKind::Background`] call, and it reads the node's `self_driven`
+    /// and `background` declarations.
+    pub fn supports_background(&self) -> bool {
+        self.shared.background_protocol == super::wire::BACKGROUND_PROTOCOL
     }
     /// Fail this connection when the execution adapter cannot honor the call
     /// protocol (for example, it returned while output operations were pending).

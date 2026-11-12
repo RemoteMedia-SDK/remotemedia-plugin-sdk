@@ -132,7 +132,8 @@ async fn verify(
         .arg(&prepared.venv.path)
         .arg(protocols.snapshots.to_string())
         .arg(u8::from(protocols.output_copies).to_string())
-        .arg(u8::from(protocols.source_completion).to_string());
+        .arg(u8::from(protocols.source_completion).to_string())
+        .arg(u8::from(protocols.background).to_string());
     verification_output(command, Duration::from_secs(30)).await
 }
 

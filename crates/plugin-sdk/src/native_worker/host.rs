@@ -340,6 +340,34 @@ impl AsyncStreamingNode for NativeWorkerNode {
     fn rpc_methods(&self) -> Vec<RpcMethod> {
         self.description.rpc_methods.clone()
     }
+    fn self_driven(&self) -> Option<bool> {
+        self.description.self_driven
+    }
+    fn has_background(&self) -> bool {
+        self.description.background
+    }
+    /// The worker node's body: one long-lived call. Its outputs belong to no
+    /// input and go to the instance's emitter; it completes when the body
+    /// returns, and an error completion is a failure of the node. Dropping
+    /// this future cancels the call.
+    async fn background(&self, ctx: &dyn NodeRuntimeContextRead) -> Result<(), Error> {
+        self.validate_identity(ctx.session_id(), ctx.node_id())?;
+        let emitter = ctx.emit_handle().ok_or_else(|| {
+            Error::Execution("this host provides no emitter for a worker node's body".into())
+        })?;
+        let mut call = self
+            .begin(
+                CallKind::Background,
+                serde_json::Value::Null,
+                vec![],
+                call_resources(ctx),
+            )
+            .await?;
+        while let Some(output) = call.next().await? {
+            emitter.emit(output.into_data()).await?;
+        }
+        Ok(())
+    }
     async fn initialize(&self, ctx: &dyn InitializeContextRead) -> Result<(), Error> {
         self.validate_identity(ctx.session_id(), ctx.node_id())?;
         self.drain(
@@ -641,8 +669,12 @@ fn negotiate_description(
             _ => return Err(Error::Execution("invalid node description sequence".into())),
         }
     }
-    let description =
+    let mut description =
         description.ok_or_else(|| Error::Execution("missing node description".into()))?;
+    // No background call on a worker that did not announce the operation.
+    if !modes.contains(&CallKind::Background) {
+        description.background = false;
+    }
     validate_description(&description)?;
     Ok(description)
 }
