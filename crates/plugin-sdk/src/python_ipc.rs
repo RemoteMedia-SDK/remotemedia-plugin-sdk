@@ -575,13 +575,17 @@ fn start_signal_enabled() -> bool {
     std::env::var(START_ENV).map_or(true, |value| value != "0")
 }
 
-/// The start signal for a worker of `session_id`: a frame of wire type 9
-/// with no payload. Send it with [`IpcCommand::Send`] when the node
+/// Wire type of the start signal. Not a data type: 1 to 9 are data and the
+/// end-of-input marker, 10 and 11 exist on the mapped transport.
+pub const START_FRAME_TYPE: u8 = 12;
+
+/// The start signal for a worker of `session_id`: a frame of
+/// [`START_FRAME_TYPE`] with no payload. Send it with [`IpcCommand::Send`] when the node
 /// instance starts.
 pub fn start_frame(session_id: &str) -> Vec<u8> {
     let session = session_id.as_bytes();
     let mut frame = Vec::with_capacity(15 + session.len());
-    frame.push(9);
+    frame.push(START_FRAME_TYPE);
     frame.extend_from_slice(&(session.len() as u16).to_le_bytes());
     frame.extend_from_slice(session);
     frame.extend_from_slice(&0u64.to_le_bytes());
@@ -1991,9 +1995,11 @@ mod tests {
     }
 
     #[test]
-    fn the_start_signal_is_a_frame_of_type_nine_with_no_payload() {
+    fn the_start_signal_is_its_own_frame_type_with_no_payload() {
         let frame = start_frame("s1");
-        assert_eq!(frame[0], 9);
+        assert_eq!(frame[0], START_FRAME_TYPE);
+        // Never a data type: a JSON input is type 9.
+        assert!(WireDataType::from_u8(START_FRAME_TYPE).is_none());
         assert_eq!(payload_end(&frame), Some(frame.len()));
         assert_eq!(&frame[3..5], b"s1");
     }
