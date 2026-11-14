@@ -67,6 +67,8 @@ pub enum WireDataType {
     Numpy = 6,
     File = 7,
     EndOfInput = 8,
+    /// UTF-8 JSON, as `MultiprocessNode` emits for `RuntimeData.json(...)`.
+    Json = 9,
 }
 
 impl WireDataType {
@@ -80,6 +82,7 @@ impl WireDataType {
             6 => Self::Numpy,
             7 => Self::File,
             8 => Self::EndOfInput,
+            9 => Self::Json,
             _ => return None,
         })
     }
@@ -1499,6 +1502,21 @@ mod tests {
         assert_eq!(decoded.data_type, WireDataType::Text);
         assert_eq!(decoded.session_id, "sess-1");
         assert_eq!(decoded.payload, b"hello");
+    }
+
+    #[test]
+    fn wire_decodes_json_from_the_runner() {
+        // `MultiprocessNode._send_output` writes RuntimeData.json(...) as type 9.
+        let payload = br#"{"kind":"turn_end","probability":0.9}"#;
+        let mut bytes = vec![9u8];
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.push(b's');
+        bytes.extend_from_slice(&7u64.to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(payload);
+        let decoded = WireRuntimeData::from_bytes(&bytes).expect("decode");
+        assert_eq!(decoded.data_type, WireDataType::Json);
+        assert_eq!(decoded.payload, payload);
     }
 
     #[test]

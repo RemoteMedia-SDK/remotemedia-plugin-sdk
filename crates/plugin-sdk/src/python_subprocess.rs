@@ -956,7 +956,7 @@ fn encode_input(input: &RVec<u8>, session_id: &str) -> Result<Vec<u8>, String> {
 
 /// Decode the runner's wire-format bytes → encode as rmp-serde
 /// RuntimeData ready to hand back across the FFI boundary. Variants
-/// supported: Text, Audio, Tensor, Video, ControlMessage.
+/// supported: Text, Json, Audio, Tensor, Video, ControlMessage.
 fn decode_output_to_ffi(resp_bytes: &[u8]) -> Result<Vec<u8>, String> {
     let wire = crate::python_ipc::WireRuntimeData::from_bytes(resp_bytes)
         .map_err(|e| format!("wire decode: {e}"))?;
@@ -965,6 +965,9 @@ fn decode_output_to_ffi(resp_bytes: &[u8]) -> Result<Vec<u8>, String> {
             let text = String::from_utf8_lossy(&wire.payload).into_owned();
             remotemedia_types::RuntimeData::Text(text)
         }
+        crate::python_ipc::WireDataType::Json => remotemedia_types::RuntimeData::Json(
+            serde_json::from_slice(&wire.payload).map_err(|e| format!("json decode: {e}"))?,
+        ),
         crate::python_ipc::WireDataType::Audio => {
             let (samples, sample_rate, channels) = wire.decode_audio()?;
             remotemedia_types::RuntimeData::Audio {
@@ -1047,7 +1050,7 @@ fn decode_output_to_ffi(resp_bytes: &[u8]) -> Result<Vec<u8>, String> {
         }
         other => {
             return Err(format!(
-                "PythonSubprocessNode decodes only Text/Audio/Tensor/Video/ControlMessage \
+                "PythonSubprocessNode decodes only Text/Json/Audio/Tensor/Video/ControlMessage \
                  output (got {other:?})"
             ));
         }
