@@ -37,6 +37,10 @@ fn forward_probe(data: RuntimeData, copy: bool) -> Result<RuntimeData, Error> {
 }
 
 struct Fixture {
+    /// The node's background body: `emit` (three frames, then return),
+    /// `fail` (one frame, then an error), `run` (frames until cancelled).
+    body: Option<String>,
+    self_driven: bool,
     profile: Option<native_worker_profile::Profile>,
     unblock: tokio::sync::Notify,
     gain: f32,
@@ -72,6 +76,26 @@ impl StreamingNode for Fixture {
     }
     fn node_type(&self) -> &str {
         "MappedNativeFixture"
+    }
+    fn self_driven(&self) -> Option<bool> {
+        self.self_driven.then_some(true)
+    }
+    fn has_background(&self) -> bool {
+        self.body.is_some()
+    }
+    async fn background(&self, ctx: &dyn NodeRuntimeContextRead) -> Result<(), Error> {
+        let emitter = remotemedia_plugin_sdk::Emitter::for_call(ctx);
+        let body = self.body.as_deref().unwrap_or_default();
+        let mut n = 0;
+        loop {
+            emitter.emit(RuntimeData::Text(format!("body-{n}"))).await?;
+            n += 1;
+            match body {
+                "fail" => return Err(Error::Execution("worker body sentinel".into())),
+                "emit" if n == 3 => return Ok(()),
+                _ => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+            }
+        }
     }
     fn is_multi_input(&self) -> bool {
         self.multi_input
@@ -208,6 +232,17 @@ impl StreamingNode for Fixture {
         ctx: &dyn NodeRuntimeContextRead,
         mut callback: Box<dyn FnMut(RuntimeData) -> Result<(), Error> + Send>,
     ) -> Result<usize, Error> {
+        if matches!(&data, RuntimeData::Text(value) if value == "emit") {
+            // Emit from a call: it goes out on the background call's lane
+            // when one is open, and fails otherwise.
+            let emitted = remotemedia_plugin_sdk::Emitter::for_call(ctx)
+                .emit(RuntimeData::Text("from a call".into()))
+                .await;
+            callback(RuntimeData::Text(
+                if emitted.is_ok() { "emitted" } else { "unsupported" }.into(),
+            ))?;
+            return Ok(1);
+        }
         if matches!(&data, RuntimeData::Text(value) if value == "snapshots") {
             let reader = ctx.snapshot_inputs().remove("latest").unwrap();
             let first = reader.runtime_snapshot()?.unwrap();
@@ -390,6 +425,8 @@ fn main() -> Result<(), Error> {
     // aliases. Only the production native runner owns its private stdio channel.
     unsafe {
         native_worker::run(Arc::new(Fixture {
+            body: params["body"].as_str().map(str::to_string),
+            self_driven: params["self_driven"].as_bool().unwrap_or(false),
             profile: native_worker_profile::Profile::from_env()?,
             unblock: tokio::sync::Notify::new(),
             gain: params["gain"].as_f64().unwrap_or(3.0) as f32,

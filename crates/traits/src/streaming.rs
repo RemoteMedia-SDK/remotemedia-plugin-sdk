@@ -195,6 +195,14 @@ where
 
 // ─── Streaming-node trait declarations ──────────────────────────────
 
+/// The error of a node that reports a background body without providing one.
+pub fn missing_background(node_type: &str) -> Error {
+    Error::Execution(format!(
+        "node type '{node_type}' reports a background body (has_background) \
+         but does not override background()"
+    ))
+}
+
 /// Synchronous streaming node trait.
 ///
 /// Implement for Rust nodes that can process data without blocking the
@@ -214,6 +222,16 @@ pub trait SyncStreamingNode: Send + Sync {
 
     /// See [`StreamingNode::instance_scope`].
     fn instance_scope(&self) -> Option<InstanceScope> {
+        None
+    }
+
+    /// Whether this node is self-driven: it does not take the session's
+    /// client input (openspec: add-node-initiated-output). A self-driven node
+    /// with no upstream is not an entry point for client input; it produces
+    /// through its emitter, and the session stays open while it runs. A
+    /// manifest node's `session_input` overrides this. `None` (default)
+    /// declares nothing.
+    fn self_driven(&self) -> Option<bool> {
         None
     }
 
@@ -427,6 +445,34 @@ pub trait AsyncStreamingNode: Send + Sync {
         None
     }
 
+    /// Whether this node is self-driven: it does not take the session's
+    /// client input (openspec: add-node-initiated-output). A self-driven node
+    /// with no upstream is not an entry point for client input; it produces
+    /// through its emitter, and the session stays open while it runs. A
+    /// manifest node's `session_input` overrides this. `None` (default)
+    /// declares nothing.
+    fn self_driven(&self) -> Option<bool> {
+        None
+    }
+
+    /// Whether this node has a background body (openspec:
+    /// add-source-node-lifecycle). The runtime calls [`Self::background`]
+    /// only when this is `true`. Having a body does not make a node
+    /// self-driven.
+    fn has_background(&self) -> bool {
+        false
+    }
+
+    /// The node's background body. The runtime starts it when the session
+    /// starts and cancels it (drops the future) when the instance stops,
+    /// before the node's shutdown runs; cleanup belongs in guards. It
+    /// produces through the instance's emitter. On a self-driven node its
+    /// return means the node has finished producing; an error or a panic is
+    /// a failure of the node.
+    async fn background(&self, _ctx: &dyn NodeRuntimeContextRead) -> Result<(), Error> {
+        Err(missing_background(self.node_type()))
+    }
+
     /// May run concurrently with media and other RPCs. Host context owns identity.
     async fn call_rpc(
         &self,
@@ -620,6 +666,34 @@ pub trait StreamingNode: Send + Sync {
         None
     }
 
+    /// Whether this node is self-driven: it does not take the session's
+    /// client input (openspec: add-node-initiated-output). A self-driven node
+    /// with no upstream is not an entry point for client input; it produces
+    /// through its emitter, and the session stays open while it runs. A
+    /// manifest node's `session_input` overrides this. `None` (default)
+    /// declares nothing.
+    fn self_driven(&self) -> Option<bool> {
+        None
+    }
+
+    /// Whether this node has a background body (openspec:
+    /// add-source-node-lifecycle). The runtime calls [`Self::background`]
+    /// only when this is `true`. Having a body does not make a node
+    /// self-driven.
+    fn has_background(&self) -> bool {
+        false
+    }
+
+    /// The node's background body. The runtime starts it when the session
+    /// starts and cancels it (drops the future) when the instance stops,
+    /// before the node's shutdown runs; cleanup belongs in guards. It
+    /// produces through the instance's emitter. On a self-driven node its
+    /// return means the node has finished producing; an error or a panic is
+    /// a failure of the node.
+    async fn background(&self, _ctx: &dyn NodeRuntimeContextRead) -> Result<(), Error> {
+        Err(missing_background(self.node_type()))
+    }
+
     /// May run concurrently with media and other RPCs. Host context owns identity.
     async fn call_rpc(
         &self,
@@ -771,6 +845,9 @@ impl<T: SyncStreamingNode + 'static> StreamingNode for SyncNodeWrapper<T> {
     fn instance_scope(&self) -> Option<InstanceScope> {
         self.0.instance_scope()
     }
+    fn self_driven(&self) -> Option<bool> {
+        self.0.self_driven()
+    }
 
     async fn process_async(
         &self,
@@ -868,6 +945,15 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
     fn instance_scope(&self) -> Option<InstanceScope> {
         self.0.instance_scope()
     }
+    fn self_driven(&self) -> Option<bool> {
+        self.0.self_driven()
+    }
+    fn has_background(&self) -> bool {
+        self.0.has_background()
+    }
+    async fn background(&self, ctx: &dyn NodeRuntimeContextRead) -> Result<(), Error> {
+        self.0.background(ctx).await
+    }
 
     async fn call_rpc(
         &self,
@@ -959,6 +1045,16 @@ pub trait StreamingNodeFactory: Send + Sync {
     /// without creating one. A node instance's own declaration takes
     /// precedence; a manifest node's `instance_scope` overrides both.
     fn instance_scope(&self) -> Option<InstanceScope> {
+        None
+    }
+
+    /// Whether this node is self-driven: it does not take the session's
+    /// client input (openspec: add-node-initiated-output). A self-driven node
+    /// with no upstream is not an entry point for client input; it produces
+    /// through its emitter, and the session stays open while it runs. A
+    /// manifest node's `session_input` overrides this. `None` (default)
+    /// declares nothing.
+    fn self_driven(&self) -> Option<bool> {
         None
     }
 

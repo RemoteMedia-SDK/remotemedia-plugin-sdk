@@ -39,6 +39,27 @@ use crate::ports::TimestampedSnapshot;
 /// helpers in this module — plugin code is expected to call those rather
 /// than handle `Arc<dyn Any>` directly.
 pub trait NodeRuntimeContextRead: Send + Sync {
+    /// The participant whose input this call is processing; `None` for an
+    /// unattributed input and outside a call (ticks, RPC, a background
+    /// body). A node keeps it to attribute a later emit (openspec:
+    /// add-node-initiated-output).
+    fn origin(&self) -> Option<Arc<crate::emit::Origin>> {
+        None
+    }
+
+    /// The instance's emitter, type-erased; hosts that provide none return
+    /// `None`. Node code uses `Emitter::for_call(ctx)` instead.
+    fn emitter_any(&self) -> Option<&(dyn Any + Send + Sync)> {
+        None
+    }
+
+    /// The instance's emitter behind the shared [`crate::emit::Emit`]
+    /// operations, for adapters that do not know the host's emitter type
+    /// (a worker-process node forwarding its body's output).
+    fn emit_handle(&self) -> Option<Arc<dyn crate::emit::Emit>> {
+        None
+    }
+
     /// Request completion of this paced source after the active tick succeeds.
     /// The request does not skip remaining outputs or registered work. A failed
     /// or cancelled tick cannot commit completion. Quiet ticks are not EOS.
@@ -427,6 +448,14 @@ pub trait InitializeContextRead: Send + Sync {
     /// while initializing models or other slow resources; the frontend
     /// surfaces the messages through the `__system__` event channel.
     fn emit_progress(&self, status: &str, message: &str);
+
+    /// The node instance's output emitter, type-erased (openspec:
+    /// add-node-initiated-output). `None` when the host provides none.
+    /// Nodes use their runtime's typed accessor (the host crate's
+    /// `Emitter::of(ctx)`) instead of downcasting this themselves.
+    fn emitter_any(&self) -> Option<&(dyn Any + Send + Sync)> {
+        None
+    }
 
     /// Type-erased self handle for in-tree code that needs to downcast
     /// to the host's concrete `InitializeContext` (e.g. to grab the

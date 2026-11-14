@@ -94,6 +94,8 @@ struct NodeArgs {
     streaming: bool,
     /// Capability behavior: static, configured, passthrough, adaptive, runtime_discovered
     capabilities: Option<String>,
+    /// `source`: a self-driven node whose `background_impl` is its body.
+    source: bool,
     /// Input capability constraints DSL (e.g., "audio(sample_rate=16000, channels=1)")
     input_caps: Option<String>,
     /// Output capability constraints DSL (e.g., "audio(sample_rate=16000..48000)")
@@ -139,6 +141,7 @@ fn parse_node_args(args: &[NestedMeta]) -> Result<NodeArgs, syn::Error> {
     let mut input_caps = None;
     let mut output_caps = None;
     let mut instance_scope = None;
+    let mut source = false;
 
     for arg in args {
         match arg {
@@ -225,13 +228,25 @@ fn parse_node_args(args: &[NestedMeta]) -> Result<NodeArgs, syn::Error> {
                     multi_output = true;
                 } else if path.is_ident("streaming") {
                     streaming = true;
+                } else if path.is_ident("source") {
+                    source = true;
                 }
             }
             _ => {}
         }
     }
 
+    // A source has no upstream to take its output format from.
+    if source && output_caps.is_none() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "#[node(source)] requires `output_caps = \"...\"`: a source node declares what it puts out, \
+             for example #[node(source, output_caps = \"text\")]",
+        ));
+    }
+
     Ok(NodeArgs {
+        source,
         node_type,
         category,
         description,
@@ -645,6 +660,29 @@ fn generate_trait_impl(struct_name: &syn::Ident, args: &NodeArgs) -> proc_macro2
     let multi_output = args.multi_output;
     let streaming = args.streaming;
 
+    // `source`: the node is self-driven and its `background_impl` is the
+    // body the runtime runs (openspec: add-source-node-lifecycle).
+    let source_impl = if args.source {
+        quote! {
+            fn self_driven(&self) -> Option<bool> {
+                Some(true)
+            }
+
+            fn has_background(&self) -> bool {
+                true
+            }
+
+            async fn background(
+                &self,
+                ctx: &dyn remotemedia_traits::runtime_context::NodeRuntimeContextRead,
+            ) -> ::core::result::Result<(), remotemedia_types::Error> {
+                #struct_name::background_impl(self, ctx).await
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let instance_scope_impl = match args.instance_scope.as_deref() {
         Some("per_participant") => quote! {
             fn instance_scope(&self) -> Option<remotemedia_traits::streaming::InstanceScope> {
@@ -663,7 +701,14 @@ fn generate_trait_impl(struct_name: &syn::Ident, args: &NodeArgs) -> proc_macro2
     // For nodes with `streaming = true` (additive form), process() still maps to
     // `process_impl` — the user-provided single-output implementation — and
     // process_streaming gets a separate override below.
-    let process_impl = if multi_output {
+    let process_impl = if args.source {
+        // Input from an upstream node is passed through.
+        quote! {
+            async fn process(&self, data: remotemedia_types::RuntimeData) -> Result<remotemedia_types::RuntimeData, remotemedia_types::Error> {
+                Ok(data)
+            }
+        }
+    } else if multi_output {
         quote! {
             async fn process(&self, _data: remotemedia_types::RuntimeData) -> Result<remotemedia_types::RuntimeData, remotemedia_types::Error> {
                 Err(remotemedia_types::Error::Execution(
@@ -720,6 +765,44 @@ fn generate_trait_impl(struct_name: &syn::Ident, args: &NodeArgs) -> proc_macro2
             #streaming_impl
 
             #instance_scope_impl
+
+            #source_impl
+        }
+    }
+}
+
+/// For `#[node(source, ...)]`: a factory to register the node in a registry.
+/// It declares the node self-driven with the capabilities of `output_caps`.
+fn generate_source_factory(struct_name: &syn::Ident, args: &NodeArgs) -> proc_macro2::TokenStream {
+    if !args.source {
+        return quote! {};
+    }
+    let node_type = args.node_type.clone().unwrap_or_else(|| {
+        let name = struct_name.to_string();
+        name.strip_suffix("Node").unwrap_or(&name).to_string()
+    });
+    let behavior = parse_capability_behavior(args.capabilities.as_deref().unwrap_or("static"));
+    quote! {
+        impl #struct_name {
+            /// A factory for this source node: self-driven, with the output
+            /// capabilities the node declares.
+            pub fn source_factory() -> ::std::sync::Arc<dyn remotemedia_traits::streaming::StreamingNodeFactory> {
+                ::std::sync::Arc::new(
+                    remotemedia_traits::source::SourceFactory::with_capabilities(
+                        #node_type,
+                        Self::media_capabilities_static(),
+                        |params: &::serde_json::Value| {
+                            let params = if params.is_null() {
+                                ::serde_json::Value::Object(Default::default())
+                            } else {
+                                params.clone()
+                            };
+                            Self::new_from_params(params).map_err(remotemedia_types::Error::ConfigError)
+                        },
+                    )
+                    .behavior(#behavior),
+                )
+            }
         }
     }
 }
@@ -1176,6 +1259,26 @@ fn generate_loadable_export(struct_name: &syn::Ident, args: &NodeArgs) -> proc_m
         name.strip_suffix("Node").unwrap_or(&name).to_string()
     });
 
+    // A source declares itself to the host before a node exists.
+    let describe_impl = if args.source {
+        let behavior = parse_capability_behavior(args.capabilities.as_deref().unwrap_or("static"));
+        quote! {
+            fn describe(&self, _params: RString) -> RResult<RString, RString> {
+                ROk(RString::from(
+                    ::remotemedia_traits::NodeDescription {
+                        self_driven: Some(true),
+                        capability_behavior: Some(#behavior),
+                        media_capabilities: Some(#struct_name::media_capabilities_static()),
+                        ..Default::default()
+                    }
+                    .to_json(),
+                ))
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     quote! {
         #[cfg(feature = "loadable-export")]
         const _: () = {
@@ -1210,6 +1313,8 @@ fn generate_loadable_export(struct_name: &syn::Ident, args: &NodeArgs) -> proc_m
                         TD_Opaque,
                     ))
                 }
+
+                #describe_impl
             }
 
             fn #make_fn_name() -> FfiNodeFactoryBox {
@@ -1398,6 +1503,7 @@ pub fn node(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate capability-related implementations (spec 023)
     let capability_behavior_impl = generate_capability_behavior_impl(struct_name, &args);
     let media_capabilities_impl = generate_media_capabilities_impl(struct_name, &args);
+    let source_factory = generate_source_factory(struct_name, &args);
 
     // Generate FFI plumbing under the consuming crate's
     // `loadable-export` cargo feature (Phase B / Task B2). Always emit
@@ -1413,6 +1519,7 @@ pub fn node(attr: TokenStream, item: TokenStream) -> TokenStream {
         #inventory_reg
         #capability_behavior_impl
         #media_capabilities_impl
+        #source_factory
         #loadable_export
     };
 
@@ -1679,5 +1786,46 @@ fn parse_runtime_data_types(types: &Option<String>) -> proc_macro2::TokenStream 
             quote! { #(#types),* }
         }
         _ => quote! {},
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+
+    fn args(tokens: proc_macro2::TokenStream) -> Result<NodeArgs, syn::Error> {
+        let parsed: syn::punctuated::Punctuated<NestedMeta, syn::Token![,]> =
+            syn::parse::Parser::parse2(syn::punctuated::Punctuated::parse_terminated, tokens).unwrap();
+        parse_node_args(&parsed.into_iter().collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn a_source_without_output_caps_is_a_compile_error_that_names_them() {
+        let error = args(quote! { source }).err().expect("an error");
+        assert!(error.to_string().contains("output_caps"), "{error}");
+        let error = args(quote! { source, node_type = "Clock" }).err().expect("an error");
+        assert!(error.to_string().contains("output_caps"), "{error}");
+    }
+
+    #[test]
+    fn a_source_with_output_caps_is_accepted() {
+        let parsed = args(quote! { source, output_caps = "text" }).unwrap();
+        assert!(parsed.source);
+        assert!(!args(quote! { output_caps = "text" }).unwrap().source);
+    }
+
+    #[test]
+    fn a_source_gets_a_body_a_factory_and_a_declaration() {
+        let name = syn::Ident::new("ClockNode", proc_macro2::Span::call_site());
+        let parsed = args(quote! { source, output_caps = "text" }).unwrap();
+        let node = generate_trait_impl(&name, &parsed).to_string();
+        assert!(node.contains("has_background") && node.contains("background_impl"), "{node}");
+        assert!(node.contains("self_driven"), "{node}");
+        assert!(generate_source_factory(&name, &parsed).to_string().contains("source_factory"));
+        assert!(generate_loadable_export(&name, &parsed).to_string().contains("describe"));
+        // An ordinary node gets none of it.
+        let plain = args(quote! { output_caps = "text" }).unwrap();
+        assert!(!generate_trait_impl(&name, &plain).to_string().contains("has_background"));
+        assert!(generate_source_factory(&name, &plain).is_empty());
     }
 }

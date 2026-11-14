@@ -11,6 +11,12 @@ pub const SNAPSHOT_OUTPUT_PROTOCOL: u16 = 2;
 pub const OUTPUT_COPY_PROTOCOL: u16 = 1;
 /// Explicit finite-source completion after a successful, drained tick.
 pub const SOURCE_COMPLETION_PROTOCOL: u16 = 1;
+/// A long-lived [`CallKind::Background`] call that runs a node's background
+/// body (openspec: add-source-node-lifecycle). The host opens it when the
+/// node instance starts; its outputs belong to no input; it completes when
+/// the body returns, an error completion is a failure of the node, and the
+/// per-call cancel stops it. It takes one slot of the call budget.
+pub const BACKGROUND_PROTOCOL: u16 = 1;
 fn false_flag(value: &bool) -> bool {
     !value
 }
@@ -38,6 +44,9 @@ pub enum CallKind {
     Control,
     Rpc,
     Snapshot,
+    /// Negotiated with [`BACKGROUND_PROTOCOL`]; a worker only advertises it
+    /// to a host that asked for that protocol.
+    Background,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +117,8 @@ pub enum HostMessage {
         output_copy_protocol: u16,
         #[serde(default, skip_serializing_if = "absent_protocol")]
         source_completion_protocol: u16,
+        #[serde(default, skip_serializing_if = "absent_protocol")]
+        background_protocol: u16,
     },
     Begin {
         call: u64,
@@ -164,6 +175,8 @@ pub enum WorkerMessage {
         output_copy_protocol: u16,
         #[serde(default, skip_serializing_if = "absent_protocol")]
         source_completion_protocol: u16,
+        #[serde(default, skip_serializing_if = "absent_protocol")]
+        background_protocol: u16,
     },
     InputAccepted {
         lease: u64,

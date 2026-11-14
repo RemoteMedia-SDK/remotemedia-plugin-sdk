@@ -140,6 +140,49 @@ impl NativeWorkerNode {
         }
     }
 
+    /// Spawn a worker and negotiate background calls (openspec:
+    /// add-source-node-lifecycle): a worker node with a body runs it in one
+    /// long-lived call, and reports whether it is self-driven. A worker that
+    /// predates the protocol rejects the handshake.
+    ///
+    /// # Safety
+    /// The complete executable ownership contract of [`Self::spawn`] applies.
+    pub unsafe fn spawn_with_background(
+        command: &mut Command,
+        pool: SharedPool,
+        identity: CallContext,
+        limits: Limits,
+        startup_timeout: Duration,
+    ) -> Result<Self, Error> {
+        let copies = input_copy_context(None, &identity)?;
+        let process = remotemedia_shared_memory::channel::WorkerProcess::spawn_with_resources(
+            command,
+            Default::default(),
+        )
+        .map_err(transport_error)?;
+        // SAFETY: the caller supplies the worker executable's ownership contract.
+        let peer = unsafe {
+            PeerConnection::from_process_with_protocols(
+                process,
+                pool,
+                limits,
+                remotemedia_shared_memory::peer::Protocols {
+                    background: true,
+                    ..Default::default()
+                },
+            )
+        }
+        .map_err(transport_error)?;
+        Self::from_peer(
+            peer,
+            identity,
+            limits,
+            startup_timeout,
+            copies,
+            SnapshotMode::Disabled,
+        )
+    }
+
     unsafe fn spawn_protocol(
         command: &mut Command,
         pool: SharedPool,
@@ -339,6 +382,34 @@ impl AsyncStreamingNode for NativeWorkerNode {
     }
     fn rpc_methods(&self) -> Vec<RpcMethod> {
         self.description.rpc_methods.clone()
+    }
+    fn self_driven(&self) -> Option<bool> {
+        self.description.self_driven
+    }
+    fn has_background(&self) -> bool {
+        self.description.background
+    }
+    /// The worker node's body: one long-lived call. Its outputs belong to no
+    /// input and go to the instance's emitter; it completes when the body
+    /// returns, and an error completion is a failure of the node. Dropping
+    /// this future cancels the call.
+    async fn background(&self, ctx: &dyn NodeRuntimeContextRead) -> Result<(), Error> {
+        self.validate_identity(ctx.session_id(), ctx.node_id())?;
+        let emitter = ctx.emit_handle().ok_or_else(|| {
+            Error::Execution("this host provides no emitter for a worker node's body".into())
+        })?;
+        let mut call = self
+            .begin(
+                CallKind::Background,
+                serde_json::Value::Null,
+                vec![],
+                call_resources(ctx),
+            )
+            .await?;
+        while let Some(output) = call.next().await? {
+            emitter.emit(output.into_data()).await?;
+        }
+        Ok(())
     }
     async fn initialize(&self, ctx: &dyn InitializeContextRead) -> Result<(), Error> {
         self.validate_identity(ctx.session_id(), ctx.node_id())?;
@@ -641,8 +712,12 @@ fn negotiate_description(
             _ => return Err(Error::Execution("invalid node description sequence".into())),
         }
     }
-    let description =
+    let mut description =
         description.ok_or_else(|| Error::Execution("missing node description".into()))?;
+    // No background call on a worker that did not announce the operation.
+    if !modes.contains(&CallKind::Background) {
+        description.background = false;
+    }
     validate_description(&description)?;
     Ok(description)
 }

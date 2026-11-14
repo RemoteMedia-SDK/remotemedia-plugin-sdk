@@ -85,10 +85,12 @@
 
 pub mod buffer_contract;
 pub mod capabilities;
+pub mod emit;
 pub mod llm;
 pub mod ports;
 pub mod runtime_context;
 pub mod schema;
+pub mod source;
 pub mod streaming;
 pub mod stt;
 
@@ -97,6 +99,8 @@ pub use capabilities::{
     ConstraintValue, FileConstraints, JsonConstraints, MediaCapabilities, MediaConstraints,
     PixelFormat, TensorConstraints, TensorDataType, TextConstraints, VideoConstraints,
 };
+
+pub use emit::{Emit, EmitOrigin, NodeDescription, Origin, TryEmitError};
 
 pub use llm::{InterruptableBackend, StatefulConversationBackend, VoiceActivityDetectorBackend};
 
@@ -109,6 +113,8 @@ pub use schema::{
     NodeCapabilitiesSchema, NodeConfigSchema, NodeModelSourceFile, NodeModelSources, NodeParameter,
     NodeSchema, NodeSchemaRegistry, ParameterType, RegisteredNodeConfig, RuntimeDataType,
 };
+
+pub use source::{source_factory, SourceFactory, SourceNode, SourceNodeWrapper};
 
 pub use streaming::{
     AnySessionState, AsyncNodeWrapper, AsyncStreamingNode, InstanceScope, NodeStatus, PacingNature,

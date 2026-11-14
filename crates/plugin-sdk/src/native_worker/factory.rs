@@ -14,6 +14,7 @@ pub struct NativeWorkerFactory {
     input_copies: Option<WorkerInputCopies>,
     output_copies: bool,
     source_completion: bool,
+    background: bool,
     limits: Limits,
     startup_timeout: Duration,
     snapshot_inputs: Vec<String>,
@@ -35,6 +36,7 @@ impl NativeWorkerFactory {
             input_copies: None,
             output_copies: false,
             source_completion: false,
+            background: false,
             limits: Limits::default(),
             startup_timeout: Duration::from_secs(10),
             snapshot_inputs: vec![],
@@ -57,6 +59,7 @@ impl NativeWorkerFactory {
             input_copies: None,
             output_copies: false,
             source_completion: false,
+            background: false,
             limits: Limits::default(),
             startup_timeout: Duration::from_secs(10),
             snapshot_inputs: vec![],
@@ -82,6 +85,16 @@ impl NativeWorkerFactory {
     /// source completion is applied only through an active host tick context.
     pub fn with_source_completion(mut self) -> Self {
         self.source_completion = true;
+        self
+    }
+
+    /// Negotiate background calls (openspec: add-source-node-lifecycle): a
+    /// worker node with a background body runs it in one long-lived call,
+    /// and reports whether it is self-driven. Workers that predate the
+    /// protocol reject the handshake, so enable it only for a worker
+    /// declared to support it.
+    pub fn with_background(mut self) -> Self {
+        self.background = true;
         self
     }
 
@@ -271,6 +284,7 @@ impl StreamingNodeFactory for NativeWorkerFactory {
                     snapshots: mode.protocol(),
                     output_copies: self.output_copies,
                     source_completion: self.source_completion,
+                    background: self.background,
                 },
             )
         }
