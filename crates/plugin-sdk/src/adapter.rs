@@ -386,18 +386,23 @@ where
         };
         // Instance-level declarations ride in this JSON, so a node reports
         // what only an instance knows without an ABI change.
-        let generator = self
-            .inner
-            .generator()
-            .map(|role| role.declaration())
-            .unwrap_or_default();
+        let role = self.inner.generator();
+        let generator = role.map(|role| role.declaration()).unwrap_or_default();
+        // Declared up front so the host can apply `pending_input` to its own
+        // queue for this node (openspec: add-generator-cancellation).
+        let default_dispositions = role.map(|role| {
+            remotemedia_traits::default_dispositions(|ctx| {
+                role.cancellable().default_disposition(ctx)
+            })
+        });
         serde_json::json!({"nature":nature, "rate_hz":rate,
             "clocked_media_addr":self.inner.clocked_media_addr(),
             "instance_scope":self.inner.instance_scope().map(|scope| scope.as_str()),
             "self_driven":self.inner.self_driven(),
             "background":self.inner.has_background(),
             "generates":generator.generates,
-            "cancel":generator.cancel})
+            "cancel":generator.cancel,
+            "default_dispositions":default_dispositions})
         .to_string()
         .into()
     }

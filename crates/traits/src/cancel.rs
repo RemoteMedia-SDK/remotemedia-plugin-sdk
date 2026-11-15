@@ -27,7 +27,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Why a call was cancelled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CancelReason {
     /// A `barge_in` (speech over the reply, an interrupt control).
@@ -209,6 +211,79 @@ impl Cancellation {
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(json)
     }
+}
+
+/// A cancellation as it crosses a boundary to a node in another library or
+/// process (`FfiNode::cancel_call`, a worker's cancel frame). `cancellation`
+/// is the host's resolution; `explicit` is what the canceller and manifest
+/// chose, so the node can re-resolve with its own default for this cancel
+/// (which may depend on `elapsed_ms`, e.g. an early-interrupt rollback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CancelRequest {
+    pub cancellation: Cancellation,
+    #[serde(default, skip_serializing_if = "DispositionOverride::is_empty")]
+    pub explicit: DispositionOverride,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+}
+
+impl CancelRequest {
+    pub fn new(cancellation: Cancellation) -> Self {
+        CancelRequest {
+            cancellation,
+            explicit: DispositionOverride::default(),
+            elapsed_ms: None,
+        }
+    }
+
+    pub fn context(&self) -> CancelContext {
+        CancelContext {
+            reason: self.cancellation.reason,
+            elapsed: self.elapsed_ms.map(Duration::from_millis),
+        }
+    }
+
+    /// The cancellation with the node's own default under the explicit
+    /// choices.
+    pub fn resolve_with(&self, node_default: Disposition) -> Cancellation {
+        Cancellation::with_disposition(self.cancellation.reason, node_default.with(self.explicit))
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).expect("CancelRequest serializes")
+    }
+
+    /// A request whose disposition is final: the node's default does not
+    /// apply.
+    pub fn exact(cancellation: Cancellation) -> Self {
+        CancelRequest {
+            cancellation,
+            explicit: cancellation.disposition.into(),
+            elapsed_ms: None,
+        }
+    }
+
+    /// Accepts a `CancelRequest`, or a bare `Cancellation`, which is taken
+    /// as [`CancelRequest::exact`].
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str::<CancelRequest>(json)
+            .or_else(|_| Cancellation::from_json(json).map(CancelRequest::exact))
+    }
+}
+
+/// A node's default disposition for each reason, declared up front so a host
+/// can apply `pending_input` to its own queues for a node in another library
+/// or process (plugin `pacing()` JSON, a Python node's discovery frame).
+pub type DefaultDispositions = std::collections::BTreeMap<CancelReason, Disposition>;
+
+/// Evaluate a node's `default_disposition` for every reason (no elapsed time).
+pub fn default_dispositions(
+    default_for: impl Fn(&CancelContext) -> Disposition,
+) -> DefaultDispositions {
+    CancelReason::ALL
+        .into_iter()
+        .map(|reason| (reason, default_for(&CancelContext::new(reason))))
+        .collect()
 }
 
 // ─── Token ──────────────────────────────────────────────────────────────
@@ -566,6 +641,41 @@ mod tests {
             serde_json::from_str(r#"{"pending_input":"discard"}"#).unwrap();
         assert_eq!(over.pending_input, Some(Retention::Discard));
         assert_eq!(over.partial_output, None);
+    }
+
+    #[test]
+    fn cancel_request_reresolves_with_node_default() {
+        let req = CancelRequest {
+            cancellation: Cancellation::new(CancelReason::BargeIn),
+            explicit: DispositionOverride {
+                partial_output: Some(Retention::Retain),
+                ..Default::default()
+            },
+            elapsed_ms: Some(120),
+        };
+        let json = req.to_json();
+        assert_eq!(CancelRequest::from_json(&json).unwrap(), req);
+        // A node whose default discards both keeps the explicit partial_output.
+        let c = req.resolve_with(Disposition::ABORT);
+        assert_eq!(c.disposition.partial_output, Retention::Retain);
+        assert_eq!(c.disposition.pending_input, Retention::Discard);
+        assert_eq!(req.context().elapsed, Some(Duration::from_millis(120)));
+        // A bare Cancellation is accepted, and is final.
+        let bare = Cancellation::new(CancelReason::Shutdown);
+        let parsed = CancelRequest::from_json(&bare.to_json()).unwrap();
+        assert_eq!(parsed, CancelRequest::exact(bare));
+        assert_eq!(parsed.resolve_with(Disposition::INTERRUPT), bare);
+    }
+
+    #[test]
+    fn default_dispositions_cover_every_reason() {
+        let map = default_dispositions(|ctx| ctx.reason.default_disposition());
+        assert_eq!(map.len(), CancelReason::ALL.len());
+        let json = serde_json::to_string(&map).unwrap();
+        assert!(
+            json.contains(r#""barge_in":{"partial_output":"retain","pending_input":"retain"}"#),
+            "{json}"
+        );
     }
 
     #[test]

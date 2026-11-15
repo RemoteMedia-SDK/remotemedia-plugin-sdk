@@ -103,8 +103,9 @@ pub use capabilities::{
 };
 
 pub use cancel::{
-    resolve_disposition, CancelContext, CancelReason, CancelRegistration, CancelSource,
-    CancelToken, Cancellation, Cancelled, Disposition, DispositionOverride, Retention,
+    default_dispositions, resolve_disposition, CancelContext, CancelReason, CancelRegistration,
+    CancelRequest, CancelSource, CancelToken, Cancellation, Cancelled, DefaultDispositions,
+    Disposition, DispositionOverride, Retention,
 };
 
 pub use emit::{Emit, EmitOrigin, NodeDescription, Origin, TryEmitError};

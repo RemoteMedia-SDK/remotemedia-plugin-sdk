@@ -308,6 +308,8 @@ pub fn cancellation_contract_schema() -> serde_json::Value {
         cancel_strategy: CancelStrategy,
         cancel_reason: crate::cancel::CancelReason,
         retention: crate::cancel::Retention,
+        cancel_request: crate::cancel::CancelRequest,
+        default_dispositions: crate::cancel::DefaultDispositions,
     }
     serde_json::to_value(schemars::schema_for!(CancellationContract)).expect("schema serializes")
 }

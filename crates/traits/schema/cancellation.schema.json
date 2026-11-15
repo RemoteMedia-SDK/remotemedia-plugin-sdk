@@ -55,6 +55,29 @@
         }
       ]
     },
+    "CancelRequest": {
+      "description": "A cancellation as it crosses a boundary to a node in another library or process (`FfiNode::cancel_call`, a worker's cancel frame). `cancellation` is the host's resolution; `explicit` is what the canceller and manifest chose, so the node can re-resolve with its own default for this cancel (which may depend on `elapsed_ms`, e.g. an early-interrupt rollback).",
+      "properties": {
+        "cancellation": {
+          "$ref": "#/definitions/Cancellation"
+        },
+        "elapsed_ms": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "explicit": {
+          "$ref": "#/definitions/DispositionOverride"
+        }
+      },
+      "required": [
+        "cancellation"
+      ],
+      "type": "object"
+    },
     "CancelStrategy": {
       "description": "How a generator stops a cancelled call.",
       "oneOf": [
@@ -208,11 +231,20 @@
     "cancel_reason": {
       "$ref": "#/definitions/CancelReason"
     },
+    "cancel_request": {
+      "$ref": "#/definitions/CancelRequest"
+    },
     "cancel_strategy": {
       "$ref": "#/definitions/CancelStrategy"
     },
     "cancellation": {
       "$ref": "#/definitions/Cancellation"
+    },
+    "default_dispositions": {
+      "additionalProperties": {
+        "$ref": "#/definitions/Disposition"
+      },
+      "type": "object"
     },
     "disposition_override": {
       "$ref": "#/definitions/DispositionOverride"
@@ -229,8 +261,10 @@
   },
   "required": [
     "cancel_reason",
+    "cancel_request",
     "cancel_strategy",
     "cancellation",
+    "default_dispositions",
     "disposition_override",
     "generated_modality",
     "generator_declaration",

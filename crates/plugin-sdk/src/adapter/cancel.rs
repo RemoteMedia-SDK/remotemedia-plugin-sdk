@@ -14,13 +14,15 @@ use std::sync::{Arc, Mutex};
 
 use remotemedia_traits::rpc::CallContext;
 use remotemedia_traits::streaming::AsyncStreamingNode;
-use remotemedia_traits::{CancelReason, CancelSource, CancelToken, Cancellation};
+use remotemedia_traits::{CancelReason, CancelRequest, CancelSource, CancelToken, Cancellation};
 
 use super::plugin_runtime;
 
-/// One call's cancellation: its source, and what to run when it first fires.
+/// One call's cancellation: its source, how the node re-resolves a host
+/// request, and what to run when it first fires.
 pub(crate) struct CallCancel {
     source: CancelSource,
+    resolve: Box<dyn Fn(&CancelRequest) -> Cancellation + Send + Sync>,
     on_first: Box<dyn Fn(Cancellation) + Send + Sync>,
 }
 
@@ -34,6 +36,12 @@ impl CallCancel {
         if self.source.cancel(cancellation) {
             (self.on_first)(cancellation);
         }
+    }
+
+    /// Fire a host request, re-resolved with the node's own default under
+    /// the canceller's and manifest's explicit choices.
+    pub(crate) fn fire_request(&self, request: &CancelRequest) {
+        self.fire((self.resolve)(request));
     }
 }
 
@@ -52,8 +60,15 @@ impl InFlight {
         N: AsyncStreamingNode + Send + Sync + 'static,
     {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let resolver = node.clone();
         let call = Arc::new(CallCancel {
             source: CancelSource::new(),
+            resolve: Box::new(move |request| match resolver.generator() {
+                Some(role) => {
+                    request.resolve_with(role.cancellable().default_disposition(&request.context()))
+                }
+                None => request.cancellation,
+            }),
             on_first: Box::new(move |cancellation| run_on_cancel(&node, &identity, cancellation)),
         });
         *self.slot.lock().unwrap_or_else(|e| e.into_inner()) = Some((id, call.clone()));
@@ -65,10 +80,12 @@ impl InFlight {
         }
     }
 
-    /// `FfiNode::cancel_call`: fire the in-flight call, if any.
+    /// `FfiNode::cancel_call`: fire the in-flight call, if any. Accepts a
+    /// `CancelRequest` or a bare `Cancellation`.
     pub(crate) fn cancel(&self, cancellation_json: &str) {
-        let cancellation = Cancellation::from_json(cancellation_json)
-            .unwrap_or_else(|_| Cancellation::new(CancelReason::CallerCancelled));
+        let request = CancelRequest::from_json(cancellation_json).unwrap_or_else(|_| {
+            CancelRequest::new(Cancellation::new(CancelReason::CallerCancelled))
+        });
         let call = self
             .slot
             .lock()
@@ -76,7 +93,7 @@ impl InFlight {
             .as_ref()
             .map(|(_, call)| call.clone());
         if let Some(call) = call {
-            call.fire(cancellation);
+            call.fire_request(&request);
         }
     }
 }
@@ -203,6 +220,54 @@ mod tests {
         assert_eq!(token.cancellation(), Some(host));
         drop(guard);
         assert_eq!(seen(&node), vec![host]);
+    }
+
+    #[test]
+    fn node_default_applies_under_explicit_choices() {
+        // A TTS-like generator: discards pending input by default.
+        struct Tts;
+        #[async_trait::async_trait]
+        impl Cancellable for Tts {
+            fn cancel_strategy(&self) -> CancelStrategy {
+                CancelStrategy::ObservesToken
+            }
+            fn default_disposition(&self, _: &remotemedia_traits::CancelContext) -> Disposition {
+                Disposition {
+                    pending_input: Retention::Discard,
+                    ..Disposition::INTERRUPT
+                }
+            }
+        }
+        impl remotemedia_traits::AudioGenerator for Tts {}
+        #[async_trait::async_trait]
+        impl AsyncStreamingNode for Tts {
+            fn node_type(&self) -> &str {
+                "Tts"
+            }
+            fn generator(&self) -> Option<GeneratorRole<'_>> {
+                GeneratorRole::audio(self)
+            }
+            async fn process(&self, data: RuntimeData) -> Result<RuntimeData, Error> {
+                Ok(data)
+            }
+        }
+        let inflight = Arc::new(InFlight::default());
+        let guard = inflight.begin(Arc::new(Tts), CallContext::default());
+        let token = guard.token();
+        let request = CancelRequest {
+            cancellation: Cancellation::new(CancelReason::BargeIn),
+            explicit: remotemedia_traits::DispositionOverride {
+                partial_output: Some(Retention::Discard),
+                ..Default::default()
+            },
+            elapsed_ms: None,
+        };
+        inflight.cancel(&request.to_json());
+        assert_eq!(
+            token.cancellation().unwrap().disposition,
+            Disposition::ABORT
+        );
+        guard.complete();
     }
 
     #[test]
