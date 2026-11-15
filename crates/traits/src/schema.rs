@@ -480,6 +480,15 @@ pub trait NodeConfigSchema: schemars::JsonSchema + serde::Serialize + Default + 
         false
     }
 
+    /// The generator role declared by `#[node(generates, cancel)]`
+    /// (openspec: add-generator-cancellation).
+    fn generator() -> Option<(
+        crate::generator::GeneratedModality,
+        crate::generator::CancelStrategy,
+    )> {
+        None
+    }
+
     /// Generate JSON Schema from the type
     fn config_json_schema() -> serde_json::Value;
 
@@ -514,6 +523,10 @@ pub trait NodeConfigSchema: schemars::JsonSchema + serde::Serialize + Default + 
 
         if Self::multi_output() {
             schema = schema.multi_output();
+        }
+
+        if let Some((generates, cancel)) = Self::generator() {
+            schema = schema.generator(generates, cancel);
         }
 
         schema.config_schema = Some(Self::config_json_schema());

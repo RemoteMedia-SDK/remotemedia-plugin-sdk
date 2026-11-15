@@ -18,6 +18,7 @@ use remotemedia_traits::runtime_context::InitializeContextRead;
 use remotemedia_traits::streaming::{AsyncStreamingNode, PacingNature, Tick};
 use remotemedia_types::RuntimeData;
 use tokio::runtime::Runtime;
+mod cancel;
 mod shared;
 
 /// Tiny stand-in for the host's `InitializeContext`. Used to satisfy
@@ -65,6 +66,7 @@ pub(crate) struct PluginCallCtx {
     identity: CallContext,
     origin: Option<Arc<crate::Origin>>,
     emitter: Option<crate::Emitter>,
+    cancel: remotemedia_traits::CancelToken,
 }
 
 impl PluginCallCtx {
@@ -73,11 +75,21 @@ impl PluginCallCtx {
             origin: ffi_origin(&context),
             identity: call_context(context),
             emitter,
+            cancel: remotemedia_traits::CancelToken::never(),
         }
+    }
+
+    /// The call's cancellation token.
+    pub(crate) fn with_cancel(mut self, cancel: remotemedia_traits::CancelToken) -> Self {
+        self.cancel = cancel;
+        self
     }
 }
 
 impl remotemedia_traits::NodeRuntimeContextRead for PluginCallCtx {
+    fn cancel_token(&self) -> remotemedia_traits::CancelToken {
+        self.cancel.clone()
+    }
     fn origin(&self) -> Option<Arc<crate::Origin>> {
         self.origin.clone()
     }
@@ -170,6 +182,9 @@ pub struct StreamingNodeFfiAdapter<N> {
     node_type: String,
     /// Bound by the host before `initialize`; read through `Emitter::of`.
     emitter: std::sync::OnceLock<crate::Emitter>,
+    /// The media call in flight, for `cancel_call` (openspec:
+    /// add-generator-cancellation).
+    inflight: Arc<cancel::InFlight>,
 }
 
 impl<N> StreamingNodeFfiAdapter<N>
@@ -185,7 +200,15 @@ where
             inner: Arc::new(node),
             node_type,
             emitter: std::sync::OnceLock::new(),
+            inflight: Arc::default(),
         }
+    }
+
+    /// Register a media call before its future is returned, so a
+    /// `cancel_call` that follows immediately finds it.
+    fn begin_call(&self, identity: &FfiCallContext) -> cancel::CallGuard {
+        self.inflight
+            .begin(self.inner.clone(), call_context(identity.clone()))
     }
 }
 
@@ -216,9 +239,13 @@ where
     ) -> FfiFuture<RResult<FfiMessage, RString>> {
         let inner = self.inner.clone();
         let emitter = self.emitter.get().cloned();
-        shared::run(async move {
+        let guard = self.begin_call(&context.identity);
+        let cancel = guard.token();
+        shared::run_call(guard, async move {
             let input = shared::decode(input)?;
-            let context = shared::Context::try_from(context)?.with_emitter(emitter);
+            let context = shared::Context::try_from(context)?
+                .with_emitter(emitter)
+                .with_cancel(cancel);
             shared::encode(inner.process_with_ctx(input, &context).await?)
         })
     }
@@ -230,7 +257,9 @@ where
     ) -> FfiFuture<RResult<FfiMessage, RString>> {
         let inner = self.inner.clone();
         let emitter = self.emitter.get().cloned();
-        shared::run(async move {
+        let guard = self.begin_call(&context.identity);
+        let cancel = guard.token();
+        shared::run_call(guard, async move {
             let mut decoded = std::collections::HashMap::new();
             for input in inputs {
                 if decoded
@@ -242,7 +271,9 @@ where
                     ));
                 }
             }
-            let context = shared::Context::try_from(context)?.with_emitter(emitter);
+            let context = shared::Context::try_from(context)?
+                .with_emitter(emitter)
+                .with_cancel(cancel);
             shared::encode(inner.process_multi_with_ctx(decoded, &context).await?)
         })
     }
@@ -254,9 +285,13 @@ where
     ) -> FfiFuture<RResult<RVec<FfiMessage>, RString>> {
         let inner = self.inner.clone();
         let emitter = self.emitter.get().cloned();
-        shared::run(async move {
+        let guard = self.begin_call(&context.identity);
+        let cancel = guard.token();
+        shared::run_call(guard, async move {
             let input = shared::decode(input)?;
-            let context = shared::Context::try_from(context)?.with_emitter(emitter);
+            let context = shared::Context::try_from(context)?
+                .with_emitter(emitter)
+                .with_cancel(cancel);
             let mut outputs = Vec::new();
             inner
                 .process_streaming_with_ctx(input, &context, |data| {
@@ -276,11 +311,18 @@ where
     ) -> FfiFuture<RResult<usize, RString>> {
         let inner = self.inner.clone();
         let emitter = self.emitter.get().cloned();
-        shared::run(async move {
+        let guard = self.begin_call(&context.identity);
+        let cancel = guard.token();
+        let call = guard.handle();
+        shared::run_call(guard, async move {
             let input = shared::decode(input)?;
-            let context = shared::Context::try_from(context)?.with_emitter(emitter);
+            let context = shared::Context::try_from(context)?
+                .with_emitter(emitter)
+                .with_cancel(cancel);
             inner
-                .process_streaming_with_ctx(input, &context, move |data| shared::push(&sink, data))
+                .process_streaming_with_ctx(input, &context, move |data| {
+                    shared::push(&sink, data).inspect_err(|_| receiver_gone(&call))
+                })
                 .await
         })
     }
@@ -344,11 +386,18 @@ where
         };
         // Instance-level declarations ride in this JSON, so a node reports
         // what only an instance knows without an ABI change.
+        let generator = self
+            .inner
+            .generator()
+            .map(|role| role.declaration())
+            .unwrap_or_default();
         serde_json::json!({"nature":nature, "rate_hz":rate,
             "clocked_media_addr":self.inner.clocked_media_addr(),
             "instance_scope":self.inner.instance_scope().map(|scope| scope.as_str()),
             "self_driven":self.inner.self_driven(),
-            "background":self.inner.has_background()})
+            "background":self.inner.has_background(),
+            "generates":generator.generates,
+            "cancel":generator.cancel})
         .to_string()
         .into()
     }
@@ -412,8 +461,13 @@ where
         .into_ffi()
     }
 
+    fn cancel_call(&self, _context: FfiCallContext, cancellation: RString) {
+        self.inflight.cancel(cancellation.as_str());
+    }
+
     fn process(&self, input: RVec<u8>) -> FfiFuture<RResult<RVec<u8>, RString>> {
         let inner = Arc::clone(&self.inner);
+        let guard = self.begin_call(&FfiCallContext::default());
         async move {
             let data: RuntimeData = match rmp_serde::from_slice(input.as_slice()) {
                 Ok(d) => d,
@@ -436,9 +490,11 @@ where
             let result = match join.await {
                 Ok(r) => r,
                 Err(e) => {
+                    guard.complete();
                     return RErr(RString::from(format!("plugin task panicked: {e}")));
                 }
             };
+            guard.complete();
             match result {
                 Ok(out) => match rmp_serde::to_vec_named(&out) {
                     Ok(bytes) => ROk(RVec::from(bytes)),
@@ -516,6 +572,7 @@ where
     /// a future enhancement if/when a node produces large bursts.
     fn process_multi(&self, input: RVec<u8>) -> FfiFuture<RResult<RVec<RVec<u8>>, RString>> {
         let inner = Arc::clone(&self.inner);
+        let guard = self.begin_call(&FfiCallContext::default());
         async move {
             let data: RuntimeData = match rmp_serde::from_slice(input.as_slice()) {
                 Ok(d) => d,
@@ -542,7 +599,9 @@ where
                 inner.process_streaming(data, None, cb).await
             }));
 
-            match join.await {
+            let joined = join.await;
+            guard.complete();
+            match joined {
                 Ok(Ok(_count)) => {
                     let collected = outputs
                         .lock()
@@ -583,21 +642,29 @@ where
     ) -> FfiFuture<RResult<usize, RString>> {
         let inner = Arc::clone(&self.inner);
         let emitter = self.emitter.get().cloned();
+        let guard = self.begin_call(&context);
+        let cancel = guard.token();
+        let call = guard.handle();
         async move {
             let data = match rmp_serde::from_slice(input.as_slice()) {
                 Ok(data) => data,
-                Err(e) => return RErr(format!("rmp decode: {e}").into()),
+                Err(e) => {
+                    guard.complete();
+                    return RErr(format!("rmp decode: {e}").into());
+                }
             };
             let join = plugin_runtime().spawn(async move {
-                let context = PluginCallCtx::new(context, emitter);
+                let context = PluginCallCtx::new(context, emitter).with_cancel(cancel);
                 inner
                     .process_streaming_with_ctx(data, &context, move |data| {
-                        push_output(&sink, data)
+                        push_output(&sink, data).inspect_err(|_| receiver_gone(&call))
                     })
                     .await
             });
             let _abort = AbortOnDrop(join.abort_handle());
-            match join.await {
+            let joined = join.await;
+            guard.complete();
+            match joined {
                 Ok(Ok(count)) => ROk(count),
                 Ok(Err(e)) => RErr(e.to_string().into()),
                 Err(e) => RErr(format!("plugin task panicked: {e}").into()),
@@ -621,7 +688,10 @@ where
         shared::rpc(
             self.inner.clone(),
             request,
-            Ok(Box::new(PluginCallCtx::new(context, self.emitter.get().cloned()))),
+            Ok(Box::new(PluginCallCtx::new(
+                context,
+                self.emitter.get().cloned(),
+            ))),
             sink,
         )
     }
@@ -634,10 +704,19 @@ where
     ) -> FfiFuture<RResult<(), RString>> {
         let emitter = self.emitter.get().cloned();
         let context = shared::Context::try_from(context).map(|ctx| {
-            Box::new(ctx.with_emitter(emitter)) as Box<dyn remotemedia_traits::NodeRuntimeContextRead>
+            Box::new(ctx.with_emitter(emitter))
+                as Box<dyn remotemedia_traits::NodeRuntimeContextRead>
         });
         shared::rpc(self.inner.clone(), request, context, sink)
     }
+}
+
+/// An output push failed: the host's receiver is gone (a barge-in, a closed
+/// session), so nobody wants the rest of this call.
+fn receiver_gone(call: &cancel::CallCancel) {
+    call.fire(remotemedia_traits::Cancellation::new(
+        remotemedia_traits::CancelReason::CallerCancelled,
+    ));
 }
 
 fn push_output(sink: &OutputSinkBox, data: RuntimeData) -> Result<(), remotemedia_types::Error> {

@@ -103,6 +103,41 @@ struct NodeArgs {
     /// Instance scope: "shared" or "per_participant" (openspec:
     /// add-multi-participant-sessions).
     instance_scope: Option<String>,
+    /// Generator role: "text", "audio", "video" or "image" (openspec:
+    /// add-generator-cancellation). Requires `cancel` and an impl of the
+    /// matching generator trait (and so `Cancellable`) on the struct.
+    generates: Option<String>,
+    /// Cancel strategy: "drop_stops_work", "observes_token" or "on_cancel".
+    cancel: Option<String>,
+}
+
+const GENERATED_MODALITIES: &[(&str, &str, &str)] = &[
+    ("text", "Text", "text"),
+    ("audio", "Audio", "audio"),
+    ("video", "Video", "video"),
+    ("image", "Image", "image"),
+];
+const CANCEL_STRATEGIES: &[(&str, &str)] = &[
+    ("drop_stops_work", "DropStopsWork"),
+    ("observes_token", "ObservesToken"),
+    ("on_cancel", "OnCancel"),
+];
+
+/// `(GeneratedModality variant, GeneratorRole constructor, CancelStrategy variant)`
+/// for a node with `generates`.
+fn generator_idents(args: &NodeArgs) -> Option<(syn::Ident, syn::Ident, syn::Ident)> {
+    let generates = args.generates.as_deref()?;
+    let cancel = args.cancel.as_deref()?;
+    let (_, variant, ctor) = GENERATED_MODALITIES
+        .iter()
+        .find(|(k, _, _)| *k == generates)?;
+    let (_, strategy) = CANCEL_STRATEGIES.iter().find(|(k, _)| *k == cancel)?;
+    let span = proc_macro2::Span::call_site();
+    Some((
+        syn::Ident::new(variant, span),
+        syn::Ident::new(ctor, span),
+        syn::Ident::new(strategy, span),
+    ))
 }
 
 /// Classification of a field as either config or state
@@ -142,6 +177,8 @@ fn parse_node_args(args: &[NestedMeta]) -> Result<NodeArgs, syn::Error> {
     let mut output_caps = None;
     let mut instance_scope = None;
     let mut source = false;
+    let mut generates = None;
+    let mut cancel = None;
 
     for arg in args {
         match arg {
@@ -215,6 +252,30 @@ fn parse_node_args(args: &[NestedMeta]) -> Result<NodeArgs, syn::Error> {
                             ));
                         }
                     },
+                    "generates" => match &nv.lit {
+                        Lit::Str(s)
+                            if GENERATED_MODALITIES.iter().any(|(k, _, _)| *k == s.value()) =>
+                        {
+                            generates = Some(s.value());
+                        }
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.lit,
+                                "generates must be \"text\", \"audio\", \"video\" or \"image\"",
+                            ));
+                        }
+                    },
+                    "cancel" => match &nv.lit {
+                        Lit::Str(s) if CANCEL_STRATEGIES.iter().any(|(k, _)| *k == s.value()) => {
+                            cancel = Some(s.value());
+                        }
+                        _ => {
+                            return Err(syn::Error::new_spanned(
+                                &nv.lit,
+                                "cancel must be \"drop_stops_work\", \"observes_token\" or \"on_cancel\"",
+                            ));
+                        }
+                    },
                     other => {
                         return Err(syn::Error::new_spanned(
                             &nv.path,
@@ -245,6 +306,25 @@ fn parse_node_args(args: &[NestedMeta]) -> Result<NodeArgs, syn::Error> {
         ));
     }
 
+    // A generator states how it stops (openspec: add-generator-cancellation).
+    match (&generates, &cancel) {
+        (Some(_), None) => {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "#[node(generates = ...)] requires `cancel = \"drop_stops_work\" | \"observes_token\" | \"on_cancel\"`, \
+                 and the struct must implement the matching generator trait (TextGenerator, AudioGenerator, \
+                 VideoGenerator or ImageGenerator) and Cancellable",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "#[node(cancel = ...)] is only for generators: add `generates = \"text\" | \"audio\" | \"video\" | \"image\"`",
+            ));
+        }
+        _ => {}
+    }
+
     Ok(NodeArgs {
         source,
         node_type,
@@ -258,6 +338,8 @@ fn parse_node_args(args: &[NestedMeta]) -> Result<NodeArgs, syn::Error> {
         input_caps,
         output_caps,
         instance_scope,
+        generates,
+        cancel,
     })
 }
 
@@ -608,8 +690,25 @@ fn generate_schema_impl(struct_name: &syn::Ident, args: &NodeArgs) -> proc_macro
     let produces_tokens = parse_runtime_data_types(&args.produces);
     let multi_output = args.multi_output;
 
+    let generator_impl = match generator_idents(args) {
+        Some((modality, _, strategy)) => quote! {
+            fn generator() -> Option<(
+                remotemedia_traits::generator::GeneratedModality,
+                remotemedia_traits::generator::CancelStrategy,
+            )> {
+                Some((
+                    remotemedia_traits::generator::GeneratedModality::#modality,
+                    remotemedia_traits::generator::CancelStrategy::#strategy,
+                ))
+            }
+        },
+        None => quote! {},
+    };
+
     quote! {
         impl remotemedia_traits::schema::NodeConfigSchema for #config_name {
+            #generator_impl
+
             fn node_type() -> &'static str {
                 #node_type
             }
@@ -697,6 +796,18 @@ fn generate_trait_impl(struct_name: &syn::Ident, args: &NodeArgs) -> proc_macro2
         None => quote! {},
     };
 
+    // `GeneratorRole::<ctor>(self)` only accepts a type that implements the
+    // matching generator trait, so a generator without `Cancellable` fails
+    // to compile here.
+    let generator_impl = match generator_idents(args) {
+        Some((_, ctor, _)) => quote! {
+            fn generator(&self) -> Option<remotemedia_traits::generator::GeneratorRole<'_>> {
+                remotemedia_traits::generator::GeneratorRole::#ctor(self)
+            }
+        },
+        None => quote! {},
+    };
+
     // For multi_output nodes, process() returns an error, process_streaming is used.
     // For nodes with `streaming = true` (additive form), process() still maps to
     // `process_impl` — the user-provided single-output implementation — and
@@ -767,6 +878,8 @@ fn generate_trait_impl(struct_name: &syn::Ident, args: &NodeArgs) -> proc_macro2
             #instance_scope_impl
 
             #source_impl
+
+            #generator_impl
         }
     }
 }
@@ -1259,6 +1372,16 @@ fn generate_loadable_export(struct_name: &syn::Ident, args: &NodeArgs) -> proc_m
         name.strip_suffix("Node").unwrap_or(&name).to_string()
     });
 
+    // A generator declares its role to the host before a node exists
+    // (openspec: add-generator-cancellation).
+    let generator_fields = match generator_idents(args) {
+        Some((modality, _, strategy)) => quote! {
+            generates: Some(::remotemedia_traits::generator::GeneratedModality::#modality),
+            cancel: Some(::remotemedia_traits::generator::CancelStrategy::#strategy),
+        },
+        None => quote! {},
+    };
+
     // A source declares itself to the host before a node exists.
     let describe_impl = if args.source {
         let behavior = parse_capability_behavior(args.capabilities.as_deref().unwrap_or("static"));
@@ -1269,6 +1392,19 @@ fn generate_loadable_export(struct_name: &syn::Ident, args: &NodeArgs) -> proc_m
                         self_driven: Some(true),
                         capability_behavior: Some(#behavior),
                         media_capabilities: Some(#struct_name::media_capabilities_static()),
+                        #generator_fields
+                        ..Default::default()
+                    }
+                    .to_json(),
+                ))
+            }
+        }
+    } else if args.generates.is_some() {
+        quote! {
+            fn describe(&self, _params: RString) -> RResult<RString, RString> {
+                ROk(RString::from(
+                    ::remotemedia_traits::NodeDescription {
+                        #generator_fields
                         ..Default::default()
                     }
                     .to_json(),
@@ -1795,7 +1931,8 @@ mod source_tests {
 
     fn args(tokens: proc_macro2::TokenStream) -> Result<NodeArgs, syn::Error> {
         let parsed: syn::punctuated::Punctuated<NestedMeta, syn::Token![,]> =
-            syn::parse::Parser::parse2(syn::punctuated::Punctuated::parse_terminated, tokens).unwrap();
+            syn::parse::Parser::parse2(syn::punctuated::Punctuated::parse_terminated, tokens)
+                .unwrap();
         parse_node_args(&parsed.into_iter().collect::<Vec<_>>())
     }
 
@@ -1803,7 +1940,9 @@ mod source_tests {
     fn a_source_without_output_caps_is_a_compile_error_that_names_them() {
         let error = args(quote! { source }).err().expect("an error");
         assert!(error.to_string().contains("output_caps"), "{error}");
-        let error = args(quote! { source, node_type = "Clock" }).err().expect("an error");
+        let error = args(quote! { source, node_type = "Clock" })
+            .err()
+            .expect("an error");
         assert!(error.to_string().contains("output_caps"), "{error}");
     }
 
@@ -1819,13 +1958,22 @@ mod source_tests {
         let name = syn::Ident::new("ClockNode", proc_macro2::Span::call_site());
         let parsed = args(quote! { source, output_caps = "text" }).unwrap();
         let node = generate_trait_impl(&name, &parsed).to_string();
-        assert!(node.contains("has_background") && node.contains("background_impl"), "{node}");
+        assert!(
+            node.contains("has_background") && node.contains("background_impl"),
+            "{node}"
+        );
         assert!(node.contains("self_driven"), "{node}");
-        assert!(generate_source_factory(&name, &parsed).to_string().contains("source_factory"));
-        assert!(generate_loadable_export(&name, &parsed).to_string().contains("describe"));
+        assert!(generate_source_factory(&name, &parsed)
+            .to_string()
+            .contains("source_factory"));
+        assert!(generate_loadable_export(&name, &parsed)
+            .to_string()
+            .contains("describe"));
         // An ordinary node gets none of it.
         let plain = args(quote! { output_caps = "text" }).unwrap();
-        assert!(!generate_trait_impl(&name, &plain).to_string().contains("has_background"));
+        assert!(!generate_trait_impl(&name, &plain)
+            .to_string()
+            .contains("has_background"));
         assert!(generate_source_factory(&name, &plain).is_empty());
     }
 }

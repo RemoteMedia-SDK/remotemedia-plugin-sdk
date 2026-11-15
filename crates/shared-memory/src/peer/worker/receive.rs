@@ -52,6 +52,7 @@ impl SharedWorker {
                             pending_copies: 0,
                             snapshot_reads: 0,
                             cancelled: Arc::new(AtomicBool::new(false)),
+                            cancel: remotemedia_traits::CancelSource::new(),
                             allocations: 0,
                             outputs: 0,
                         },
@@ -84,7 +85,9 @@ impl SharedWorker {
                             return Err(invalid("execute before all inputs arrived"));
                         }
                         let staged = state.staged.remove(&call).unwrap();
-                        let cancelled = state.calls.get(&call).unwrap().cancelled.clone();
+                        let active = state.calls.get(&call).unwrap();
+                        let cancelled = active.cancelled.clone();
+                        let cancel = active.cancel.clone();
                         WorkerRequest {
                             snapshot_ports: staged.snapshot_ports,
                             call,
@@ -94,6 +97,7 @@ impl SharedWorker {
                             inputs: staged.inputs,
                             shared: self.clone(),
                             cancelled,
+                            cancel,
                             completed: AtomicBool::new(false),
                         }
                     };
@@ -130,14 +134,26 @@ impl SharedWorker {
                     drop(pending.prepared);
                     let _ = pending.reply.send(Ok(()));
                 }
-                HostMessage::Cancel { call } => {
-                    let state = self.state.lock().unwrap();
-                    if call == 0 || call > state.last_call {
-                        return Err(invalid("cancel for undeclared call"));
-                    }
-                    // Completion and cancellation can cross on opposite directions.
-                    if let Some(active) = state.calls.get(&call) {
-                        active.cancelled.store(true, Ordering::Release);
+                HostMessage::Cancel { call, cancellation } => {
+                    let source = {
+                        let state = self.state.lock().unwrap();
+                        if call == 0 || call > state.last_call {
+                            return Err(invalid("cancel for undeclared call"));
+                        }
+                        // Completion and cancellation can cross on opposite directions.
+                        state.calls.get(&call).map(|active| {
+                            active.cancelled.store(true, Ordering::Release);
+                            active.cancel.clone()
+                        })
+                    };
+                    // Fire the call's token outside the state lock: its
+                    // callbacks belong to the node.
+                    if let Some(source) = source {
+                        source.cancel(cancellation.unwrap_or(
+                            remotemedia_traits::Cancellation::new(
+                                remotemedia_traits::CancelReason::CallerCancelled,
+                            ),
+                        ));
                     }
                 }
                 HostMessage::Shutdown => return Ok(()),

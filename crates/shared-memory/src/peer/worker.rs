@@ -48,6 +48,8 @@ struct Active {
     pending_copies: usize,
     snapshot_reads: usize,
     cancelled: Arc<AtomicBool>,
+    /// Fires the call's token with the host's cancellation.
+    cancel: remotemedia_traits::CancelSource,
     allocations: usize,
     outputs: usize,
 }
@@ -114,6 +116,7 @@ pub struct WorkerRequest {
     pub inputs: HashMap<String, RuntimeData>,
     shared: Arc<SharedWorker>,
     cancelled: Arc<AtomicBool>,
+    cancel: remotemedia_traits::CancelSource,
     completed: AtomicBool,
 }
 
@@ -306,6 +309,12 @@ impl WorkerRequest {
     }
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire) || self.shared.closed.load(Ordering::Acquire)
+    }
+
+    /// The call's cancellation token, fired with the host's cancellation
+    /// (or `SessionClosed` when the connection drops).
+    pub fn cancel_token(&self) -> remotemedia_traits::CancelToken {
+        self.cancel.token()
     }
     pub fn allocator(&self) -> Arc<dyn OutputAllocator> {
         Arc::new(RemoteAllocator {
@@ -587,18 +596,27 @@ impl SharedWorker {
             return;
         }
         self.outbound.lock().unwrap().sender.take();
-        let (allocations, outputs, staged, snapshots) = {
+        let (allocations, outputs, staged, snapshots, sources) = {
             let mut state = self.state.lock().unwrap();
+            let mut sources = Vec::with_capacity(state.calls.len());
             for active in state.calls.values() {
                 active.cancelled.store(true, Ordering::Release);
+                sources.push(active.cancel.clone());
             }
             (
                 std::mem::take(&mut state.allocations),
                 std::mem::take(&mut state.outputs),
                 std::mem::take(&mut state.staged),
                 std::mem::take(&mut state.snapshots),
+                sources,
             )
         };
+        // The host connection is gone: every call's session is.
+        for source in sources {
+            source.cancel(remotemedia_traits::Cancellation::new(
+                remotemedia_traits::CancelReason::SessionClosed,
+            ));
+        }
         // Never drop buffer owners under the state lock: release callbacks use it.
         drop(staged);
         for (_, pending) in snapshots {

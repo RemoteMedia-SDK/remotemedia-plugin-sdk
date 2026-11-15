@@ -127,6 +127,36 @@ pub trait ImageGenerator: Cancellable {}
 /// A node's declared generator role: what it produces and its cancellation.
 /// Built only through the typed constructors, so holding one proves the node
 /// implements the matching generator trait.
+///
+/// A node that is not `Cancellable` cannot claim the role:
+///
+/// ```compile_fail,E0277
+/// use remotemedia_traits::GeneratorRole;
+/// struct Chat;
+/// let chat = Chat;
+/// let _ = GeneratorRole::text(&chat); // Chat: TextGenerator is not satisfied
+/// ```
+///
+/// nor can it implement a generator trait without `Cancellable`:
+///
+/// ```compile_fail,E0277
+/// struct Tts;
+/// impl remotemedia_traits::AudioGenerator for Tts {} // Tts: Cancellable is not satisfied
+/// ```
+///
+/// A cancellable one can:
+///
+/// ```
+/// use remotemedia_traits::{Cancellable, CancelStrategy, GeneratorRole, TextGenerator};
+/// struct Chat;
+/// #[async_trait::async_trait]
+/// impl Cancellable for Chat {
+///     fn cancel_strategy(&self) -> CancelStrategy { CancelStrategy::DropStopsWork }
+/// }
+/// impl TextGenerator for Chat {}
+/// let chat = Chat;
+/// assert!(GeneratorRole::text(&chat).is_some());
+/// ```
 #[derive(Clone, Copy)]
 pub struct GeneratorRole<'a> {
     modality: GeneratedModality,
