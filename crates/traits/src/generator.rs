@@ -264,10 +264,48 @@ pub fn is_generative_category(category: &str) -> bool {
     GENERATIVE_CATEGORIES.contains(&c.as_str())
 }
 
+/// The JSON Schema of the cancellation contract shared with Python
+/// (`schema/cancellation.schema.json`). Python's `remotemedia.core.cancel` is
+/// checked against it, so the two cannot drift.
+pub fn cancellation_contract_schema() -> serde_json::Value {
+    #[derive(JsonSchema)]
+    #[allow(dead_code)]
+    struct CancellationContract {
+        cancellation: crate::cancel::Cancellation,
+        disposition_override: crate::cancel::DispositionOverride,
+        generator_declaration: GeneratorDeclaration,
+        generated_modality: GeneratedModality,
+        cancel_strategy: CancelStrategy,
+        cancel_reason: crate::cancel::CancelReason,
+        retention: crate::cancel::Retention,
+    }
+    serde_json::to_value(schemars::schema_for!(CancellationContract)).expect("schema serializes")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cancel::{CancelReason, Retention};
+
+    /// Regenerate with `RM_UPDATE_SCHEMA=1 cargo test -p remotemedia-traits contract_schema`.
+    #[test]
+    fn contract_schema_is_checked_in() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("schema")
+            .join("cancellation.schema.json");
+        let current = serde_json::to_string_pretty(&cancellation_contract_schema()).unwrap() + "\n";
+        if std::env::var_os("RM_UPDATE_SCHEMA").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &current).unwrap();
+        }
+        let checked_in = std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        assert_eq!(
+            checked_in, current,
+            "schema/cancellation.schema.json is stale; rerun with RM_UPDATE_SCHEMA=1"
+        );
+    }
 
     struct Tts;
     #[async_trait]

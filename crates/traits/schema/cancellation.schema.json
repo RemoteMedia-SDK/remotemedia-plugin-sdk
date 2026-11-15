@@ -1,0 +1,241 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "CancelReason": {
+      "description": "Why a call was cancelled.",
+      "oneOf": [
+        {
+          "description": "A `barge_in` (speech over the reply, an interrupt control).",
+          "enum": [
+            "barge_in"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A newer input replaced the call on a latest-input-wins node.",
+          "enum": [
+            "superseded"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The caller cancelled the call (an RPC or endpoint cancel, a dropped plugin call with no reason given).",
+          "enum": [
+            "caller_cancelled"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The input that started the call was retracted (`CancelSpeculation`).",
+          "enum": [
+            "retracted"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The session closed while the call ran.",
+          "enum": [
+            "session_closed"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The runtime is shutting down.",
+          "enum": [
+            "shutdown"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The call missed a deadline.",
+          "enum": [
+            "deadline"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "CancelStrategy": {
+      "description": "How a generator stops a cancelled call.",
+      "oneOf": [
+        {
+          "description": "All generation happens inside the call future; dropping it stops the work (a streamed HTTP response, an awaited token loop).",
+          "enum": [
+            "drop_stops_work"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Work outside the future polls or subscribes to the call's [`CancelToken`](crate::cancel::CancelToken).",
+          "enum": [
+            "observes_token"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The node stops work out of band in [`Cancellable::on_cancel`] (abort a remote request, stop a model thread), and may also observe the token.",
+          "enum": [
+            "on_cancel"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Cancellation": {
+      "description": "A call's cancellation: why, and what to do with data.",
+      "properties": {
+        "disposition": {
+          "$ref": "#/definitions/Disposition"
+        },
+        "reason": {
+          "$ref": "#/definitions/CancelReason"
+        }
+      },
+      "required": [
+        "disposition",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "Disposition": {
+      "description": "What a cancel does with data.",
+      "properties": {
+        "partial_output": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Retention"
+            }
+          ],
+          "description": "What the node does with what it generated before the cancel: commit it to its own state (an LLM keeps the cut-off reply in history, marked interrupted) or roll it back. Output already emitted downstream is never recalled."
+        },
+        "pending_input": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/Retention"
+            }
+          ],
+          "description": "Input already received or queued for the node, including input the node buffered internally: kept for the next call, or dropped."
+        }
+      },
+      "required": [
+        "partial_output",
+        "pending_input"
+      ],
+      "type": "object"
+    },
+    "DispositionOverride": {
+      "description": "A partial disposition, as a canceller (`barge_in` envelope, RPC cancel) or a manifest node's `on_cancel` gives it. Absent fields fall through.",
+      "properties": {
+        "partial_output": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Retention"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pending_input": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Retention"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "GeneratedModality": {
+      "description": "What a generator produces.",
+      "oneOf": [
+        {
+          "enum": [
+            "text",
+            "audio",
+            "image"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Includes avatar, lip-sync and motion renderers.",
+          "enum": [
+            "video"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "GeneratorDeclaration": {
+      "description": "What a factory, schema or plugin description declares about the role before a node exists. Both `None` declares nothing (not a generator, or a plugin built before this contract).",
+      "properties": {
+        "cancel": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CancelStrategy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "generates": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GeneratedModality"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Retention": {
+      "description": "Keep or drop one kind of data on a cancel.",
+      "enum": [
+        "retain",
+        "discard"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "cancel_reason": {
+      "$ref": "#/definitions/CancelReason"
+    },
+    "cancel_strategy": {
+      "$ref": "#/definitions/CancelStrategy"
+    },
+    "cancellation": {
+      "$ref": "#/definitions/Cancellation"
+    },
+    "disposition_override": {
+      "$ref": "#/definitions/DispositionOverride"
+    },
+    "generated_modality": {
+      "$ref": "#/definitions/GeneratedModality"
+    },
+    "generator_declaration": {
+      "$ref": "#/definitions/GeneratorDeclaration"
+    },
+    "retention": {
+      "$ref": "#/definitions/Retention"
+    }
+  },
+  "required": [
+    "cancel_reason",
+    "cancel_strategy",
+    "cancellation",
+    "disposition_override",
+    "generated_modality",
+    "generator_declaration",
+    "retention"
+  ],
+  "title": "CancellationContract",
+  "type": "object"
+}
