@@ -53,7 +53,9 @@ Who decides, in order of precedence:
 3. The node. `Cancellable::default_disposition(&self, &CancelContext) -> Disposition` lets a node choose per cancel — a TTS node discards its queued text (it belongs to the cancelled reply), an S2S node retains its audio, and LFM2Audio's early-interrupt rollback becomes "discard partial output when the user cut in within N ms".
 4. The reason. `BargeIn` and `Superseded` → `INTERRUPT`; `Retracted` (CancelSpeculation), `CallerCancelled`, `SessionClosed`, `Shutdown` → `ABORT`; `Deadline` → `ABORT`.
 
-So a VAD-triggered barge is an interrupt by default: generation stops, the cut-off reply stays in history, and the audio keeps flowing into the next inference. VAD, `ConversationCoordinatorNode`, `InterruptNode` and `HostedTurnNode` set the disposition they mean explicitly rather than relying on the default.
+So a VAD-triggered barge is an interrupt by default: generation stops, the cut-off reply stays in history, and the audio keeps flowing into the next inference. A producer states a disposition only when it means more than a plain interrupt, because an explicit choice overrides every node's default (a TTS node's default drops its queued text; an explicit `INTERRUPT` would make it speak the stale reply). As implemented: `ConversationCoordinatorNode` and VAD-driven barges send none; `HostedTurnNode` dropping a turn (and its remote half in `MemberFlushNode`) sends `pending_input: discard`; a retracted utterance sends `ABORT`. Producers publish `barge_in_payload(...)`, which puts `{"disposition": ...}` in the barge envelope's payload.
+
+**Wire rule for a `CancelRequest`, shared by Rust and Python.** A request that carries `explicit` or `elapsed_ms` is re-resolved by the node with its own default; one with only `cancellation`, and a bare `Cancellation`, are final. Rust always serializes `explicit` (also when empty) and the router always sets `elapsed_ms`.
 
 ### D3. Typed role: generators must be `Cancellable`
 ```rust
@@ -170,6 +172,13 @@ The Python twin (`remotemedia.testing.assert_generator_cancels`) makes the same 
 3. Migrate each generator in the inventory and add its conformance test.
 4. Turn on admission refusal and the audit test, make `INTERRUPT` the barge default for all generators, deprecate `InterruptableBackend` and `StatefulConversationBackend::finalize_turn`. Rollback: disable the admission check and the default; the additive pieces stay.
 
+## Implementation notes
+- **Token firing order.** `tokio::select!` drops the losing branches before it runs the winner's handler, so the router fires the call's token inside the cancel branch's own future; token callbacks (`cancel_call`, the Python cancel frame) run before the call's future is dropped.
+- **Call identity across the ABI.** `FfiCallContext` has no call id; adding one would change a by-value struct. The router runs one media call at a time per instance and calls `cancel_call` synchronously before the drop, so "the media call in flight on this instance" names the call; the adapter registers each call before returning its future and clears it when it ends, so a late cancel is a no-op.
+- **Queue decisions for plugin and Python nodes.** The router needs a node's `pending_input` default when the cancel arrives, but the node lives in another library or process. Generators declare their default per reason up front (`pacing()` JSON `default_dispositions`; Python `__node_meta__`), the router uses it for its queue, and the node re-resolves `partial_output` and its own buffers with its per-cancel default.
+- **Undeclared nodes** keep today's queue behavior on a barge (queued inputs dropped) until they declare a role, so un-migrated pipelines do not change.
+- **Audit.** `video` is not a generative category (most video nodes transform frames); reviewed transforms in generative categories are listed in the audit.
+
 ## Open Questions
-- Should the host keep accepting 0.10 plugins after the bump (loaded as `generates: unknown`) or reject them?
+- Old plugins: the ABI moved to 0.11, so 0.10 plugins must be rebuilt (the repository's practice for interface changes). Verifying the rejection with `test-session-rpc.ps1` is task 4.2.
 - Should a pipeline be able to set a session-wide default disposition for barge-in, in addition to per-node `on_cancel`?
