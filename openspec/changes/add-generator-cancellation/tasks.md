@@ -1,4 +1,4 @@
-Status as of 2026-11-15, branch `feat/generator-cancellation` in remotemedia-plugin-sdk, remotemedia-sdk-base and remotemedia-sdk. A box is checked only when the work and its stated test exist; partial items say what is left.
+Status as of 2026-11-15, branch `feat/generator-cancellation` in remotemedia-plugin-sdk, remotemedia-sdk-base, remotemedia-sdk and remotemedia-scaling. A box is checked only when the work and its stated test exist; partial items say what is left.
 
 ## 1. Shared contract (remotemedia-plugin-sdk)
 - [x] 1.1 Add `crates/traits/src/cancel.rs`: `CancelToken`, `Cancellation`, `CancelReason`, `Disposition` (`INTERRUPT`, `ABORT`, serde form `{"partial_output":"retain|discard","pending_input":"retain|discard"}`), `CancelRegistration`, `child()`; unit tests for fire-once, first cancellation wins, `on_cancel` from another thread, registration drop, `cancelled()` in `select!`, and the per-reason default dispositions. Also `CancelRequest` (the cross-boundary form) and `DefaultDispositions`.
@@ -9,8 +9,8 @@ Status as of 2026-11-15, branch `feat/generator-cancellation` in remotemedia-plu
 - [ ] 1.6 `plugin-sdk`: the SDK adapter reports the instance's role and per-reason defaults in `pacing()`. Left: a generator factory/export form with the `…Generator` bound for hand-written factories.
 - [ ] 1.7 ABI 0.11: defaulted `FfiNode::cancel_call(context, cancellation_json)`; `loadable-node-abi` 0.11.0, `remotemedia-plugin-sdk` 0.13.0. Left: `docs/LOADABLE_NODE_ABI.md`, and verifying the 0.10 rejection (4.2).
 - [x] 1.8 `plugin-sdk` ABI adapter: per-call token (in-flight slot, no call id needed), fired by `cancel_call` with the host's request re-resolved by the node's default, and by a drop guard or a failed `OutputSink::push` with `CallerCancelled`/`ABORT`; then `on_cancel` on the plugin runtime. 5 adapter tests.
-- [ ] 1.9 Native worker: `ctx.cancel_token()` is backed by the request's `CancelSource`; `HostMessage::Cancel` carries an optional cancellation (omitted when absent); a dropped connection fires `SessionClosed`. Built; left: tests under `test-native-worker` (the crate's integration test support has pre-existing build errors unrelated to this change: `background_protocol` missing in struct literals).
-- [ ] 1.10 Python workers: the iceoryx2 node loop (multiprocess, `python_plugin_export`, `python-source-plugin`), the mapped runner and the in-process template handle `__cancel_call__` and `__node_meta__` (remotemedia-sdk b742bf55, plugin-sdk 2e41a91). Left: the Rust side of `python_subprocess.rs`, `inprocess_python.rs` and `mapped_python.rs` calling into them on `cancel_call`.
+- [ ] 1.9 Native worker: `ctx.cancel_token()` is backed by the request's `CancelSource`; `HostMessage::Cancel` carries an optional cancellation (omitted when absent); a dropped connection fires `SessionClosed`. The host forwards the call's token to the worker (`Call::forward_cancel` sends `HostMessage::Cancel` with the cancellation; the plain drop-cancel is not sent twice). Built; left: tests under `test-native-worker` (the crate's integration test support has pre-existing build errors unrelated to this change: `background_protocol` missing in struct literals).
+- [ ] 1.10 Python workers: the iceoryx2 node loop (multiprocess, `python_plugin_export`, `python-source-plugin`), the mapped runner and the in-process template handle `__cancel_call__` and `__node_meta__`; a generator announces its role and defaults in a `META:` handshake message ahead of READY. Rust side: `python_subprocess.rs` (`cancel_call` publishes the frame out of band; `pacing()` reports the `META:` role) and `PythonNodeHandle` (in-process: calls run through `_remotemedia_invoke`; `cancel_call`/`node_meta`; a test cancels the template generator from another thread mid-stream and its history keeps the cut-off reply). Left: mapped workers get a generic `CallerCancelled` abort (no reason on the wire to Python), and the `python_inprocess_plugin_export!` macro is stale (it targets an `FfiNode` API that no longer exists) and was not wired.
 - [ ] 1.11 `testing::assert_generator_cancels` (Rust, `crates/plugin-sdk/src/testing.rs`) with a passing generator and a runaway one that must fail; Python twin with three failing fixtures (keeps producing, drops pending input under `INTERRUPT`, keeps partial output under `ABORT`). Left: Rust fixtures for the two disposition failures (the Rust check measures the next call; node state is checked in each node's tests).
 - [ ] 1.12 `InterruptableBackend` and `StatefulConversationBackend::finalize_turn` are deprecated. Left: the authoring guide.
 
@@ -18,7 +18,7 @@ Status as of 2026-11-15, branch `feat/generator-cancellation` in remotemedia-plu
 - [x] 1P.1 JSON Schema exported from the Rust types (`crates/traits/schema/cancellation.schema.json`, checked by a Rust test); `remotemedia/core/cancel.py` held to it by `test_cancel_schema_parity.py`.
 - [x] 1P.2 Thread-safe Python `CancelToken`.
 - [x] 1P.3 `Cancellable` protocol, `GeneratorNode`, the four generator classes, `__init_subclass__` check.
-- [x] 1P.4 `@register_node(generates=...)`; `__node_meta__` discovery frame.
+- [x] 1P.4 `@register_node(generates=...)`; `__node_meta__` discovery frame; `META:` ahead of READY (`test_cancel_meta_handshake.py`).
 - [ ] 1P.5 Worker side of the cancel frame (out of band, token, `pending_input`, `cancel()`, output gate). Left: replacing each node's `request_barge_in` latch (section 3.2).
 - [x] 1P.6 Contract vendored into `templates/inprocess_python_plugin.py`, with a parity test.
 - [ ] 1P.7 mypy fixture test (`test_cancel_mypy.py`). Left: mypy in CI.
@@ -26,24 +26,24 @@ Status as of 2026-11-15, branch `feat/generator-cancellation` in remotemedia-plu
 - [x] 1P.9 Mixing `GeneratorNode` with the legacy `Node` base (other than through `MultiprocessNode`) raises `TypeError`.
 
 ## 2. Host (remotemedia-sdk-base)
-- [ ] 2.1 The router creates a token per call and fires it inside the cancel branch, before the drop, for barge-in, supersession and session shutdown; spawns `on_cancel`; `ProtectGuard` suppresses the token. Router tests in `session_router/cancellation_tests.rs`. Left: RPC/endpoint cancel sites and the unused `cancel_force` path.
+- [x] 2.1 The router creates a token per call and fires it inside the cancel branch, before the drop, for barge-in, supersession and session shutdown; spawns `on_cancel`; `ProtectGuard` suppresses the token (router tests in `session_router/cancellation_tests.rs`). Each native RPC call has its own token, fired before the abort on `.__cancel__`, a closed caller or shutdown (test in `rpc_dispatch.rs`). Envelope endpoint calls of a cancelled call were already cancelled by the router. (`cancel_force` stays unused: shutdown cancels through the session-closed branch.)
 - [x] 2.2 Disposition resolution (canceller, manifest `on_cancel`, node default, reason) and `pending_input` on the router queue; undeclared nodes keep today's discard. Tests: queued input survives an interrupt; a node default, the canceller and the manifest each discard it; a protected call is not cancelled.
-- [ ] 2.3 `barge_in` payload `disposition` and manifest `on_cancel` are parsed. Left: RPC/endpoint cancels.
-- [ ] 2.4 Producers state only what they mean beyond an interrupt (see design): `HostedTurnNode` dropping a turn and `MemberFlushNode` send `pending_input: discard`; a retracted utterance sends `ABORT`; the coordinator sends none on purpose. Left: `RealtimeEventsNode` `response-cancel` and scaling `InterruptNode`.
+- [x] 2.3 `barge_in` payload `disposition` and manifest `on_cancel` are parsed. (RPC and endpoint cancels carry no disposition: they abort.)
+- [x] 2.4 Producers state only what they mean beyond an interrupt (see design): `HostedTurnNode` dropping a turn and `MemberFlushNode` send `pending_input: discard`; a retracted utterance sends `ABORT`; the coordinator, VAD-driven barges and the scaling `InterruptNode` (someone started speaking) send none on purpose; `RealtimeEventsNode` `response-cancel` goes through `HostedTurnNode`'s interrupt.
 - [x] 2.5 `cancel_token()` on the host `NodeRuntimeContext` (`CallCancel`, with the request behind the token).
 - [ ] 2.6 The registry refuses a generator without a cancel strategy and a node whose declaration disagrees with its factory (`nodes/generator_admission_tests.rs`). Left: `src/validation/`, and the 0.10 acceptance check (4.2).
-- [ ] 2.7 `PythonStreamingNode` sends `__cancel_call__` out of band when the token fires (frame-shape test). Left: `legacy_call.rs`, `loadable/source_python.rs`, `InProcessPythonNode`.
-- [ ] 2.8 Audit over built-in Rust factories, a ratchet: undeclared generators are listed until migrated, reviewed transforms are listed separately. Left: `PythonNodeConfig` entries and the `@register_node` registry.
-- [ ] 2.9 `PythonNodeConfig` `generates`/`cancel` and the discovery cross-check; `InProcessPythonNode` calling the template hooks.
+- [ ] 2.7 `PythonStreamingNode` and the `python-source-plugin` node send `__cancel_call__` out of band when the token fires (frame-shape test), and both report the role and defaults the worker declared in `META:`. Left: `InProcessPythonNode` (`crates/python-nodes`, through the in-process executor bridge).
+- [ ] 2.8 Audit over built-in Rust factories: the not-yet-migrated list is empty; reviewed transforms in generative categories are listed (`RenderReadyGateNode`, `AvatarIntentTapNode`, `VadToFaceNode`, `ActivationFaceNode`). Left: `PythonNodeConfig` entries and the `@register_node` registry.
+- [ ] 2.9 `PythonNodeConfig` `generates`/`cancel` and the cross-check against the worker's `META:`; `InProcessPythonNode` calling the template hooks.
 
 ## 3. Migrate generators
 Each item: declare `generates` and a strategy, stop work that runs outside the call future (token or `on_cancel`), apply both dispositions to the node's own state (an LLM keeps or rolls back the cut-off reply; a TTS node discards its queued text by default; an S2S node retains buffered audio), and add `assert_generator_cancels`. Paths are relative to `D:\rm-mp`.
 
 ### 3.1 Built-in Rust (remotemedia-sdk-base/src)
 - [x] 3.1.1 `OpenAIChatNode` and `MultimodalLLMNode`: text, `DropStopsWork`; the chat backend keeps a cut-off reply in history, marked interrupted, when partial output is retained, and rolls it back otherwise (two tests against the mock SSE provider).
-- [ ] 3.1.2 `HostedTurnNode`: its barge publication carries dispositions (2.4). Left: declaring the role.
-- [ ] 3.1.3 `TestToneTtsNode`: audio, `ObservesToken` in its synchronous loop.
-- [ ] 3.1.4 `PythonStreamingNode` factories (Kokoro, VibeVoice, CosyVoice3, Voxtral, LFM2Audio): declare the role once each Python class is migrated (3.2), so no declared strategy is untrue.
+- [x] 3.1.2 `HostedTurnNode`: text, `OnCancel` (its calls only queue commands; `on_cancel` interrupts the running turn, test `on_cancel_stops_the_running_turn`); its barge publication carries dispositions (2.4).
+- [x] 3.1.3 `TestToneTtsNode`: audio, `DropStopsWork` (it renders at once, so nothing outlives a call; a token check inside its synchronous loop could never fire); discards queued text by default.
+- [ ] 3.1.4 `PythonStreamingNode` factories (Kokoro, VibeVoice, CosyVoice3, Voxtral, LFM2Audio): the role comes from the Python class's `META:` at initialization; left: the classes' migration (3.2).
 
 ### 3.2 Python nodes (remotemedia-sdk/clients/python/remotemedia/nodes)
 - [ ] 3.2.1 Nodes with a barge latch: `KokoroTTSNode`, `KokoroOnnxTTSNode`, `QwenTTSMlxNode`, `LFM2AudioNode`, `LFM2AudioMlxNode`, `PersonaPlexAudioMlxNode`, `QwenTextMlxNode`, `MlxLmTextNode` — move to `GeneratorNode.cancel()`; retire `Interruptable`/`StatefulConversation`. `LFM2AudioNode`'s early-interrupt rollback becomes its `default_disposition`.
@@ -53,24 +53,24 @@ Each item: declare `generates` and a strategy, stop work that runs outside the c
 
 ### 3.3 Loadable plugins
 - [x] 3.3.1 litert `GemmaAssistantNode`: text, `ObservesToken` (the model thread polls the token and calls `Conversation::cancel()` on its own thread, also before the first token); a cut-off reply is kept or rolled back by `partial_output`; `on_cancel` drops pending room lines on a discard. Real-model `assert_generator_cancels` (`tests/cancel_conformance.rs`, CPU backend): baseline first text 873 ms, after an `INTERRUPT` cancel 760 ms, after an `ABORT` cancel 912 ms.
-- [ ] 3.3.2 litert `KokoroTtsNode`: audio, `ObservesToken` (stops before the next slice), discards queued text by default. Left: its real-model conformance run.
-- [ ] 3.3.3 `kokoro-onnx-loadable`.
-- [ ] 3.3.4 `FoundryLocalChatNode`.
-- [ ] 3.3.5 `CandleChatNode`.
+- [x] 3.3.2 litert `KokoroTtsNode`: audio, `ObservesToken` (stops before the next slice), discards queued text by default. Real model (CPU, `litert-lm.dll` as the LiteRT library): baseline first audio 1.74 s, after an `INTERRUPT` cancel 2.98 s, after an `ABORT` cancel 2.87 s — within the 1.5 s slack; the extra ~1.2 s is the slice in progress, which runs to its end.
+- [x] 3.3.3 `kokoro-onnx-loadable`: audio, `ObservesToken`; a cancel aborts the clause task, which ends the ONNX run mid-inference; discards queued text by default (remotemedia-sdk 9c976e05). 8 unit tests; real-model conformance (pipecat `kokoro-v1.0.onnx` with renamed inputs): baseline first audio 235 ms, 246 ms after `INTERRUPT`, 234 ms after `ABORT`.
+- [ ] 3.3.4 `FoundryLocalChatNode`: text, `DropStopsWork` for the node's own work; history keeps or rolls back the cut-off reply (remotemedia-sdk d9d6f4fa, 6 unit tests). Left: foundry-local-sdk keeps generating on its blocking thread after the drop (no public chat cancel), so the engine works up to `max_tokens` in the background; and a real-model run (`FOUNDRY_LOCAL_MODEL_ALIAS`).
+- [ ] 3.3.5 `CandleChatNode`: text, `ObservesToken` (checked before and after prefill and every token step); history keeps or rolls back the cut-off reply (remotemedia-sdk fe8a4b45, 17 unit tests with a stub model). Left: a real-model run (`CANDLE_CHAT_REPO`).
 - [ ] 3.3.6 Python plugins (`moss-tts-realtime-loadable`, `lfm2-audio-python-source-plugin`, `lfm2-audio-mlx-python-source-plugin`, `indextts-25-python-source-plugin`).
 
 ### 3.4 Other repositories
 - [ ] 3.4.1 `candle-nodes` `PhiNode`/`LlamaNode` (pinned to sdk-base rev 042a82f).
 - [ ] 3.4.2 Out-of-tree generators (`qwen-s2s-avatar-plugins`, `LFM25AudioOnnxNode`): rebuild against ABI 0.11.
-- [ ] 3.4.3 `remotemedia-scaling` mesh `EchoAgentNode`.
+- [x] 3.4.3 `remotemedia-scaling` mesh `EchoAgentNode`: text, `DropStopsWork` (scaling 7ffae98; mesh room-node tests pass).
 
 ### 3.5 Avatar and video
-- [ ] 3.5.1 `AvatarNode`, `IdleAnimationNode`, `Audio2FaceNode`, `MotionPlayerNode` (listed in the audit ratchet), `ActivationFaceNode`, `VadToFaceNode`, `SyntheticLipSyncNode`.
+- [x] 3.5.1 Video generators: `Audio2FaceNode` and `SyntheticLipSyncNode` (`OnCancel`: close the mouth / restart the frame clock, drop the reply's queued audio by default; tests), `AvatarNode`, `IdleAnimationNode`, `MotionPlayerNode` (`DropStopsWork`: work inside each tick or call). `ActivationFaceNode` and `VadToFaceNode` were reviewed as transforms (one affect input to one frame, nothing queued or running).
 
 ## 4. Validation
-- [ ] 4.1 Run: `cargo test -p remotemedia-traits` (34 unit + doctests), `cargo test -p remotemedia-plugin-sdk --lib` (18). Left: the full workspace baseline and the feature matrix.
+- [ ] 4.1 Run: `cargo test --workspace` passes; `--features python-plugin` python_ipc tests (21) and `--features inprocess-python` in-process tests (8, needs `PYTHONPATH` = the crate dir). Left: `test-native-worker`, `test-mapped-probe`, fmt/clippy.
 - [ ] 4.2 `./scripts/test-session-rpc.ps1`.
-- [ ] 4.3 Run: base `--lib` tests for `transport::`, `nodes::`, `manifest` (685), plus chat backend, admission and cancellation tests; litert `--lib` (22). Left: the full CI baseline.
-- [ ] 4.3P Run: the 76 Python cancellation tests (anaconda Python 3.12); the full suite shows the same 11 failures / 9 collection errors as before the change. Left: real worker modes.
-- [ ] 4.4 Run: Gemma real-model conformance (3.3.1). Left: the in-process cancel and barge-in suite on rebuilt plugins, and a VAD interrupt on an S2S pipeline.
+- [ ] 4.3 Run: the full base `--lib` suite with `loadable,multiprocess` — 1217 pass (the two process-tree tests need `PYO3_PYTHON` set to a real interpreter on Windows); litert `--lib` (22). Left: grpc/webrtc packages and doc tests.
+- [ ] 4.3P Run: the Python cancellation tests (anaconda Python 3.12); the full suite shows the same 11 failures / 9 collection errors as before the change. Left: real worker modes.
+- [ ] 4.4 Run: Gemma, litert Kokoro and kokoro-onnx real-model conformance (3.3). Left: the in-process cancel and barge-in suite on rebuilt plugins, a VAD interrupt on an S2S pipeline, Foundry and Candle real-model runs.
 - [x] 4.5 `openspec validate add-generator-cancellation --strict --no-interactive`.

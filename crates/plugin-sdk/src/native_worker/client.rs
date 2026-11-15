@@ -44,6 +44,9 @@ enum Command {
         reply: oneshot::Sender<Result<Call, Error>>,
     },
     Cancel(u64),
+    /// Cancel with the host's reason and disposition (openspec:
+    /// add-generator-cancellation).
+    CancelWith(u64, remotemedia_traits::Cancellation),
     Acknowledge(ReceivedOutput),
 }
 
@@ -58,6 +61,8 @@ pub(super) struct Call {
     receiver: mpsc::UnboundedReceiver<Frame>,
     commands: blocking::Sender<Command>,
     completed: bool,
+    /// The host's cancellation was sent; the drop need not cancel again.
+    cancel_sent: Arc<std::sync::atomic::AtomicBool>,
     pub(super) source_finished: bool,
 }
 pub(super) struct Output {
@@ -94,9 +99,26 @@ impl Call {
         }
     }
 }
+impl Call {
+    /// Send the call's cancellation to the worker when `token` fires, before
+    /// the host drops the call (openspec: add-generator-cancellation). Held
+    /// for the call; dropping it unregisters.
+    pub(super) fn forward_cancel(
+        &self,
+        token: &remotemedia_traits::CancelToken,
+    ) -> remotemedia_traits::CancelRegistration {
+        let (id, commands, sent) = (self.id, self.commands.clone(), self.cancel_sent.clone());
+        token.on_cancel(move |cancellation| {
+            if !sent.swap(true, Ordering::AcqRel) {
+                let _ = commands.send(Command::CancelWith(id, *cancellation));
+            }
+        })
+    }
+}
+
 impl Drop for Call {
     fn drop(&mut self) {
-        if !self.completed {
+        if !self.completed && !self.cancel_sent.swap(true, Ordering::AcqRel) {
             let _ = self.commands.send(Command::Cancel(self.id));
         }
     }
@@ -127,6 +149,9 @@ impl Client {
                     match command {
                         Command::Cancel(call) => {
                             let _ = control.host.cancel(call);
+                        }
+                        Command::CancelWith(call, cancellation) => {
+                            let _ = control.host.cancel_with(call, Some(cancellation));
                         }
                         Command::Acknowledge(output) => drop(output),
                         Command::Start {
@@ -291,6 +316,7 @@ impl State {
             receiver,
             commands,
             completed: false,
+            cancel_sent: Default::default(),
             source_finished: false,
         })
     }

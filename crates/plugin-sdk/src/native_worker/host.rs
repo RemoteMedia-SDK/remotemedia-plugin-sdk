@@ -314,7 +314,32 @@ impl NativeWorkerNode {
     where
         F: FnMut(RuntimeData) -> Result<(), Error> + Send,
     {
+        self.drain_cancellable(
+            kind,
+            arguments,
+            inputs,
+            resources,
+            &remotemedia_traits::CancelToken::never(),
+            &mut callback,
+        )
+        .await
+    }
+    /// [`Self::drain`] for a call with a cancel token: the worker gets the
+    /// host's cancellation when it fires (openspec: add-generator-cancellation).
+    async fn drain_cancellable<F>(
+        &self,
+        kind: CallKind,
+        arguments: serde_json::Value,
+        inputs: Vec<(String, RuntimeData)>,
+        resources: CallResources,
+        cancel: &remotemedia_traits::CancelToken,
+        callback: &mut F,
+    ) -> Result<Drained, Error>
+    where
+        F: FnMut(RuntimeData) -> Result<(), Error> + Send,
+    {
         let mut call = self.begin(kind, arguments, inputs, resources).await?;
+        let _cancel = call.forward_cancel(cancel);
         let mut outputs = 0;
         while let Some(output) = call.next().await? {
             callback(output.into_data())?;
@@ -516,12 +541,14 @@ impl AsyncStreamingNode for NativeWorkerNode {
         F: FnMut(RuntimeData) -> Result<(), Error> + Send,
     {
         self.validate_context(ctx)?;
-        self.drain(
+        let mut callback = callback;
+        self.drain_cancellable(
             CallKind::Stream,
             serde_json::Value::Null,
             vec![("input".into(), data)],
             call_resources(ctx),
-            callback,
+            &ctx.cancel_token(),
+            &mut callback,
         )
         .await
         .map(|drained| drained.outputs)
