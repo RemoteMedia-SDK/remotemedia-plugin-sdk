@@ -235,6 +235,11 @@ pub trait SyncStreamingNode: Send + Sync {
         None
     }
 
+    /// See [`StreamingNode::generator`].
+    fn generator(&self) -> Option<crate::generator::GeneratorRole<'_>> {
+        None
+    }
+
     /// Process single-input data.
     fn process(&self, data: RuntimeData) -> Result<RuntimeData, Error>;
 
@@ -463,6 +468,11 @@ pub trait AsyncStreamingNode: Send + Sync {
         false
     }
 
+    /// See [`StreamingNode::generator`].
+    fn generator(&self) -> Option<crate::generator::GeneratorRole<'_>> {
+        None
+    }
+
     /// The node's background body. The runtime starts it when the session
     /// starts and cancels it (drops the future) when the instance stops,
     /// before the node's shutdown runs; cleanup belongs in guards. It
@@ -684,6 +694,17 @@ pub trait StreamingNode: Send + Sync {
         false
     }
 
+    /// The node's generator role (openspec: add-generator-cancellation).
+    /// A node that generates text, audio, video or images returns
+    /// `GeneratorRole::text(self)` (or `audio`/`video`/`image`), which only
+    /// compiles when the node implements the matching generator trait and
+    /// therefore [`Cancellable`](crate::generator::Cancellable). The runtime
+    /// uses it to call `on_cancel` and resolve dispositions. `None` (default)
+    /// is a transform.
+    fn generator(&self) -> Option<crate::generator::GeneratorRole<'_>> {
+        None
+    }
+
     /// The node's background body. The runtime starts it when the session
     /// starts and cancels it (drops the future) when the instance stops,
     /// before the node's shutdown runs; cleanup belongs in guards. It
@@ -848,6 +869,9 @@ impl<T: SyncStreamingNode + 'static> StreamingNode for SyncNodeWrapper<T> {
     fn self_driven(&self) -> Option<bool> {
         self.0.self_driven()
     }
+    fn generator(&self) -> Option<crate::generator::GeneratorRole<'_>> {
+        self.0.generator()
+    }
 
     async fn process_async(
         &self,
@@ -950,6 +974,9 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
     }
     fn has_background(&self) -> bool {
         self.0.has_background()
+    }
+    fn generator(&self) -> Option<crate::generator::GeneratorRole<'_>> {
+        self.0.generator()
     }
     async fn background(&self, ctx: &dyn NodeRuntimeContextRead) -> Result<(), Error> {
         self.0.background(ctx).await
@@ -1061,6 +1088,17 @@ pub trait StreamingNodeFactory: Send + Sync {
     /// Get the node schema for type generation.
     fn schema(&self) -> Option<NodeSchema> {
         None
+    }
+
+    /// The generator role of the nodes this factory creates, declared before
+    /// creating one (openspec: add-generator-cancellation). Defaults to the
+    /// schema's `generates`/`cancel`. The host refuses a declaration with
+    /// `generates` and no `cancel`, and a created node whose
+    /// [`StreamingNode::generator`] disagrees with it.
+    fn generator_declaration(&self, _params: &Value) -> crate::generator::GeneratorDeclaration {
+        self.schema()
+            .map(|s| s.generator_declaration())
+            .unwrap_or_default()
     }
 
     // =========================================================================

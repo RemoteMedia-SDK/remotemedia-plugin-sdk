@@ -147,6 +147,15 @@ pub struct NodeSchema {
     /// Model sources required by this node (download URLs, paths, etc.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_sources: Option<NodeModelSources>,
+
+    /// What the node generates, if it is a generator (openspec:
+    /// add-generator-cancellation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generates: Option<crate::generator::GeneratedModality>,
+
+    /// How a generator stops a cancelled call. Required with `generates`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel: Option<crate::generator::CancelStrategy>,
 }
 
 /// Execution characteristics for scheduling
@@ -241,6 +250,29 @@ impl NodeSchema {
             multi_output: false,
             capabilities: None,
             model_sources: None,
+            generates: None,
+            cancel: None,
+        }
+    }
+
+    /// Declare the generator role (openspec: add-generator-cancellation).
+    /// A Rust node should also return the same role from
+    /// `StreamingNode::generator`; the host checks that they agree.
+    pub fn generator(
+        mut self,
+        generates: crate::generator::GeneratedModality,
+        cancel: crate::generator::CancelStrategy,
+    ) -> Self {
+        self.generates = Some(generates);
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// The declared generator role.
+    pub fn generator_declaration(&self) -> crate::generator::GeneratorDeclaration {
+        crate::generator::GeneratorDeclaration {
+            generates: self.generates,
+            cancel: self.cancel,
         }
     }
 

@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use remotemedia_types::Error;
 
+#[deprecated(
+    note = "implement remotemedia_traits::Cancellable and declare a GeneratorRole (openspec: add-generator-cancellation)"
+)]
 #[async_trait]
 pub trait InterruptableBackend: Send + Sync {
     /// Send an immediate cancel/abort signal to stop in-flight GPU generation or audio synthesis.
@@ -16,6 +19,9 @@ pub trait StatefulConversationBackend: Send + Sync {
     async fn set_context(&self, session_id: &str, context: &str) -> Result<(), Error>;
 
     /// Check barge-in timing and adjust history (early vs. late interrupt rollback).
+    #[deprecated(
+        note = "apply Cancellation::disposition in Cancellable::on_cancel; choose early-interrupt rollback in Cancellable::default_disposition"
+    )]
     async fn finalize_turn(
         &self,
         session_id: &str,
