@@ -56,7 +56,7 @@
       ]
     },
     "CancelRequest": {
-      "description": "A cancellation as it crosses a boundary to a node in another library or process (`FfiNode::cancel_call`, a worker's cancel frame). `cancellation` is the host's resolution; `explicit` is what the canceller and manifest chose, so the node can re-resolve with its own default for this cancel (which may depend on `elapsed_ms`, e.g. an early-interrupt rollback).",
+      "description": "A cancellation as it crosses a boundary to a node in another library or process (`FfiNode::cancel_call`, a worker's cancel frame). `cancellation` is the host's resolution; `explicit` is what the canceller and manifest chose, so the node can re-resolve with its own default for this cancel (which may depend on `elapsed_ms`, e.g. an early-interrupt rollback).\n\nWire rule, shared with Python: a request that carries `explicit` or `elapsed_ms` is re-resolved by the node; one with only `cancellation` (or a bare `Cancellation`) is final. `explicit` is therefore always serialized, also when empty.",
       "properties": {
         "cancellation": {
           "$ref": "#/definitions/Cancellation"
@@ -70,7 +70,12 @@
           ]
         },
         "explicit": {
-          "$ref": "#/definitions/DispositionOverride"
+          "allOf": [
+            {
+              "$ref": "#/definitions/DispositionOverride"
+            }
+          ],
+          "default": {}
         }
       },
       "required": [

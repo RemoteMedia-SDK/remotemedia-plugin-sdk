@@ -218,10 +218,15 @@ impl Cancellation {
 /// is the host's resolution; `explicit` is what the canceller and manifest
 /// chose, so the node can re-resolve with its own default for this cancel
 /// (which may depend on `elapsed_ms`, e.g. an early-interrupt rollback).
+///
+/// Wire rule, shared with Python: a request that carries `explicit` or
+/// `elapsed_ms` is re-resolved by the node; one with only `cancellation`
+/// (or a bare `Cancellation`) is final. `explicit` is therefore always
+/// serialized, also when empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CancelRequest {
     pub cancellation: Cancellation,
-    #[serde(default, skip_serializing_if = "DispositionOverride::is_empty")]
+    #[serde(default)]
     pub explicit: DispositionOverride,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
@@ -263,11 +268,17 @@ impl CancelRequest {
         }
     }
 
-    /// Accepts a `CancelRequest`, or a bare `Cancellation`, which is taken
-    /// as [`CancelRequest::exact`].
+    /// Accepts a `CancelRequest`, or a bare `Cancellation`. One that carries
+    /// neither `explicit` nor `elapsed_ms`, and a bare `Cancellation`, are
+    /// taken as [`CancelRequest::exact`].
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str::<CancelRequest>(json)
-            .or_else(|_| Cancellation::from_json(json).map(CancelRequest::exact))
+        let value: serde_json::Value = serde_json::from_str(json)?;
+        let reresolve = value.get("explicit").is_some() || value.get("elapsed_ms").is_some();
+        match serde_json::from_value::<CancelRequest>(value.clone()) {
+            Ok(request) if reresolve => Ok(request),
+            Ok(request) => Ok(CancelRequest::exact(request.cancellation)),
+            Err(_) => serde_json::from_value::<Cancellation>(value).map(CancelRequest::exact),
+        }
     }
 }
 
@@ -665,6 +676,13 @@ mod tests {
         let parsed = CancelRequest::from_json(&bare.to_json()).unwrap();
         assert_eq!(parsed, CancelRequest::exact(bare));
         assert_eq!(parsed.resolve_with(Disposition::INTERRUPT), bare);
+        // So is a request with only `cancellation` (the rule Python shares).
+        let only = format!(r#"{{"cancellation":{}}}"#, bare.to_json());
+        assert_eq!(CancelRequest::from_json(&only).unwrap(), CancelRequest::exact(bare));
+        // An empty `explicit` is serialized, so the node re-resolves.
+        let open = CancelRequest::new(bare);
+        assert!(open.to_json().contains(r#""explicit":{}"#), "{}", open.to_json());
+        assert_eq!(CancelRequest::from_json(&open.to_json()).unwrap(), open);
     }
 
     #[test]
