@@ -784,9 +784,38 @@ impl FfiNode for PythonSubprocessNode {
             "instance_scope": self.handshake.instance_scope.map(|scope| scope.as_str()),
             "self_driven": self.handshake.self_driven.then_some(true),
             "background": self.handshake.background,
+            // The worker's generator role (`META:`), openspec:
+            // add-generator-cancellation.
+            "generates": self.handshake.generator.generates,
+            "cancel": self.handshake.generator.cancel,
+            "default_dispositions": self.handshake.default_dispositions,
         })
         .to_string()
         .into()
+    }
+
+    /// The host cancels the call in flight: tell the worker out of band
+    /// (published even while the turn runs). The worker fires the call's
+    /// token, applies the disposition and runs the node's `cancel()`.
+    fn cancel_call(&self, _context: loadable_node_abi::FfiCallContext, cancellation: RString) {
+        let request = remotemedia_traits::CancelRequest::from_json(cancellation.as_str())
+            .unwrap_or_else(|_| {
+                remotemedia_traits::CancelRequest::exact(remotemedia_traits::Cancellation::new(
+                    remotemedia_traits::CancelReason::CallerCancelled,
+                ))
+            });
+        let wire = crate::python_ipc::WireRuntimeData::now_text(
+            &crate::python_ipc::cancel_call_frame(&request),
+            &self.session_id,
+        );
+        if let Err(error) = self.cmd_tx.try_send(crate::python_ipc::IpcCommand::Send {
+            req_bytes: wire.to_bytes(),
+        }) {
+            eprintln!(
+                "[plugin-sdk python] node type {}: the cancel did not reach the worker: {error}",
+                self.node_type
+            );
+        }
     }
 
     /// The Python node's `background()`: the host calls this when the
