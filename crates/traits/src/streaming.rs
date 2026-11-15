@@ -473,6 +473,24 @@ pub trait AsyncStreamingNode: Send + Sync {
         None
     }
 
+    /// See [`StreamingNode::generator_declaration`].
+    fn generator_declaration(&self) -> crate::generator::GeneratorDeclaration {
+        self.generator()
+            .map(|role| role.declaration())
+            .unwrap_or_default()
+    }
+
+    /// See [`StreamingNode::default_disposition`].
+    fn default_disposition(
+        &self,
+        cancel: &crate::cancel::CancelContext,
+    ) -> crate::cancel::Disposition {
+        match self.generator() {
+            Some(role) => role.cancellable().default_disposition(cancel),
+            None => cancel.reason.default_disposition(),
+        }
+    }
+
     /// The node's background body. The runtime starts it when the session
     /// starts and cancels it (drops the future) when the instance stops,
     /// before the node's shutdown runs; cleanup belongs in guards. It
@@ -703,6 +721,30 @@ pub trait StreamingNode: Send + Sync {
     /// is a transform.
     fn generator(&self) -> Option<crate::generator::GeneratorRole<'_>> {
         None
+    }
+
+    /// The generator role this node declares. Defaults to
+    /// [`Self::generator`]'s; an adapter for a node in another library or
+    /// process overrides it with the role that node reported.
+    fn generator_declaration(&self) -> crate::generator::GeneratorDeclaration {
+        self.generator()
+            .map(|role| role.declaration())
+            .unwrap_or_default()
+    }
+
+    /// The disposition this node wants for a cancel when neither the
+    /// canceller nor the manifest chose one. Defaults to the generator
+    /// role's `Cancellable::default_disposition`, else the reason's default.
+    /// An adapter for a node in another library or process overrides it with
+    /// the defaults that node declared.
+    fn default_disposition(
+        &self,
+        cancel: &crate::cancel::CancelContext,
+    ) -> crate::cancel::Disposition {
+        match self.generator() {
+            Some(role) => role.cancellable().default_disposition(cancel),
+            None => cancel.reason.default_disposition(),
+        }
     }
 
     /// The node's background body. The runtime starts it when the session
@@ -977,6 +1019,15 @@ impl<T: AsyncStreamingNode + 'static> StreamingNode for AsyncNodeWrapper<T> {
     }
     fn generator(&self) -> Option<crate::generator::GeneratorRole<'_>> {
         self.0.generator()
+    }
+    fn generator_declaration(&self) -> crate::generator::GeneratorDeclaration {
+        self.0.generator_declaration()
+    }
+    fn default_disposition(
+        &self,
+        cancel: &crate::cancel::CancelContext,
+    ) -> crate::cancel::Disposition {
+        self.0.default_disposition(cancel)
     }
     async fn background(&self, ctx: &dyn NodeRuntimeContextRead) -> Result<(), Error> {
         self.0.background(ctx).await

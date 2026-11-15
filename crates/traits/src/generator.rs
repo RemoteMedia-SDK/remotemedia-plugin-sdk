@@ -278,12 +278,13 @@ impl GeneratorDeclaration {
 }
 
 /// Schema categories whose nodes are expected to generate. A node in one of
-/// these categories that declares no generator role fails the registry audit.
+/// these categories that declares no generator role fails the registry audit,
+/// unless the audit records it as a transform. (`video` is not one: most
+/// video nodes transform frames.)
 pub const GENERATIVE_CATEGORIES: &[&str] = &[
     "llm",
     "tts",
     "t2i",
-    "video",
     "avatar",
     "motion",
     "text-generation",
@@ -427,5 +428,6 @@ mod tests {
         assert!(is_generative_category("avatar"));
         assert!(!is_generative_category("stt"));
         assert!(!is_generative_category("audio"));
+        assert!(!is_generative_category("video"));
     }
 }
