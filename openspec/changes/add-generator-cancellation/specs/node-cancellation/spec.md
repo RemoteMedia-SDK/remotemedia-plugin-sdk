@@ -52,6 +52,21 @@ A node that generates text, audio, video or images, including avatar, lip-sync a
 - **WHEN** the host reads a generator's schema or a plugin factory's `describe()` JSON
 - **THEN** it contains `generates` with the produced modality and `cancel` with the declared strategy
 
+### Requirement: The generated modality is a media type
+The generated modality SHALL be a subset of the media types the capability system uses (`MediaType`, the tag of `MediaConstraints`): text, audio, video and image. `MediaConstraints` SHALL have an image variant. The derive attribute's `generates` SHALL take the same constraint syntax as `output_caps`, name only `MediaType`, `GeneratorRole` and `CancelStrategy` items from the traits crate, and supply the node's output capability when `output_caps` is absent. The host SHALL warn, not refuse, when a generator's declared outputs do not include its generated media type.
+
+#### Scenario: Generates is caps syntax
+- **WHEN** a node is marked `#[node(generates = "audio(sample_rate=24000)", cancel = "observes_token")]` without `output_caps`
+- **THEN** it declares an audio generator role with `ObservesToken`, and its default output capability is audio at 24 kHz
+
+#### Scenario: Non-generated media type
+- **WHEN** `generates` names `json`, `tensor`, `file` or `binary`, or `cancel` is not a `CancelStrategy`
+- **THEN** compilation fails at the attribute
+
+#### Scenario: Generator emitting another media type
+- **WHEN** a video generator declares `output_caps = "json"` (pose frames for a renderer)
+- **THEN** the node is admitted and the registry logs a warning naming the node, the generated modality and the declared outputs
+
 ### Requirement: Rust and Python parity
 Every requirement of this capability SHALL apply to Rust and Python nodes alike, in every execution mode. Python SHALL provide the same types (`Cancellation`, `CancelReason`, `Disposition`, `CancelStrategy`, `CancelToken`) and the same generator classes as Rust, generated from one schema, and SHALL enforce the generator contract at type-check time, at class definition and at instantiation, for both the `MultiprocessNode` and `InProcessNode` bases.
 
