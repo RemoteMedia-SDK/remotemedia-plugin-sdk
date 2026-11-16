@@ -90,11 +90,18 @@ A backend SHALL provide a room agent by implementing a `Responder`, which receiv
 - **THEN** the responder is called once with that speaker, question and line `seq`, after `thinking` has been published
 
 ### Requirement: Room Agent Configuration
-The crate SHALL parse the room-agent settings from a node's parameters independently of any model settings: `name` (default `Pixel`), `wake_words` (default the lowercased name), `respond` (`mention` default, or `all`), `follow_up_secs` (default 8, finite, 0–120) and `member_id` (default `name`). It SHALL reject other `respond` values and out-of-range `follow_up_secs` with an error naming the key. It SHALL NOT require any model parameter.
+The crate SHALL parse the room-agent settings from a node's parameters independently of any model settings: `name` (default `Pixel`), `wake_words` (default the lowercased name), `respond` (`mention` default, or `all`), `follow_up_secs` (default 8, finite, 0–120), `member_id` (default `name`), `publish` (`room`, or unset for the pipeline mode) and `sentences` (`json` default, or `text` in the pipeline mode only). It SHALL reject other values of `respond`, `publish` and `sentences`, `sentences: text` with `publish: room`, and out-of-range `follow_up_secs`, with an error naming the key. It SHALL NOT require any model parameter.
 
 #### Scenario: Server-mode agent without a model path
 - **WHEN** a node is created with room settings and no `model_path`
 - **THEN** the room settings parse successfully
+
+### Requirement: Pipeline Publication Mode
+Without `publish: room`, a `RoomAgent` SHALL read only Text and `{"kind":"text"}` lines, name the speaker by `participant.name` or the origin id without a `-` plus four hex digit suffix, and publish the `assistant` messages: `{"kind":"assistant","state":"listening","to","for_ms"}` for a bare name, `{"kind":"assistant","state":"thinking","reply","to"}`, one `{"kind":"assistant","say","reply","to"}` per sentence (or the sentence as Text with `sentences: text`), and `{"kind":"assistant","text","reply","to","done":true,"first_ms","total_ms"}` when the reply ends. Addressing, follow-up, history, reply ids and cancellation SHALL be the same as in the room mode.
+
+#### Scenario: Pipeline reply
+- **WHEN** a pipeline-mode agent with `respond: all` hears "What time is it?" and its responder streams "It is noon."
+- **THEN** it publishes `thinking`, then `{"kind":"assistant","say":"It is noon.",...}`, then the `done` message with text "It is noon."
 
 ### Requirement: Sentence Splitting
 The crate SHALL split streamed text into sentences as they complete, at `.`, `!` or `?` followed by whitespace, or at a newline. It SHALL also support these options: a first piece that may end at a comma after a configured length; not splitting after a short capitalised word or a digit ("Dr.", "U.S.", "3."); ending a long piece at `:` or `;`; and an output byte bound that returns an error when exceeded. The remaining text SHALL be returned when the reply finishes.

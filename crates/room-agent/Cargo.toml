@@ -1,0 +1,24 @@
+[package]
+name = "remotemedia-room-agent"
+description = "The member side of the RemoteMedia agent link: frame codec, attribution, addressing, room history, reply lifecycle and a generic RoomAgent node for assistants that answer people in a room."
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+authors = ["RemoteMedia SDK Contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk"
+
+# No loadable ABI, host or model dependency: a plugin wraps a RoomAgent with
+# its own export (openspec: extract-room-agent-and-litert-plugin, D1).
+[dependencies]
+remotemedia-types = { path = "../types", version = "0.4.0" }
+remotemedia-traits = { path = "../traits", version = "0.4.0" }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { version = "0.3", default-features = false, features = ["std", "async-await-macro"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# The generator cancellation conformance check lives in the plugin SDK.
+remotemedia-plugin-sdk = { path = "../plugin-sdk" }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "sync"] }

@@ -49,8 +49,10 @@ That layout causes four problems:
 - **BEHAVIOR:**
   - Gemma reply ids change format: still `"<instance>-<n>"`, but the instance part becomes a UUID. Consumers treat ids as opaque, so this is not breaking.
   - Gemma's own replies now appear in structured history.
+  - A reply the room stops (`reply_interrupted`) is recorded as interrupted. Both nodes recorded it as finished.
+  - After the call's token fires, Gemma publishes nothing more of the reply, `idle` included, as RAG already does.
   - Stage tracing is enabled by a new variable name; the old name still works.
-- **Open (see design):** whether the non-room `GemmaAssistantNode` mode (`publish` unset, `{"kind":"assistant"}` output, `sentences: text`) is kept. Until that is decided it stays in the LiteRT node and is not part of the shared crate.
+- **The non-room `GemmaAssistantNode` mode** (`publish` unset, `{"kind":"assistant"}` output, `sentences: text`) is kept, because the SDK's `pipelineModel`, voice example and e2e servers use it. It becomes `RoomAgent`'s pipeline publication mode, with its outputs unchanged (design D8).
 
 ## Impact
 - **Plugin SDK** (`remotemedia-plugin-sdk`, owner of this change):

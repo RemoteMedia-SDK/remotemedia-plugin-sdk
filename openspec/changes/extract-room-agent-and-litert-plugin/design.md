@@ -91,7 +91,7 @@ Gemma's model thread, its `CONTEXT_HEADROOM` reset and its fresh prompt after a 
 ### D4. Room settings are parsed apart from model settings
 `RoomAgentConfig::from_params(&Value)` reads `name` (default `Pixel`), `wake_words`, `respond` (`mention`|`all`), `follow_up_secs` (0–120) and `member_id` (default `name`). Each responder parses its own keys from the same object. RAG stops injecting `model_path` and `publish`.
 
-`publish: "room"` stays accepted on `GemmaAssistantNode` because its manifests set it. While the non-room mode exists (D8), the LiteRT node decides between modes and only the room mode uses `RoomAgent`.
+`publish` and `sentences` are room-agent settings too, because they choose what `RoomAgent` publishes (D8). `GemmaAssistantNode` is a `RoomAgent` in both modes.
 
 ### D5. Link codec
 `room_agent::link` holds:
@@ -118,10 +118,10 @@ A `ReplyId` is `"<instance>-<n>"`: `instance` is a UUID v4 made per node instanc
 - **`stage_trace` moves to `room_agent::trace`.** It is enabled by `REMOTEMEDIA_STAGE_TRACE=1` or the old `REMOTEMEDIA_RAG_TRACE=1`. The output prefix stays `RAG_STAGE ` until `stage_records.py` accepts a new prefix, which is a separate decision. `KokoroTtsNode` uses the crate's trace, so LiteRT's TTS no longer depends on RAG-named code.
 - **`expand` (`${VAR}` in parameters) moves to `remotemedia_plugin_sdk::params::expand_env`.** It is a general authoring helper that the Whisper, Kokoro and Gemma nodes and RAG all use.
 
-### D8. The non-room Gemma mode stays in LiteRT for now
-The non-room mode (`publish` unset) emits `{"kind":"assistant", ...}`, reads `line_text`, uses `speaker_name`'s `-xxxx` suffix stripping, and supports `sentences: text`. The scaling examples do not use it. Whether the SDK's voice docs (`AI_SDK_VOICE.md`, `nextjs-tts-app`) do has not been checked.
+### D8. The non-room mode is a second publication mode of `RoomAgent`
+The non-room mode (`publish` unset) emits `{"kind":"assistant", ...}`, reads `line_text`, uses `speaker_name`'s `-xxxx` suffix stripping, and supports `sentences: text`. The scaling examples do not use it, but the SDK does (checked for task 0.3): `clients/ai`'s `pipelineModel` (`output: "say"`), `examples/nextjs-tts-app` (`VOICE_LLM=litert`), the web e2e servers (`clients/web/e2e*/server`), `llm-litert.integration.test.ts` (`sentences: 'text'`, `respond: all`) and `AI_SDK_VOICE.md`. It is kept, with its outputs unchanged.
 
-It stays in `GemmaAssistantNode` unchanged, built on the crate's history, addressing and splitter but not on `RoomAgent`. Removing it is a separate change once its users are known.
+Decision (open question 1): it is not left as a second copy of the dispatch and reply lifecycle inside LiteRT. `RoomAgentConfig` reads `publish` (`room`, or unset for the pipeline mode) and `sentences` (`json` or `text`, pipeline mode only), and `RoomAgent` publishes either the link contract's frames or the `assistant` messages. Everything else (addressing, follow-up, history, reply ids, cancellation) is the same code. The pipeline mode reads only Text and `{"kind":"text"}` lines, names speakers with `speaker_name`, and ends a reply with the `done` message carrying `first_ms` and `total_ms` instead of `idle`. RAG requires the room mode.
 
 ### D9. The LiteRT plugin repository
 - **Repository:** proposed `RemoteMedia-SDK/litert-nodes`, public like sdk-base. The maintainer creates it.
@@ -155,7 +155,7 @@ Until step 7, the old location still builds, so reverting any later step only me
 See D10 and `tasks.md`. Manifests, node types and runner configuration are unchanged. Operators see only that the plugin directory comes from the new repository's release instead of an sdk-base build.
 
 ## Open Questions
-1. Keep, deprecate or remove the non-room Gemma mode? (D8: kept unchanged in this change.)
-2. Repository name: `litert-nodes` (matches the plugin name) or `litert` (matches `llama-cpp`, `foundry-local`)?
+1. ~~Keep, deprecate or remove the non-room Gemma mode?~~ Decided: kept, as `RoomAgent`'s pipeline publication mode (D8).
+2. ~~Repository name?~~ Decided: `litert-nodes`, matching `plugin.toml`'s plugin name and the release asset `liblitert-nodes-*`. The Rust package keeps the name `remotemedia-litert-nodes`, so a local build still produces `remotemedia_litert_nodes.dll` / `libremotemedia_litert_nodes.so`, the file `RM_LITERT_PLUGIN` and the SDK clients load.
 3. Should `whisper`'s Android LiteRT export depend on `litert-nodes` with `default-features = false`, or be dropped in favour of loading the `litert-nodes` plugin directly?
 4. Should scaling's `port_core` use the shared codec's constants (single source), or only test against it (D5)?
