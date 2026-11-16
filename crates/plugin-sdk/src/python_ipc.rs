@@ -1387,7 +1387,16 @@ fn spawn_ipc_thread(
         .name(format!("rm-py-plugin-ipc-{in_channel}"))
         .spawn(move || {
             let setup = || -> Result<_, String> {
+                // iceoryx2's own dead-node sweeps off: run concurrently by
+                // several processes they fatal-panic on Windows ("the Node is
+                // still alive"). The host sweeps, one process at a time
+                // (remotemedia-sdk-base multiprocess::iox_hygiene).
+                let mut config = iceoryx2::config::Config::global_config().clone();
+                config.global.node.cleanup_dead_nodes_on_creation = false;
+                config.global.node.cleanup_dead_nodes_on_destruction = false;
+                config.global.service.cleanup_dead_nodes_on_open = false;
                 let node = NodeBuilder::new()
+                    .config(&config)
                     .create::<ipc::Service>()
                     .map_err(|e| format!("iceoryx2 node create: {e:?}"))?;
 
