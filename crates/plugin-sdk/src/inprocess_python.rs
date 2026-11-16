@@ -73,8 +73,62 @@ mod inner {
                 let mode = Conversion::Legacy(copies);
                 let py_input = runtime_data_to_python(py, input_data, mode)?;
                 let instance = self.instance.bind(py);
-                let py_output = instance.call_method1("process", (py_input,))?;
+                let py_output = Self::call(instance, "process", py_input)?;
                 python_to_runtime_data(py, &py_output, mode)
+            })
+        }
+
+        /// Run `method(data)` as one call: through the module's
+        /// `_remotemedia_invoke` hook when it has one, so the call gets its
+        /// own cancellation token (openspec: add-generator-cancellation);
+        /// directly for modules that predate it.
+        fn call<'py>(
+            instance: &Bound<'py, PyAny>,
+            method: &str,
+            data: Py<PyAny>,
+        ) -> PyResult<Bound<'py, PyAny>> {
+            if instance.hasattr("_remotemedia_invoke")? {
+                instance.call_method1("_remotemedia_invoke", (method, data))
+            } else {
+                instance.call_method1(method, (data,))
+            }
+        }
+
+        /// The Python node instance.
+        #[cfg(test)]
+        pub(crate) fn instance(&self) -> &Py<PyAny> {
+            &self.instance
+        }
+
+        /// Cancel the call in flight (openspec: add-generator-cancellation):
+        /// `request_json` is a `CancelRequest` (or a bare `Cancellation`).
+        /// The node's token fires and a generator's `cancel()` runs. Safe
+        /// from another thread than the one running the call. Returns whether
+        /// a call was in flight; `false` for modules without the hook.
+        pub fn cancel_call(&self, request_json: &str) -> PyResult<bool> {
+            Python::attach(|py| {
+                let instance = self.instance.bind(py);
+                if !instance.hasattr("_remotemedia_cancel_call")? {
+                    return Ok(false);
+                }
+                instance
+                    .call_method1("_remotemedia_cancel_call", (request_json,))?
+                    .extract()
+            })
+        }
+
+        /// The node's discovery JSON (generator role and default
+        /// dispositions), `None` for modules without the hook.
+        pub fn node_meta(&self) -> PyResult<Option<String>> {
+            Python::attach(|py| {
+                let instance = self.instance.bind(py);
+                if !instance.hasattr("_remotemedia_node_meta")? {
+                    return Ok(None);
+                }
+                instance
+                    .call_method0("_remotemedia_node_meta")?
+                    .extract()
+                    .map(Some)
             })
         }
 
@@ -94,7 +148,7 @@ mod inner {
                 let mode = Conversion::Legacy(copies);
                 let py_input = runtime_data_to_python(py, input_data, mode)?;
                 let instance = self.instance.bind(py);
-                let py_gen = instance.call_method1("process_streaming", (py_input,))?;
+                let py_gen = Self::call(instance, "process_streaming", py_input)?;
 
                 let mut results = Vec::new();
                 let iterator = py_gen.try_iter()?;
@@ -1095,6 +1149,93 @@ mod tests {
         }
 
         handle.finalize().unwrap();
+    }
+
+    /// The template's generator, loaded from `templates/` (openspec:
+    /// add-generator-cancellation). Needs that directory importable: the
+    /// tests add it to `sys.path`.
+    fn template_generator() -> PythonNodeHandle {
+        use pyo3::prelude::*;
+        pyo3::Python::attach(|py| {
+            let templates = concat!(env!("CARGO_MANIFEST_DIR"), "/../../templates");
+            py.import("sys")
+                .unwrap()
+                .getattr("path")
+                .unwrap()
+                .call_method1("insert", (0, templates))
+                .unwrap();
+        });
+        let handle = PythonNodeHandle::load("inprocess_python_plugin", "ExampleTextGenerator")
+            .expect("load the template's ExampleTextGenerator");
+        handle.initialize(&HashMap::new()).unwrap();
+        handle
+    }
+
+    #[test]
+    fn a_template_generator_declares_its_role() {
+        let handle = template_generator();
+        let meta: serde_json::Value =
+            serde_json::from_str(&handle.node_meta().unwrap().expect("meta hook")).unwrap();
+        assert_eq!(meta["generates"], "text");
+        assert_eq!(meta["cancel"], "observes_token");
+        assert_eq!(
+            meta["default_dispositions"]["barge_in"],
+            json!({"partial_output": "retain", "pending_input": "retain"})
+        );
+        // Nothing in flight: nothing to cancel.
+        let request = remotemedia_traits::CancelRequest::new(
+            remotemedia_traits::Cancellation::new(remotemedia_traits::CancelReason::BargeIn),
+        );
+        assert!(!handle.cancel_call(&request.to_json()).unwrap());
+    }
+
+    #[test]
+    fn a_cancel_from_another_thread_stops_the_stream() {
+        let handle = std::sync::Arc::new(template_generator());
+        let words = 300_000;
+        let input = RuntimeData::Text(vec!["word"; words].join(" ").into());
+        let canceller = {
+            let handle = handle.clone();
+            std::thread::spawn(move || {
+                let request =
+                    remotemedia_traits::CancelRequest::new(remotemedia_traits::Cancellation::new(
+                        remotemedia_traits::CancelReason::BargeIn,
+                    ));
+                // Until the call is in flight.
+                for _ in 0..500 {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    if handle.cancel_call(&request.to_json()).unwrap() {
+                        return true;
+                    }
+                }
+                false
+            })
+        };
+        let outputs = handle.process_streaming(&input).unwrap();
+        assert!(canceller.join().unwrap(), "the call was never in flight");
+        assert!(
+            outputs.len() < words,
+            "the stream ran to its end ({} outputs)",
+            outputs.len()
+        );
+        // The interrupt kept the cut-off reply in the node's history.
+        use pyo3::prelude::*;
+        let kept = pyo3::Python::attach(|py| -> String {
+            handle
+                .instance()
+                .bind(py)
+                .getattr("history")
+                .unwrap()
+                .get_item(0)
+                .unwrap()
+                .extract()
+                .unwrap()
+        });
+        assert!(
+            kept.ends_with("[interrupted]"),
+            "{}",
+            &kept[kept.len().saturating_sub(40)..]
+        );
     }
 }
 

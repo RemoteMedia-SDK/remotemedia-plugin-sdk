@@ -239,7 +239,12 @@ impl StreamingNode for Fixture {
                 .emit(RuntimeData::Text("from a call".into()))
                 .await;
             callback(RuntimeData::Text(
-                if emitted.is_ok() { "emitted" } else { "unsupported" }.into(),
+                if emitted.is_ok() {
+                    "emitted"
+                } else {
+                    "unsupported"
+                }
+                .into(),
             ))?;
             return Ok(1);
         }

@@ -98,7 +98,11 @@ impl Emitter {
     /// Emit a frame attributed to `origin`: one read from an input
     /// (`ctx.origin()`), or a current participant's id. Waits while the emit
     /// queue is full.
-    pub async fn emit_as(&self, data: RuntimeData, origin: impl Into<EmitOrigin>) -> Result<(), Error> {
+    pub async fn emit_as(
+        &self,
+        data: RuntimeData,
+        origin: impl Into<EmitOrigin>,
+    ) -> Result<(), Error> {
         let host = self.host.as_deref().ok_or_else(Self::missing)?;
         let (mode, participant) = to_ffi(&origin.into());
         let message =
@@ -127,7 +131,10 @@ impl Emitter {
         let message = match runtime_buffer::encode(data.clone()) {
             Ok(message) => message,
             Err(error) => {
-                return Err(TryEmitError::Rejected(data, Error::Execution(error.into_string())))
+                return Err(TryEmitError::Rejected(
+                    data,
+                    Error::Execution(error.into_string()),
+                ))
             }
         };
         let outcome = host.try_emit(message, mode, participant);

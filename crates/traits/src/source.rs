@@ -201,7 +201,10 @@ pub fn source_factory<T, F>(
     node_type: impl Into<String>,
     output: MediaConstraints,
     make: F,
-) -> SourceFactory<SourceNodeWrapper<T>, impl Fn(&Value) -> Result<SourceNodeWrapper<T>, Error> + Send + Sync>
+) -> SourceFactory<
+    SourceNodeWrapper<T>,
+    impl Fn(&Value) -> Result<SourceNodeWrapper<T>, Error> + Send + Sync,
+>
 where
     T: SourceNode,
     F: Fn(&Value) -> Result<T, Error> + Send + Sync,

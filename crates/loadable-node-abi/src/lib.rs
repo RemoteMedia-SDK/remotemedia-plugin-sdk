@@ -343,6 +343,17 @@ pub trait FfiNode: Send + Sync + 'static {
     fn background(&self, _context: FfiCallContext) -> FfiFuture<RResult<(), RString>> {
         async { ROk(()) }.into_ffi()
     }
+
+    /// Cancel the media call in flight on this instance (openspec:
+    /// add-generator-cancellation). `cancellation` is the JSON of a
+    /// `remotemedia_traits::Cancellation` (reason and disposition). The host
+    /// calls it synchronously, then drops the call's future; the router runs
+    /// one media call at a time per instance, so "in flight" names exactly the
+    /// call being cancelled, and a cancel that arrives after the call finished
+    /// is a no-op. It must return promptly: the plugin fires the call's token
+    /// and runs `on_cancel` on its own runtime. The default ignores it (the
+    /// drop still stops work inside the future).
+    fn cancel_call(&self, _context: FfiCallContext, _cancellation: RString) {}
 }
 
 /// Owned trait object for an FFI node.

@@ -124,6 +124,14 @@ pub trait NodeRuntimeContextRead: Send + Sync {
         Err(remotemedia_types::BufferAllocationError::Unavailable)
     }
 
+    /// The current call's cancellation token (openspec:
+    /// add-generator-cancellation). The host fires it, with the reason and
+    /// disposition, before it drops a cancelled call. Contexts without a
+    /// call, and hosts that predate the API, return a token that never fires.
+    fn cancel_token(&self) -> crate::cancel::CancelToken {
+        crate::cancel::CancelToken::never()
+    }
+
     /// Pipeline session this call belongs to.
     fn session_id(&self) -> &str;
 

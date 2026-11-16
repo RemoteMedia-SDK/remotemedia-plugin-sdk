@@ -703,6 +703,16 @@ impl HostHandle {
         result
     }
     pub fn cancel(&self, call: u64) -> io::Result<()> {
+        self.cancel_with(call, None)
+    }
+
+    /// Cancel a call, telling the worker why and what to do with data
+    /// (openspec: add-generator-cancellation).
+    pub fn cancel_with(
+        &self,
+        call: u64,
+        cancellation: Option<remotemedia_traits::Cancellation>,
+    ) -> io::Result<()> {
         self.shared.check_open()?;
         let outputs = {
             let mut ledger = self.shared.ledger.lock().unwrap();
@@ -716,7 +726,8 @@ impl HostHandle {
                 .filter_map(|(&sequence, &owner)| (owner == call).then_some(sequence))
                 .collect::<Vec<_>>()
         };
-        self.shared.send(&HostMessage::Cancel { call }, None)?;
+        self.shared
+            .send(&HostMessage::Cancel { call, cancellation }, None)?;
         // Already delivered outputs own their local storage independently. Free
         // their queue credits so cancellation is not held up by slow consumers.
         // Cancellation precedes these acknowledgements on the worker channel.

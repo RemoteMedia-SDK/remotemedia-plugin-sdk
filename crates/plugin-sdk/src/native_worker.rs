@@ -100,23 +100,25 @@ impl From<Tick> for TickRequest {
 pub unsafe fn run(node: Arc<dyn StreamingNode>) -> Result<(), Error> {
     // SAFETY: run's caller supplies the same startup and ownership contract.
     let endpoint = unsafe {
-        WorkerEndpoint::from_inherited_stdio(vec![
-            CallKind::Describe,
-            CallKind::Initialize,
-            CallKind::Process,
-            CallKind::MultiInput,
-            CallKind::Stream,
-            CallKind::Tick,
-            CallKind::Control,
-            CallKind::Rpc,
-            CallKind::Snapshot,
-            // Advertised only to a host that negotiated background calls,
-            // and only by a node that has a body.
-            CallKind::Background,
-        ]
-        .into_iter()
-        .filter(|kind| *kind != CallKind::Background || node.has_background())
-        .collect())
+        WorkerEndpoint::from_inherited_stdio(
+            vec![
+                CallKind::Describe,
+                CallKind::Initialize,
+                CallKind::Process,
+                CallKind::MultiInput,
+                CallKind::Stream,
+                CallKind::Tick,
+                CallKind::Control,
+                CallKind::Rpc,
+                CallKind::Snapshot,
+                // Advertised only to a host that negotiated background calls,
+                // and only by a node that has a body.
+                CallKind::Background,
+            ]
+            .into_iter()
+            .filter(|kind| *kind != CallKind::Background || node.has_background())
+            .collect(),
+        )
     }
     .map_err(transport_error)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()

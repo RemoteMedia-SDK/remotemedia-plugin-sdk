@@ -26,6 +26,26 @@ pub(super) fn run<T: Send + 'static>(
     .into_ffi()
 }
 
+/// [`run`] for a media call: the outer future holds the call's guard, so a
+/// dropped call fires its cancellation and a finished one does not.
+pub(super) fn run_call<T: Send + 'static>(
+    guard: super::cancel::CallGuard,
+    work: impl Future<Output = Result<T, Error>> + Send + 'static,
+) -> FfiFuture<RResult<T, RString>> {
+    async move {
+        let join = plugin_runtime().spawn(work);
+        let _abort = AbortOnDrop(join.abort_handle());
+        let result = match join.await {
+            Ok(Ok(value)) => ROk(value),
+            Ok(Err(error)) => RErr(error.to_string().into()),
+            Err(error) => RErr(format!("plugin shared call failed: {error}").into()),
+        };
+        guard.complete();
+        result
+    }
+    .into_ffi()
+}
+
 pub(super) fn decode(message: FfiMessage) -> Result<RuntimeData, Error> {
     runtime_buffer::decode(message).map_err(|error| Error::Execution(error.into_string()))
 }
@@ -74,6 +94,7 @@ pub(super) fn push(sink: &SharedOutputSinkBox, data: RuntimeData) -> Result<(), 
 pub(super) struct Context {
     origin: Option<Arc<crate::Origin>>,
     emitter: Option<crate::Emitter>,
+    cancel: remotemedia_traits::CancelToken,
     identity: remotemedia_traits::rpc::CallContext,
     materialization: Option<remotemedia_types::CopyContext>,
     allocator: Option<Arc<dyn OutputAllocator>>,
@@ -85,6 +106,7 @@ impl TryFrom<FfiExecutionContext> for Context {
         Ok(Self {
             origin: super::ffi_origin(&context.identity),
             emitter: None,
+            cancel: remotemedia_traits::CancelToken::never(),
             materialization: context
                 .materialization
                 .into_option()
@@ -104,8 +126,17 @@ impl Context {
         self.emitter = emitter;
         self
     }
+
+    /// The call's cancellation token.
+    pub(super) fn with_cancel(mut self, cancel: remotemedia_traits::CancelToken) -> Self {
+        self.cancel = cancel;
+        self
+    }
 }
 impl NodeRuntimeContextRead for Context {
+    fn cancel_token(&self) -> remotemedia_traits::CancelToken {
+        self.cancel.clone()
+    }
     fn origin(&self) -> Option<Arc<crate::Origin>> {
         self.origin.clone()
     }

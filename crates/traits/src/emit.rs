@@ -189,9 +189,24 @@ pub struct NodeDescription {
     pub capability_behavior: Option<crate::capabilities::CapabilityBehavior>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media_capabilities: Option<crate::capabilities::MediaCapabilities>,
+    /// What the node generates, if it is a generator (openspec:
+    /// add-generator-cancellation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generates: Option<crate::generator::GeneratedModality>,
+    /// How a generator stops a cancelled call. Required with `generates`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel: Option<crate::generator::CancelStrategy>,
 }
 
 impl NodeDescription {
+    /// The declared generator role.
+    pub fn generator_declaration(&self) -> crate::generator::GeneratorDeclaration {
+        crate::generator::GeneratorDeclaration {
+            generates: self.generates,
+            cancel: self.cancel,
+        }
+    }
+
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| "{}".into())
     }
@@ -226,7 +241,13 @@ mod tests {
             self_driven: Some(true),
             ..Default::default()
         };
-        assert_eq!(NodeDescription::from_json(&description.to_json()).unwrap(), description);
-        assert_eq!(NodeDescription::from_json("{}").unwrap(), NodeDescription::default());
+        assert_eq!(
+            NodeDescription::from_json(&description.to_json()).unwrap(),
+            description
+        );
+        assert_eq!(
+            NodeDescription::from_json("{}").unwrap(),
+            NodeDescription::default()
+        );
     }
 }

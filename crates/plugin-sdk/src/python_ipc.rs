@@ -674,7 +674,8 @@ impl TurnState {
         let seq = u64::from_le_bytes(tag[..8].try_into().expect("8 bytes"));
         let origin_mode = tag[8];
         let id_len = u16::from_le_bytes([tag[9], tag[10]]) as usize;
-        let participant = String::from_utf8_lossy(tag.get(11..11 + id_len).unwrap_or(&[])).into_owned();
+        let participant =
+            String::from_utf8_lossy(tag.get(11..11 + id_len).unwrap_or(&[])).into_owned();
         frame.truncate(end);
         if seq == 0 {
             let finished = frame.first() == Some(&(WireDataType::EndOfInput as u8));
@@ -826,9 +827,14 @@ pub fn spawn_runner_and_ipc(
 }
 
 /// What the runner declared about its node before `READY`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RunnerHandshake {
+    /// The node class's generator role and per-reason default dispositions,
+    /// from the `META:{json}` control message (openspec:
+    /// add-generator-cancellation). Default declares nothing.
+    pub generator: remotemedia_traits::GeneratorDeclaration,
+    pub default_dispositions: Option<remotemedia_traits::DefaultDispositions>,
     /// The node class's `@instance_scope(...)`, from the `SCOPE:` control
     /// message the worker sends just ahead of `READY`. `None` when the class
     /// declares none.
@@ -1023,7 +1029,10 @@ pub fn spawn_runner_and_ipc_with_handshake(
         return Err(error);
     }
 
-    let handshake = handshake.lock().map(|declared| *declared).unwrap_or_default();
+    let handshake = handshake
+        .lock()
+        .map(|declared| declared.clone())
+        .unwrap_or_default();
     Ok((cmd_tx, child, handshake))
 }
 
@@ -1908,6 +1917,11 @@ fn wait_for_ready(
                     polls += 1;
                     continue;
                 }
+                if let Some(declared) = bytes.strip_prefix(b"META:") {
+                    record_node_meta(declared, ctx.1, handshake);
+                    polls += 1;
+                    continue;
+                }
                 if bytes == b"TURNS:1" {
                     if let Ok(mut handshake) = handshake.lock() {
                         handshake.turn_tags = true;
@@ -1940,6 +1954,48 @@ fn wait_for_ready(
             None => std::thread::sleep(READY_POLL_INTERVAL),
         }
         polls += 1;
+    }
+}
+
+/// Reserved aux port of the frame that cancels the call in flight in a Python
+/// worker (openspec: add-generator-cancellation).
+pub const CANCEL_CALL_PORT: &str = "__cancel_call__";
+
+/// Text JSON aux frame cancelling the call in flight in a Python worker:
+/// `{"__aux_port__":"__cancel_call__","payload":<CancelRequest>}`. The worker
+/// handles it out of band, with no reply and no `EndOfInput`.
+pub fn cancel_call_frame(request: &remotemedia_traits::CancelRequest) -> String {
+    serde_json::json!({
+        "__aux_port__": CANCEL_CALL_PORT,
+        "payload": request,
+    })
+    .to_string()
+}
+
+/// What a worker's `META:` message carries: the `__node_meta__` reply data
+/// (openspec: add-generator-cancellation).
+#[derive(serde::Deserialize)]
+struct NodeMeta {
+    #[serde(flatten)]
+    generator: remotemedia_traits::GeneratorDeclaration,
+    #[serde(default)]
+    default_dispositions: Option<remotemedia_traits::DefaultDispositions>,
+}
+
+/// Store the generator role a worker declared in its `META:` message. An
+/// inadmissible declaration (a generator without a cancel strategy) is kept
+/// as declared, so the host refuses the node with the reason.
+fn record_node_meta(declared: &[u8], node_id: &str, handshake: &Mutex<RunnerHandshake>) {
+    match serde_json::from_slice::<NodeMeta>(declared) {
+        Ok(meta) => {
+            if let Ok(mut handshake) = handshake.lock() {
+                handshake.generator = meta.generator;
+                handshake.default_dispositions = meta.default_dispositions;
+            }
+        }
+        Err(error) => eprintln!(
+            "[plugin-sdk python_ipc] node {node_id} sent an unreadable META declaration: {error}"
+        ),
     }
 }
 
@@ -2026,7 +2082,10 @@ mod tests {
         // A frame without a tag passes through unchanged.
         assert_eq!(turn.sort(reply.clone()), Some(reply.clone()));
         // This round's frame comes back without its tag.
-        assert_eq!(turn.sort(tagged(reply.clone(), 1, 0, "")), Some(reply.clone()));
+        assert_eq!(
+            turn.sort(tagged(reply.clone(), 1, 0, "")),
+            Some(reply.clone())
+        );
         // Another round's frame is dropped.
         assert_eq!(turn.sort(tagged(reply.clone(), 7, 0, "")), None);
         // An emitted frame goes to the sink with its attribution.
@@ -2100,6 +2159,43 @@ mod tests {
     }
 
     #[test]
+    fn meta_message_records_the_generator_role() {
+        use remotemedia_traits::{CancelReason, CancelStrategy, GeneratedModality, Retention};
+        let handshake = Mutex::new(RunnerHandshake::default());
+        record_node_meta(
+            br#"{"generates":"audio","cancel":"observes_token","default_dispositions":{"barge_in":{"partial_output":"retain","pending_input":"discard"}}}"#,
+            "node",
+            &handshake,
+        );
+        let declared = handshake.lock().unwrap().clone();
+        assert_eq!(declared.generator.generates, Some(GeneratedModality::Audio));
+        assert_eq!(
+            declared.generator.cancel,
+            Some(CancelStrategy::ObservesToken)
+        );
+        assert_eq!(
+            declared.default_dispositions.unwrap()[&CancelReason::BargeIn].pending_input,
+            Retention::Discard
+        );
+        // A transform's `{}` declares nothing; garbage is ignored.
+        let handshake = Mutex::new(RunnerHandshake::default());
+        record_node_meta(b"{}", "node", &handshake);
+        record_node_meta(b"not json", "node", &handshake);
+        assert_eq!(*handshake.lock().unwrap(), RunnerHandshake::default());
+    }
+
+    #[test]
+    fn the_cancel_frame_carries_the_request() {
+        let request = remotemedia_traits::CancelRequest::new(
+            remotemedia_traits::Cancellation::new(remotemedia_traits::CancelReason::Superseded),
+        );
+        let frame: serde_json::Value = serde_json::from_str(&cancel_call_frame(&request)).unwrap();
+        assert_eq!(frame["__aux_port__"], CANCEL_CALL_PORT);
+        assert_eq!(frame["payload"]["cancellation"]["reason"], "superseded");
+        assert_eq!(frame["payload"]["explicit"], serde_json::json!({}));
+    }
+
+    #[test]
     fn scope_message_is_recorded_in_the_handshake() {
         use remotemedia_traits::streaming::InstanceScope;
         let handshake = Mutex::new(RunnerHandshake::default());
@@ -2109,7 +2205,10 @@ mod tests {
             Some(InstanceScope::PerParticipant)
         );
         record_instance_scope(b"shared", "node", &handshake);
-        assert_eq!(handshake.lock().unwrap().instance_scope, Some(InstanceScope::Shared));
+        assert_eq!(
+            handshake.lock().unwrap().instance_scope,
+            Some(InstanceScope::Shared)
+        );
         record_instance_scope(b"per-session", "node", &handshake);
         assert_eq!(handshake.lock().unwrap().instance_scope, None);
     }

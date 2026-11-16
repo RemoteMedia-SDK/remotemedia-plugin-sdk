@@ -317,18 +317,19 @@ impl FfiNodeFactory for PythonSubprocessFactory {
         // What the worker declared before READY is kept: it is how the host
         // learns the node's instance scope, whether it is self-driven, and
         // whether it has a body (openspec: add-source-node-lifecycle).
-        let (cmd_tx, child, handshake) = match crate::python_ipc::spawn_runner_and_ipc_with_handshake(
-            &argv,
-            &session_id,
-            &node_id,
-        ) {
-            Ok(spawned) => spawned,
-            Err(e) => {
-                return RErr(RString::from(format!(
-                    "PythonSubprocessFactory::create — spawn/IPC failed: {e}"
-                )))
-            }
-        };
+        let (cmd_tx, child, handshake) =
+            match crate::python_ipc::spawn_runner_and_ipc_with_handshake(
+                &argv,
+                &session_id,
+                &node_id,
+            ) {
+                Ok(spawned) => spawned,
+                Err(e) => {
+                    return RErr(RString::from(format!(
+                        "PythonSubprocessFactory::create — spawn/IPC failed: {e}"
+                    )))
+                }
+            };
 
         let node = PythonSubprocessNode {
             node_type: self.config.node_type.to_string(),
@@ -637,7 +638,8 @@ pub struct PythonSubprocessNode {
     /// How the worker's `background()` stands.
     pub(crate) body: tokio::sync::watch::Sender<crate::python_ipc::BodyState>,
     /// The host's emitter for this instance, once bound.
-    pub(crate) emitter: std::sync::OnceLock<std::sync::Arc<loadable_node_abi::buffer::NodeEmitterBox>>,
+    pub(crate) emitter:
+        std::sync::OnceLock<std::sync::Arc<loadable_node_abi::buffer::NodeEmitterBox>>,
 }
 
 impl Drop for PythonSubprocessNode {
@@ -731,7 +733,8 @@ impl FfiNode for PythonSubprocessNode {
         // With a body the host runs, its return is reported through
         // `background()`; otherwise the end frame closes the emitter here.
         let host_runs_body = self.handshake.background;
-        let (frames, mut emitted) = tokio::sync::mpsc::channel::<crate::python_ipc::EmittedFrame>(64);
+        let (frames, mut emitted) =
+            tokio::sync::mpsc::channel::<crate::python_ipc::EmittedFrame>(64);
         if self
             .cmd_tx
             .try_send(crate::python_ipc::IpcCommand::EmitSink { frames })
@@ -784,9 +787,38 @@ impl FfiNode for PythonSubprocessNode {
             "instance_scope": self.handshake.instance_scope.map(|scope| scope.as_str()),
             "self_driven": self.handshake.self_driven.then_some(true),
             "background": self.handshake.background,
+            // The worker's generator role (`META:`), openspec:
+            // add-generator-cancellation.
+            "generates": self.handshake.generator.generates,
+            "cancel": self.handshake.generator.cancel,
+            "default_dispositions": self.handshake.default_dispositions,
         })
         .to_string()
         .into()
+    }
+
+    /// The host cancels the call in flight: tell the worker out of band
+    /// (published even while the turn runs). The worker fires the call's
+    /// token, applies the disposition and runs the node's `cancel()`.
+    fn cancel_call(&self, _context: loadable_node_abi::FfiCallContext, cancellation: RString) {
+        let request = remotemedia_traits::CancelRequest::from_json(cancellation.as_str())
+            .unwrap_or_else(|_| {
+                remotemedia_traits::CancelRequest::exact(remotemedia_traits::Cancellation::new(
+                    remotemedia_traits::CancelReason::CallerCancelled,
+                ))
+            });
+        let wire = crate::python_ipc::WireRuntimeData::now_text(
+            &crate::python_ipc::cancel_call_frame(&request),
+            &self.session_id,
+        );
+        if let Err(error) = self.cmd_tx.try_send(crate::python_ipc::IpcCommand::Send {
+            req_bytes: wire.to_bytes(),
+        }) {
+            eprintln!(
+                "[plugin-sdk python] node type {}: the cancel did not reach the worker: {error}",
+                self.node_type
+            );
+        }
     }
 
     /// The Python node's `background()`: the host calls this when the
@@ -816,8 +848,13 @@ impl FfiNode for PythonSubprocessNode {
         input: RVec<u8>,
         _session_id: RString,
     ) -> FfiFuture<RResult<bool, RString>> {
-        let stop = (is_shutdown(input.as_slice()) && !self.node_id.is_empty())
-            .then(|| (self._child.clone(), self.session_id.clone(), self.node_id.clone()));
+        let stop = (is_shutdown(input.as_slice()) && !self.node_id.is_empty()).then(|| {
+            (
+                self._child.clone(),
+                self.session_id.clone(),
+                self.node_id.clone(),
+            )
+        });
         async move {
             if let Some((child, session_id, node_id)) = stop {
                 let stopped = crate::adapter::plugin_runtime().spawn_blocking(move || {

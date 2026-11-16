@@ -21,7 +21,9 @@ impl loadable_node_abi::buffer::NodeEmitter for BackgroundEmitter {
         let request = self.0.clone();
         async move {
             if origin != loadable_node_abi::buffer::EMIT_AS_DEFAULT {
-                return RErr("a worker-process node emits with the default attribution only".into());
+                return RErr(
+                    "a worker-process node emits with the default attribution only".into(),
+                );
             }
             let data = match loadable_node_abi::runtime_buffer::decode(message) {
                 Ok(data) => data,
@@ -163,6 +165,9 @@ impl WorkerContext {
     }
 }
 impl NodeRuntimeContextRead for WorkerContext {
+    fn cancel_token(&self) -> remotemedia_traits::CancelToken {
+        self.request.cancel_token()
+    }
     fn emitter_any(&self) -> Option<&(dyn Any + Send + Sync)> {
         self.emitter
             .as_ref()

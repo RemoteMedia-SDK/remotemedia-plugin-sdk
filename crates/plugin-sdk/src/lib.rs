@@ -23,6 +23,8 @@ pub mod emitter;
 pub mod endpoint_call;
 pub use emitter::{Emit, EmitOrigin, Emitter, Origin, TryEmitError};
 pub mod params;
+/// Generator conformance (openspec: add-generator-cancellation).
+pub mod testing;
 
 #[cfg(all(feature = "mapped-python", any(windows, target_os = "linux")))]
 pub mod mapped_python;

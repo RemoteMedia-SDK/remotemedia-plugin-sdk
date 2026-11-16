@@ -84,8 +84,10 @@
 #![warn(clippy::all)]
 
 pub mod buffer_contract;
+pub mod cancel;
 pub mod capabilities;
 pub mod emit;
+pub mod generator;
 pub mod llm;
 pub mod ports;
 pub mod runtime_context;
@@ -100,8 +102,21 @@ pub use capabilities::{
     PixelFormat, TensorConstraints, TensorDataType, TextConstraints, VideoConstraints,
 };
 
+pub use cancel::{
+    default_dispositions, resolve_disposition, CancelContext, CancelReason, CancelRegistration,
+    CancelRequest, CancelSource, CancelToken, Cancellation, Cancelled, DefaultDispositions,
+    Disposition, DispositionOverride, Retention,
+};
+
 pub use emit::{Emit, EmitOrigin, NodeDescription, Origin, TryEmitError};
 
+pub use generator::{
+    is_generative_category, AudioGenerator, CancelStrategy, Cancellable, GeneratedModality,
+    GeneratorDeclaration, GeneratorDeclarationError, GeneratorRole, ImageGenerator, TextGenerator,
+    VideoGenerator, GENERATIVE_CATEGORIES,
+};
+
+#[allow(deprecated)]
 pub use llm::{InterruptableBackend, StatefulConversationBackend, VoiceActivityDetectorBackend};
 
 pub use ports::{InputPort, OutputPort, PortKind, SnapshotPort, TimestampedSnapshot};

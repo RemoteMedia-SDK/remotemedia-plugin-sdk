@@ -150,6 +150,12 @@ pub enum HostMessage {
     },
     Cancel {
         call: u64,
+        /// Why, and what to do with data (openspec:
+        /// add-generator-cancellation). Absent from hosts that predate it,
+        /// and omitted on the wire when the host has none, so a plain cancel
+        /// is unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cancellation: Option<remotemedia_traits::Cancellation>,
     },
     Shutdown,
     Snapshot {
