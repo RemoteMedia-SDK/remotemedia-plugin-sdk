@@ -187,13 +187,7 @@ where
     let baseline = first_output(&mut running, opts.first_output_timeout)
         .await
         .map_err(|e| format!("{node_type}: baseline call: {e}"))?;
-    cancel(
-        &node,
-        &call,
-        running,
-        Cancellation::new(opts.reason),
-    )
-    .await;
+    cancel(&node, &call, running, Cancellation::new(opts.reason)).await;
 
     let mut cancelled = Vec::new();
     let mut running = start(&node, &call, input(), opts.counts);

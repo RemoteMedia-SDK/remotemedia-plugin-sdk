@@ -281,14 +281,8 @@ impl GeneratorDeclaration {
 /// these categories that declares no generator role fails the registry audit,
 /// unless the audit records it as a transform. (`video` is not one: most
 /// video nodes transform frames.)
-pub const GENERATIVE_CATEGORIES: &[&str] = &[
-    "llm",
-    "tts",
-    "t2i",
-    "avatar",
-    "motion",
-    "text-generation",
-];
+pub const GENERATIVE_CATEGORIES: &[&str] =
+    &["llm", "tts", "t2i", "avatar", "motion", "text-generation"];
 
 pub fn is_generative_category(category: &str) -> bool {
     let c = category.to_ascii_lowercase();

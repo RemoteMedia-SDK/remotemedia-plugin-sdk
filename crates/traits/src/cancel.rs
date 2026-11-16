@@ -678,10 +678,17 @@ mod tests {
         assert_eq!(parsed.resolve_with(Disposition::INTERRUPT), bare);
         // So is a request with only `cancellation` (the rule Python shares).
         let only = format!(r#"{{"cancellation":{}}}"#, bare.to_json());
-        assert_eq!(CancelRequest::from_json(&only).unwrap(), CancelRequest::exact(bare));
+        assert_eq!(
+            CancelRequest::from_json(&only).unwrap(),
+            CancelRequest::exact(bare)
+        );
         // An empty `explicit` is serialized, so the node re-resolves.
         let open = CancelRequest::new(bare);
-        assert!(open.to_json().contains(r#""explicit":{}"#), "{}", open.to_json());
+        assert!(
+            open.to_json().contains(r#""explicit":{}"#),
+            "{}",
+            open.to_json()
+        );
         assert_eq!(CancelRequest::from_json(&open.to_json()).unwrap(), open);
     }
 

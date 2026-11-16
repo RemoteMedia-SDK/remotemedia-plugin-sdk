@@ -673,7 +673,8 @@ impl TurnState {
         let seq = u64::from_le_bytes(tag[..8].try_into().expect("8 bytes"));
         let origin_mode = tag[8];
         let id_len = u16::from_le_bytes([tag[9], tag[10]]) as usize;
-        let participant = String::from_utf8_lossy(tag.get(11..11 + id_len).unwrap_or(&[])).into_owned();
+        let participant =
+            String::from_utf8_lossy(tag.get(11..11 + id_len).unwrap_or(&[])).into_owned();
         frame.truncate(end);
         if seq == 0 {
             let finished = frame.first() == Some(&(WireDataType::EndOfInput as u8));
@@ -1986,7 +1987,10 @@ mod tests {
         // A frame without a tag passes through unchanged.
         assert_eq!(turn.sort(reply.clone()), Some(reply.clone()));
         // This round's frame comes back without its tag.
-        assert_eq!(turn.sort(tagged(reply.clone(), 1, 0, "")), Some(reply.clone()));
+        assert_eq!(
+            turn.sort(tagged(reply.clone(), 1, 0, "")),
+            Some(reply.clone())
+        );
         // Another round's frame is dropped.
         assert_eq!(turn.sort(tagged(reply.clone(), 7, 0, "")), None);
         // An emitted frame goes to the sink with its attribution.
@@ -2070,7 +2074,10 @@ mod tests {
         );
         let declared = handshake.lock().unwrap().clone();
         assert_eq!(declared.generator.generates, Some(GeneratedModality::Audio));
-        assert_eq!(declared.generator.cancel, Some(CancelStrategy::ObservesToken));
+        assert_eq!(
+            declared.generator.cancel,
+            Some(CancelStrategy::ObservesToken)
+        );
         assert_eq!(
             declared.default_dispositions.unwrap()[&CancelReason::BargeIn].pending_input,
             Retention::Discard
@@ -2084,9 +2091,9 @@ mod tests {
 
     #[test]
     fn the_cancel_frame_carries_the_request() {
-        let request = remotemedia_traits::CancelRequest::new(remotemedia_traits::Cancellation::new(
-            remotemedia_traits::CancelReason::Superseded,
-        ));
+        let request = remotemedia_traits::CancelRequest::new(
+            remotemedia_traits::Cancellation::new(remotemedia_traits::CancelReason::Superseded),
+        );
         let frame: serde_json::Value = serde_json::from_str(&cancel_call_frame(&request)).unwrap();
         assert_eq!(frame["__aux_port__"], CANCEL_CALL_PORT);
         assert_eq!(frame["payload"]["cancellation"]["reason"], "superseded");
@@ -2103,7 +2110,10 @@ mod tests {
             Some(InstanceScope::PerParticipant)
         );
         record_instance_scope(b"shared", "node", &handshake);
-        assert_eq!(handshake.lock().unwrap().instance_scope, Some(InstanceScope::Shared));
+        assert_eq!(
+            handshake.lock().unwrap().instance_scope,
+            Some(InstanceScope::Shared)
+        );
         record_instance_scope(b"per-session", "node", &handshake);
         assert_eq!(handshake.lock().unwrap().instance_scope, None);
     }

@@ -1183,9 +1183,9 @@ mod tests {
             json!({"partial_output": "retain", "pending_input": "retain"})
         );
         // Nothing in flight: nothing to cancel.
-        let request = remotemedia_traits::CancelRequest::new(remotemedia_traits::Cancellation::new(
-            remotemedia_traits::CancelReason::BargeIn,
-        ));
+        let request = remotemedia_traits::CancelRequest::new(
+            remotemedia_traits::Cancellation::new(remotemedia_traits::CancelReason::BargeIn),
+        );
         assert!(!handle.cancel_call(&request.to_json()).unwrap());
     }
 
@@ -1197,9 +1197,10 @@ mod tests {
         let canceller = {
             let handle = handle.clone();
             std::thread::spawn(move || {
-                let request = remotemedia_traits::CancelRequest::new(
-                    remotemedia_traits::Cancellation::new(remotemedia_traits::CancelReason::BargeIn),
-                );
+                let request =
+                    remotemedia_traits::CancelRequest::new(remotemedia_traits::Cancellation::new(
+                        remotemedia_traits::CancelReason::BargeIn,
+                    ));
                 // Until the call is in flight.
                 for _ in 0..500 {
                     std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1230,7 +1231,11 @@ mod tests {
                 .extract()
                 .unwrap()
         });
-        assert!(kept.ends_with("[interrupted]"), "{}", &kept[kept.len().saturating_sub(40)..]);
+        assert!(
+            kept.ends_with("[interrupted]"),
+            "{}",
+            &kept[kept.len().saturating_sub(40)..]
+        );
     }
 }
 
