@@ -90,6 +90,7 @@ pub mod emit;
 pub mod generator;
 pub mod llm;
 pub mod ports;
+pub mod provider;
 pub mod runtime_context;
 pub mod schema;
 pub mod source;
@@ -118,6 +119,12 @@ pub use generator::{
 
 #[allow(deprecated)]
 pub use llm::{InterruptableBackend, StatefulConversationBackend, VoiceActivityDetectorBackend};
+
+pub use provider::{iter_factory_providers, NodeFactoryProvider};
+
+/// Re-exported so a crate can submit a [`NodeFactoryProvider`] with
+/// `remotemedia_traits::inventory::submit!` without its own dependency.
+pub use inventory;
 
 pub use ports::{InputPort, OutputPort, PortKind, SnapshotPort, TimestampedSnapshot};
 
