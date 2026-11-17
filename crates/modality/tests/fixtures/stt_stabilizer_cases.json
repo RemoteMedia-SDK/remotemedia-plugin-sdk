@@ -1407,6 +1407,143 @@
           "op": "finalize"
         }
       ]
+    },
+    {
+      "config": {
+        "agreement_updates": 1,
+        "mode": "full",
+        "trailing_guard_tokens": 0
+      },
+      "expected": [
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 1,
+            "stable_tokens": 4,
+            "text": "alpha bravo charlie delta",
+            "tokens": [
+              {
+                "end_ms": 1000,
+                "start_ms": 0,
+                "text": "alpha"
+              },
+              {
+                "end_ms": 2000,
+                "start_ms": 1000,
+                "text": "bravo"
+              },
+              {
+                "end_ms": 3000,
+                "start_ms": 2000,
+                "text": "charlie"
+              },
+              {
+                "end_ms": 4000,
+                "start_ms": 3000,
+                "text": "delta"
+              }
+            ],
+            "transcript": "alpha bravo charlie delta",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 4,
+            "removed": 0,
+            "revision": 2,
+            "stable_tokens": 6,
+            "text": "echo foxtrot",
+            "tokens": [
+              {
+                "end_ms": 3800,
+                "start_ms": 3200,
+                "text": "echo"
+              },
+              {
+                "end_ms": 4400,
+                "start_ms": 3800,
+                "text": "foxtrot"
+              }
+            ],
+            "transcript": "alpha bravo charlie delta echo foxtrot",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "end_ms": 4400,
+            "revision": 3,
+            "start_ms": 0,
+            "text": "alpha bravo charlie delta echo foxtrot",
+            "tokens": [
+              {
+                "end_ms": 1000,
+                "start_ms": 0,
+                "text": "alpha"
+              },
+              {
+                "end_ms": 2000,
+                "start_ms": 1000,
+                "text": "bravo"
+              },
+              {
+                "end_ms": 3000,
+                "start_ms": 2000,
+                "text": "charlie"
+              },
+              {
+                "end_ms": 4000,
+                "start_ms": 3000,
+                "text": "delta"
+              },
+              {
+                "end_ms": 3800,
+                "start_ms": 3200,
+                "text": "echo"
+              },
+              {
+                "end_ms": 4400,
+                "start_ms": 3800,
+                "text": "foxtrot"
+              }
+            ],
+            "type": "final",
+            "utterance_id": 0
+          }
+        ]
+      ],
+      "name": "coarse_window_timestamps",
+      "steps": [
+        {
+          "op": "push_tokens",
+          "scope": "window",
+          "tokens": [
+            {
+              "end_ms": 4000,
+              "start_ms": 0,
+              "text": "alpha bravo charlie delta"
+            }
+          ]
+        },
+        {
+          "op": "push_tokens",
+          "scope": "window",
+          "tokens": [
+            {
+              "end_ms": 4400,
+              "start_ms": 2000,
+              "text": "charlie delta echo foxtrot"
+            }
+          ]
+        },
+        {
+          "op": "finalize"
+        }
+      ]
     }
   ]
 }

@@ -237,6 +237,15 @@ pub trait Whisper: Send + Sync {
 
     /// Run one inference pass over a normalized 16 kHz mono decode window and
     /// return the raw decoded segments. Backend-specific.
+    ///
+    /// Segment times must come from the model (timestamp tokens or word
+    /// alignment). The state trims audio and force-commits at the window
+    /// bound by these times. A single segment spanning the whole window is
+    /// not enough. A backend without timestamps should instead re-decode
+    /// the whole utterance and feed `TranscriptStabilizer` with
+    /// `HypothesisScope::Utterance`. Measured with LiteRT whisper-tiny on a
+    /// 29 s clip, that path stays within 0.04 WER of a one-shot decode; this
+    /// window path, given whole-window spans, does not.
     fn decode_window(&self, samples: &[f32]) -> Result<Vec<DecodedSegment>, Error>;
 
     /// Feed a chunk of (possibly non-16k / multi-channel) audio into the

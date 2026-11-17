@@ -230,28 +230,45 @@ impl TranscriptStabilizer {
         mut tokens: Vec<TranscriptToken>,
         scope: HypothesisScope,
     ) -> Vec<TranscriptToken> {
-        let mut time_filtered = false;
-        if scope == HypothesisScope::Window {
-            if let Some(through) = self.committed_through_ms {
-                time_filtered = tokens.iter().any(|t| t.end_ms.is_some());
+        // In a window, the committed-time watermark estimates how many leading
+        // tokens were already committed. Timestamps can be coarse (a phrase or
+        // a whole window spread evenly over its words), so that estimate only
+        // says where to look for the text overlap. Tokens are dropped by time
+        // only when no text anchor is found.
+        let watermark = match scope {
+            HypothesisScope::Window if tokens.iter().any(|t| t.end_ms.is_some()) => {
+                self.committed_through_ms
+            }
+            _ => None,
+        };
+        let drop_by_time = |mut tokens: Vec<TranscriptToken>| {
+            if let Some(through) = watermark {
                 tokens.retain(|t| t.end_ms.is_none_or(|end| end > through));
             }
-        }
-        if self.committed.is_empty() {
-            return tokens;
-        }
-        let cut = match anchor_end(&self.committed, &tokens, scope, time_filtered) {
-            Some(end) => end,
-            // Nothing matched. An utterance hypothesis still repeats the
-            // committed words, so skip that many. A window that matched
-            // nothing has already dropped them by time, or it starts after
-            // them.
-            None => match scope {
-                HypothesisScope::Utterance => self.committed.len().min(tokens.len()),
-                HypothesisScope::Window => 0,
-            },
+            tokens
         };
-        tokens.split_off(cut)
+        if self.committed.is_empty() {
+            return drop_by_time(tokens);
+        }
+        let expected = watermark.map(|through| {
+            tokens
+                .iter()
+                .filter(|t| t.end_ms.is_some_and(|end| end <= through))
+                .count()
+        });
+        match anchor_end(&self.committed, &tokens, scope, expected) {
+            Some(end) => tokens.split_off(end),
+            // Nothing matched. An utterance hypothesis still repeats the
+            // committed words, so skip that many. A window falls back to its
+            // timestamps, or, without any, starts after the committed text.
+            None => match scope {
+                HypothesisScope::Utterance => {
+                    let cut = self.committed.len().min(tokens.len());
+                    tokens.split_off(cut)
+                }
+                HypothesisScope::Window => drop_by_time(tokens),
+            },
+        }
     }
 
     fn agree(&mut self, tail: Vec<TranscriptToken>) {
@@ -371,18 +388,22 @@ impl TranscriptStabilizer {
 
 /// Find the index in `tokens` just past where the committed text ends.
 ///
-/// The last 3, 2 or 1 committed tokens are searched for, longest first.
-/// For an `Utterance` hypothesis the expected end is `committed.len()`, and
-/// the match closest to it within a small radius wins. A `Window` hypothesis
-/// has no expected position, so the earliest match wins. A single-word match
-/// must sit near the start, so a common word like "the" later in the window
-/// does not anchor it. After a time filter, the leftover overlap is a few
-/// words at most, so every match must sit near the start.
+/// The last 3, 2 or 1 committed tokens are searched for, longest first, and
+/// the match closest to an expected end within a radius wins:
+/// - `Utterance`: the expected end is `committed.len()`.
+/// - `Window` with timestamps: the expected end is `time_estimate`, the
+///   number of tokens that end before the committed watermark. Coarse
+///   timestamps can be several words off, so the radius is wide.
+/// - `Window` without timestamps: no estimate, so the earliest match wins.
+///
+/// A single-word match must sit close to the expected end (or, with no
+/// estimate, near the start), so a common word like "the" elsewhere in the
+/// hypothesis does not anchor it.
 fn anchor_end(
     committed: &[TranscriptToken],
     tokens: &[TranscriptToken],
     scope: HypothesisScope,
-    time_filtered: bool,
+    time_estimate: Option<usize>,
 ) -> Option<usize> {
     let n = committed.len();
     let keys: Vec<String> = tokens.iter().map(|t| compare_key(&t.text)).collect();
@@ -397,19 +418,23 @@ fn anchor_end(
         let ends = (0..=keys.len() - g)
             .filter(|&i| keys[i..i + g] == needle[..])
             .map(|i| i + g);
-        let best = match scope {
-            HypothesisScope::Utterance => {
-                let radius = 3 + n / 4;
-                ends.filter(|&e| e.abs_diff(n) <= radius)
-                    .min_by_key(|&e| (e.abs_diff(n), std::cmp::Reverse(e)))
-            }
-            HypothesisScope::Window => {
-                let mut ends = ends;
-                let limit = if time_filtered || g == 1 {
-                    g + 3
+        let target = match scope {
+            HypothesisScope::Utterance => Some((n, 3 + n / 4)),
+            HypothesisScope::Window => time_estimate.map(|e| (e, 3 + tokens.len() / 3)),
+        };
+        let best = match target {
+            Some((expected, radius)) => {
+                let radius = if g == 1 && scope == HypothesisScope::Window {
+                    radius.min(2)
                 } else {
-                    usize::MAX
+                    radius
                 };
+                ends.filter(|&e| e.abs_diff(expected) <= radius)
+                    .min_by_key(|&e| (e.abs_diff(expected), std::cmp::Reverse(e)))
+            }
+            None => {
+                let mut ends = ends;
+                let limit = if g == 1 { g + 3 } else { usize::MAX };
                 ends.next().filter(|&e| e <= limit)
             }
         };

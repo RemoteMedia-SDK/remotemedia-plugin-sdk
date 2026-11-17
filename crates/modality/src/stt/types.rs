@@ -59,11 +59,17 @@ pub enum HypothesisScope {
     #[default]
     Utterance,
     /// A sliding audio window that may start partway through the utterance
-    /// (Whisper over a trimmed buffer). Tokens that end at or before the
-    /// committed time are dropped when timestamps are present. The rest is
-    /// lined up with the committed text by word overlap. A model without
-    /// timestamps must call `commit_unstable` before it slides its window
-    /// past text that is still unstable.
+    /// (Whisper over a trimmed buffer). The hypothesis is lined up with the
+    /// committed text by word overlap. Timestamps, when present, only say
+    /// where to look for that overlap, and tokens that end before the
+    /// committed time are dropped only when no overlap is found, so coarse
+    /// (phrase- or window-level) times do not lose words.
+    ///
+    /// The caller decides when to trim audio, so it needs real timings to
+    /// know where committed text ends. A model without timestamps must call
+    /// `commit_unstable` before it slides its window past text that is still
+    /// unstable. In practice such a model does much better re-decoding the
+    /// whole utterance with `Utterance` scope.
     Window,
 }
 
