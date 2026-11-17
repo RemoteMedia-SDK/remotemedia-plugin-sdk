@@ -1,0 +1,1549 @@
+{
+  "cases": [
+    {
+      "config": {
+        "agreement_updates": 2,
+        "mode": "full",
+        "trailing_guard_tokens": 1
+      },
+      "expected": [
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 1,
+            "stable_tokens": 0,
+            "text": "I scream",
+            "tokens": [
+              {
+                "text": "I"
+              },
+              {
+                "text": "scream"
+              }
+            ],
+            "transcript": "I scream",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "removed": 2,
+            "revision": 2,
+            "stable_tokens": 0,
+            "text": "ice cream is",
+            "tokens": [
+              {
+                "text": "ice"
+              },
+              {
+                "text": "cream"
+              },
+              {
+                "text": "is"
+              }
+            ],
+            "transcript": "ice cream is",
+            "type": "correction",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 3,
+            "removed": 0,
+            "revision": 3,
+            "stable_tokens": 2,
+            "text": "great",
+            "tokens": [
+              {
+                "text": "great"
+              }
+            ],
+            "transcript": "ice cream is great",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 4,
+            "removed": 0,
+            "revision": 4,
+            "stable_tokens": 3,
+            "text": "today.",
+            "tokens": [
+              {
+                "text": "today."
+              }
+            ],
+            "transcript": "ice cream is great today.",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 5,
+            "removed": 0,
+            "revision": 5,
+            "stable_tokens": 5,
+            "text": "",
+            "tokens": [],
+            "transcript": "ice cream is great today.",
+            "type": "delta",
+            "utterance_id": 0
+          },
+          {
+            "revision": 6,
+            "text": "ice cream is great today.",
+            "tokens": [
+              {
+                "text": "ice"
+              },
+              {
+                "text": "cream"
+              },
+              {
+                "text": "is"
+              },
+              {
+                "text": "great"
+              },
+              {
+                "text": "today."
+              }
+            ],
+            "type": "final",
+            "utterance_id": 0
+          }
+        ]
+      ],
+      "name": "full_redecode_no_timestamps",
+      "steps": [
+        {
+          "op": "push_text",
+          "text": "I scream"
+        },
+        {
+          "op": "push_text",
+          "text": "ice cream is"
+        },
+        {
+          "op": "push_text",
+          "text": "ice cream is great"
+        },
+        {
+          "op": "push_text",
+          "text": "Ice cream is great today."
+        },
+        {
+          "op": "finalize"
+        }
+      ]
+    },
+    {
+      "config": {
+        "agreement_updates": 2,
+        "mode": "stable",
+        "trailing_guard_tokens": 1
+      },
+      "expected": [
+        [],
+        [],
+        [],
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 1,
+            "stable_tokens": 3,
+            "text": "the cat sat",
+            "tokens": [
+              {
+                "text": "the"
+              },
+              {
+                "text": "cat"
+              },
+              {
+                "text": "sat"
+              }
+            ],
+            "transcript": "the cat sat",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 3,
+            "removed": 0,
+            "revision": 2,
+            "stable_tokens": 6,
+            "text": "on the mat.",
+            "tokens": [
+              {
+                "text": "on"
+              },
+              {
+                "text": "the"
+              },
+              {
+                "text": "mat."
+              }
+            ],
+            "transcript": "the cat sat on the mat.",
+            "type": "delta",
+            "utterance_id": 0
+          },
+          {
+            "revision": 3,
+            "text": "the cat sat on the mat.",
+            "tokens": [
+              {
+                "text": "the"
+              },
+              {
+                "text": "cat"
+              },
+              {
+                "text": "sat"
+              },
+              {
+                "text": "on"
+              },
+              {
+                "text": "the"
+              },
+              {
+                "text": "mat."
+              }
+            ],
+            "type": "final",
+            "utterance_id": 0
+          }
+        ]
+      ],
+      "name": "stable_redecode_no_timestamps",
+      "steps": [
+        {
+          "op": "push_text",
+          "text": "the cat"
+        },
+        {
+          "op": "push_text",
+          "text": "the cap sat"
+        },
+        {
+          "op": "push_text",
+          "text": "the cat sat on"
+        },
+        {
+          "op": "push_text",
+          "text": "the cat sat on the mat"
+        },
+        {
+          "op": "finalize_text",
+          "text": "the cat sat on the mat."
+        }
+      ]
+    },
+    {
+      "config": {
+        "mode": "off"
+      },
+      "expected": [
+        [],
+        [],
+        [
+          {
+            "revision": 1,
+            "text": "Hello, world!",
+            "tokens": [
+              {
+                "text": "Hello,"
+              },
+              {
+                "text": "world!"
+              }
+            ],
+            "type": "final",
+            "utterance_id": 0
+          }
+        ]
+      ],
+      "name": "off_mode_final_verbatim",
+      "steps": [
+        {
+          "op": "push_text",
+          "text": "hello wor"
+        },
+        {
+          "op": "push_text",
+          "text": "hello world"
+        },
+        {
+          "op": "finalize_text",
+          "text": "Hello, world!"
+        }
+      ]
+    },
+    {
+      "config": {
+        "agreement_updates": 1,
+        "mode": "full",
+        "trailing_guard_tokens": 0
+      },
+      "expected": [
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 1,
+            "stable_tokens": 4,
+            "text": "we are gonna go",
+            "tokens": [
+              {
+                "text": "we"
+              },
+              {
+                "text": "are"
+              },
+              {
+                "text": "gonna"
+              },
+              {
+                "text": "go"
+              }
+            ],
+            "transcript": "we are gonna go",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 4,
+            "removed": 0,
+            "revision": 2,
+            "stable_tokens": 5,
+            "text": "home",
+            "tokens": [
+              {
+                "text": "home"
+              }
+            ],
+            "transcript": "we are gonna go home",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "revision": 3,
+            "text": "we are gonna go home",
+            "tokens": [
+              {
+                "text": "we"
+              },
+              {
+                "text": "are"
+              },
+              {
+                "text": "gonna"
+              },
+              {
+                "text": "go"
+              },
+              {
+                "text": "home"
+              }
+            ],
+            "type": "final",
+            "utterance_id": 0
+          }
+        ]
+      ],
+      "name": "committed_prefix_rewrite",
+      "steps": [
+        {
+          "op": "push_text",
+          "text": "we are gonna go"
+        },
+        {
+          "op": "push_text",
+          "text": "we are going to go home"
+        },
+        {
+          "op": "finalize"
+        }
+      ]
+    },
+    {
+      "config": {
+        "agreement_updates": 2,
+        "mode": "full",
+        "trailing_guard_tokens": 0
+      },
+      "expected": [
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 1,
+            "stable_tokens": 0,
+            "text": "one two",
+            "tokens": [
+              {
+                "end_ms": 400,
+                "start_ms": 0,
+                "text": "one"
+              },
+              {
+                "end_ms": 800,
+                "start_ms": 400,
+                "text": "two"
+              }
+            ],
+            "transcript": "one two",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 2,
+            "removed": 0,
+            "revision": 2,
+            "stable_tokens": 2,
+            "text": "free",
+            "tokens": [
+              {
+                "end_ms": 1200,
+                "start_ms": 800,
+                "text": "free"
+              }
+            ],
+            "transcript": "one two free",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [],
+        [
+          {
+            "index": 2,
+            "removed": 1,
+            "revision": 3,
+            "stable_tokens": 2,
+            "text": "three four",
+            "tokens": [
+              {
+                "end_ms": 1200,
+                "start_ms": 800,
+                "text": "three"
+              },
+              {
+                "confidence": 0.5,
+                "end_ms": 1600,
+                "start_ms": 1200,
+                "text": "four"
+              }
+            ],
+            "transcript": "one two three four",
+            "type": "correction",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 4,
+            "removed": 0,
+            "revision": 4,
+            "stable_tokens": 5,
+            "text": "five",
+            "tokens": [
+              {
+                "end_ms": 2000,
+                "start_ms": 1600,
+                "text": "five"
+              }
+            ],
+            "transcript": "one two three four five",
+            "type": "delta",
+            "utterance_id": 0
+          },
+          {
+            "end_ms": 2000,
+            "revision": 5,
+            "start_ms": 0,
+            "text": "one two three four five",
+            "tokens": [
+              {
+                "end_ms": 400,
+                "start_ms": 0,
+                "text": "one"
+              },
+              {
+                "end_ms": 800,
+                "start_ms": 400,
+                "text": "two"
+              },
+              {
+                "end_ms": 1200,
+                "start_ms": 800,
+                "text": "three"
+              },
+              {
+                "end_ms": 1600,
+                "start_ms": 1200,
+                "text": "four"
+              },
+              {
+                "end_ms": 2000,
+                "start_ms": 1600,
+                "text": "five"
+              }
+            ],
+            "type": "final",
+            "utterance_id": 0
+          }
+        ]
+      ],
+      "name": "window_with_timestamps",
+      "steps": [
+        {
+          "op": "push_tokens",
+          "scope": "window",
+          "tokens": [
+            {
+              "end_ms": 400,
+              "start_ms": 0,
+              "text": "one"
+            },
+            {
+              "end_ms": 800,
+              "start_ms": 400,
+              "text": "two"
+            }
+          ]
+        },
+        {
+          "op": "push_tokens",
+          "scope": "window",
+          "tokens": [
+            {
+              "end_ms": 400,
+              "start_ms": 0,
+              "text": "one"
+            },
+            {
+              "end_ms": 800,
+              "start_ms": 400,
+              "text": "two"
+            },
+            {
+              "end_ms": 1200,
+              "start_ms": 800,
+              "text": "free"
+            }
+          ]
+        },
+        {
+          "ms": 500,
+          "op": "commit_until_ms"
+        },
+        {
+          "op": "push_tokens",
+          "scope": "window",
+          "tokens": [
+            {
+              "end_ms": 800,
+              "start_ms": 600,
+              "text": "too"
+            },
+            {
+              "end_ms": 1200,
+              "start_ms": 800,
+              "text": "three"
+            },
+            {
+              "confidence": 0.5,
+              "end_ms": 1600,
+              "start_ms": 1200,
+              "text": "four"
+            }
+          ]
+        },
+        {
+          "op": "finalize_tokens",
+          "scope": "window",
+          "tokens": [
+            {
+              "end_ms": 1200,
+              "start_ms": 800,
+              "text": "three"
+            },
+            {
+              "end_ms": 1600,
+              "start_ms": 1200,
+              "text": "four"
+            },
+            {
+              "end_ms": 2000,
+              "start_ms": 1600,
+              "text": "five"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "config": {
+        "agreement_updates": 1,
+        "mode": "full",
+        "trailing_guard_tokens": 1
+      },
+      "expected": [
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 1,
+            "stable_tokens": 3,
+            "text": "the quick brown fox",
+            "tokens": [
+              {
+                "text": "the"
+              },
+              {
+                "text": "quick"
+              },
+              {
+                "text": "brown"
+              },
+              {
+                "text": "fox"
+              }
+            ],
+            "transcript": "the quick brown fox",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 4,
+            "removed": 0,
+            "revision": 2,
+            "stable_tokens": 4,
+            "text": "",
+            "tokens": [],
+            "transcript": "the quick brown fox",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 4,
+            "removed": 0,
+            "revision": 3,
+            "stable_tokens": 5,
+            "text": "jumps over",
+            "tokens": [
+              {
+                "text": "jumps"
+              },
+              {
+                "text": "over"
+              }
+            ],
+            "transcript": "the quick brown fox jumps over",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 6,
+            "removed": 0,
+            "revision": 4,
+            "stable_tokens": 8,
+            "text": "the lazy dog",
+            "tokens": [
+              {
+                "text": "the"
+              },
+              {
+                "text": "lazy"
+              },
+              {
+                "text": "dog"
+              }
+            ],
+            "transcript": "the quick brown fox jumps over the lazy dog",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 9,
+            "removed": 0,
+            "revision": 5,
+            "stable_tokens": 9,
+            "text": "",
+            "tokens": [],
+            "transcript": "the quick brown fox jumps over the lazy dog",
+            "type": "delta",
+            "utterance_id": 0
+          },
+          {
+            "revision": 6,
+            "text": "the quick brown fox jumps over the lazy dog",
+            "tokens": [
+              {
+                "text": "the"
+              },
+              {
+                "text": "quick"
+              },
+              {
+                "text": "brown"
+              },
+              {
+                "text": "fox"
+              },
+              {
+                "text": "jumps"
+              },
+              {
+                "text": "over"
+              },
+              {
+                "text": "the"
+              },
+              {
+                "text": "lazy"
+              },
+              {
+                "text": "dog"
+              }
+            ],
+            "type": "final",
+            "utterance_id": 0
+          }
+        ]
+      ],
+      "name": "window_without_timestamps",
+      "steps": [
+        {
+          "op": "push_text",
+          "scope": "window",
+          "text": "the quick brown fox"
+        },
+        {
+          "op": "commit_unstable"
+        },
+        {
+          "op": "push_text",
+          "scope": "window",
+          "text": "brown fox jumps over"
+        },
+        {
+          "op": "push_text",
+          "scope": "window",
+          "text": "fox jumps over the lazy dog"
+        },
+        {
+          "op": "finalize"
+        }
+      ]
+    },
+    {
+      "config": {
+        "agreement_updates": 1,
+        "mode": "stable",
+        "trailing_guard_tokens": 0
+      },
+      "expected": [
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 1,
+            "stable_tokens": 3,
+            "text": "hello there world",
+            "tokens": [
+              {
+                "end_ms": 300,
+                "start_ms": 0,
+                "text": "hello"
+              },
+              {
+                "end_ms": 600,
+                "start_ms": 300,
+                "text": "there"
+              },
+              {
+                "end_ms": 900,
+                "start_ms": 600,
+                "text": "world"
+              }
+            ],
+            "transcript": "hello there world",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "end_ms": 900,
+            "revision": 2,
+            "start_ms": 0,
+            "text": "hello there world",
+            "tokens": [
+              {
+                "end_ms": 300,
+                "start_ms": 0,
+                "text": "hello"
+              },
+              {
+                "end_ms": 600,
+                "start_ms": 300,
+                "text": "there"
+              },
+              {
+                "end_ms": 900,
+                "start_ms": 600,
+                "text": "world"
+              }
+            ],
+            "type": "final",
+            "utterance_id": 0
+          }
+        ]
+      ],
+      "name": "phrase_segments_split",
+      "steps": [
+        {
+          "op": "push_tokens",
+          "tokens": [
+            {
+              "end_ms": 900,
+              "start_ms": 0,
+              "text": " hello there world "
+            }
+          ]
+        },
+        {
+          "op": "finalize"
+        }
+      ]
+    },
+    {
+      "config": {
+        "agreement_updates": 1,
+        "mode": "full",
+        "trailing_guard_tokens": 1
+      },
+      "expected": [
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 1,
+            "stable_tokens": 0,
+            "text": "Hel",
+            "tokens": [
+              {
+                "text": "Hel"
+              }
+            ],
+            "transcript": "Hel",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "removed": 1,
+            "revision": 2,
+            "stable_tokens": 0,
+            "text": "Hello",
+            "tokens": [
+              {
+                "text": "Hello"
+              }
+            ],
+            "transcript": "Hello",
+            "type": "correction",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 1,
+            "removed": 0,
+            "revision": 3,
+            "stable_tokens": 1,
+            "text": "there",
+            "tokens": [
+              {
+                "text": "there"
+              }
+            ],
+            "transcript": "Hello there",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 2,
+            "removed": 0,
+            "revision": 4,
+            "stable_tokens": 2,
+            "text": "friend",
+            "tokens": [
+              {
+                "text": "friend"
+              }
+            ],
+            "transcript": "Hello there friend",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 3,
+            "removed": 0,
+            "revision": 5,
+            "stable_tokens": 3,
+            "text": "",
+            "tokens": [],
+            "transcript": "Hello there friend",
+            "type": "delta",
+            "utterance_id": 0
+          },
+          {
+            "revision": 6,
+            "text": "Hello there friend",
+            "tokens": [
+              {
+                "text": "Hello"
+              },
+              {
+                "text": "there"
+              },
+              {
+                "text": "friend"
+              }
+            ],
+            "type": "final",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 7,
+            "stable_tokens": 0,
+            "text": "again",
+            "tokens": [
+              {
+                "text": "again"
+              }
+            ],
+            "transcript": "again",
+            "type": "delta",
+            "utterance_id": 1
+          }
+        ],
+        [],
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 8,
+            "stable_tokens": 2,
+            "text": "third one",
+            "tokens": [
+              {
+                "text": "third"
+              },
+              {
+                "text": "one"
+              }
+            ],
+            "transcript": "third one",
+            "type": "delta",
+            "utterance_id": 2
+          },
+          {
+            "revision": 9,
+            "text": "third one",
+            "tokens": [
+              {
+                "text": "third"
+              },
+              {
+                "text": "one"
+              }
+            ],
+            "type": "final",
+            "utterance_id": 2
+          }
+        ]
+      ],
+      "name": "append_fragments_two_utterances",
+      "steps": [
+        {
+          "op": "push_append",
+          "text": "Hel"
+        },
+        {
+          "op": "push_append",
+          "text": "lo"
+        },
+        {
+          "op": "push_append",
+          "text": " there"
+        },
+        {
+          "op": "push_append",
+          "text": " friend"
+        },
+        {
+          "op": "finalize"
+        },
+        {
+          "op": "push_append",
+          "text": "again"
+        },
+        {
+          "op": "reset"
+        },
+        {
+          "op": "finalize_text",
+          "text": "third one"
+        }
+      ]
+    },
+    {
+      "config": {
+        "agreement_updates": 1,
+        "mode": "full",
+        "trailing_guard_tokens": 0
+      },
+      "expected": [
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 1,
+            "stable_tokens": 3,
+            "text": "no no no",
+            "tokens": [
+              {
+                "text": "no"
+              },
+              {
+                "text": "no"
+              },
+              {
+                "text": "no"
+              }
+            ],
+            "transcript": "no no no",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 3,
+            "removed": 0,
+            "revision": 2,
+            "stable_tokens": 5,
+            "text": "no way",
+            "tokens": [
+              {
+                "text": "no"
+              },
+              {
+                "text": "way"
+              }
+            ],
+            "transcript": "no no no no way",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "revision": 3,
+            "text": "no no no no way",
+            "tokens": [
+              {
+                "text": "no"
+              },
+              {
+                "text": "no"
+              },
+              {
+                "text": "no"
+              },
+              {
+                "text": "no"
+              },
+              {
+                "text": "way"
+              }
+            ],
+            "type": "final",
+            "utterance_id": 0
+          }
+        ]
+      ],
+      "name": "repeated_words_anchor",
+      "steps": [
+        {
+          "op": "push_text",
+          "text": "no no no"
+        },
+        {
+          "op": "push_text",
+          "text": "no no no no way"
+        },
+        {
+          "op": "finalize"
+        }
+      ]
+    },
+    {
+      "config": {
+        "agreement_updates": 3,
+        "mode": "full",
+        "trailing_guard_tokens": 1
+      },
+      "expected": [
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 1,
+            "stable_tokens": 0,
+            "text": "set a timer for ten minutes please",
+            "tokens": [
+              {
+                "text": "set"
+              },
+              {
+                "text": "a"
+              },
+              {
+                "text": "timer"
+              },
+              {
+                "text": "for"
+              },
+              {
+                "text": "ten"
+              },
+              {
+                "text": "minutes"
+              },
+              {
+                "text": "please"
+              }
+            ],
+            "transcript": "set a timer for ten minutes please",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 5,
+            "removed": 2,
+            "revision": 2,
+            "stable_tokens": 0,
+            "text": "",
+            "tokens": [],
+            "transcript": "set a timer for ten",
+            "type": "correction",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 5,
+            "removed": 0,
+            "revision": 3,
+            "stable_tokens": 4,
+            "text": "minutes",
+            "tokens": [
+              {
+                "text": "minutes"
+              }
+            ],
+            "transcript": "set a timer for ten minutes",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 6,
+            "removed": 0,
+            "revision": 4,
+            "stable_tokens": 6,
+            "text": "",
+            "tokens": [],
+            "transcript": "set a timer for ten minutes",
+            "type": "delta",
+            "utterance_id": 0
+          },
+          {
+            "revision": 5,
+            "text": "set a timer for ten minutes",
+            "tokens": [
+              {
+                "text": "set"
+              },
+              {
+                "text": "a"
+              },
+              {
+                "text": "timer"
+              },
+              {
+                "text": "for"
+              },
+              {
+                "text": "ten"
+              },
+              {
+                "text": "minutes"
+              }
+            ],
+            "type": "final",
+            "utterance_id": 0
+          }
+        ],
+        []
+      ],
+      "name": "tail_shrinks",
+      "steps": [
+        {
+          "op": "push_text",
+          "text": "set a timer for ten minutes please"
+        },
+        {
+          "op": "push_text",
+          "text": "set a timer for ten"
+        },
+        {
+          "op": "push_text",
+          "text": "set a timer for ten minutes"
+        },
+        {
+          "op": "finalize"
+        },
+        {
+          "op": "finalize"
+        }
+      ]
+    },
+    {
+      "config": {
+        "agreement_updates": 3,
+        "mode": "full",
+        "trailing_guard_tokens": 1
+      },
+      "expected": [
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 1,
+            "stable_tokens": 0,
+            "text": "please call stella ask her",
+            "tokens": [
+              {
+                "text": "please"
+              },
+              {
+                "text": "call"
+              },
+              {
+                "text": "stella"
+              },
+              {
+                "text": "ask"
+              },
+              {
+                "text": "her"
+              }
+            ],
+            "transcript": "please call stella ask her",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 5,
+            "removed": 0,
+            "revision": 2,
+            "stable_tokens": 2,
+            "text": "",
+            "tokens": [],
+            "transcript": "please call stella ask her",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 2,
+            "removed": 3,
+            "revision": 3,
+            "stable_tokens": 2,
+            "text": "Stella, ask her to bring",
+            "tokens": [
+              {
+                "text": "Stella,"
+              },
+              {
+                "text": "ask"
+              },
+              {
+                "text": "her"
+              },
+              {
+                "text": "to"
+              },
+              {
+                "text": "bring"
+              }
+            ],
+            "transcript": "please call Stella, ask her to bring",
+            "type": "correction",
+            "utterance_id": 0
+          }
+        ],
+        [],
+        [
+          {
+            "index": 7,
+            "removed": 0,
+            "revision": 4,
+            "stable_tokens": 7,
+            "text": "",
+            "tokens": [],
+            "transcript": "please call Stella, ask her to bring",
+            "type": "delta",
+            "utterance_id": 0
+          },
+          {
+            "revision": 5,
+            "text": "please call Stella, ask her to bring",
+            "tokens": [
+              {
+                "text": "please"
+              },
+              {
+                "text": "call"
+              },
+              {
+                "text": "Stella,"
+              },
+              {
+                "text": "ask"
+              },
+              {
+                "text": "her"
+              },
+              {
+                "text": "to"
+              },
+              {
+                "text": "bring"
+              }
+            ],
+            "type": "final",
+            "utterance_id": 0
+          }
+        ]
+      ],
+      "name": "forced_prefix_commit",
+      "steps": [
+        {
+          "op": "push_text",
+          "text": "please call stella ask her"
+        },
+        {
+          "count": 2,
+          "op": "commit_unstable_prefix"
+        },
+        {
+          "op": "push_text",
+          "text": "please call Stella, ask her to bring"
+        },
+        {
+          "count": 0,
+          "op": "commit_unstable_prefix"
+        },
+        {
+          "op": "finalize"
+        }
+      ]
+    },
+    {
+      "config": {
+        "agreement_updates": 1,
+        "mode": "full",
+        "trailing_guard_tokens": 0
+      },
+      "expected": [
+        [
+          {
+            "index": 0,
+            "removed": 0,
+            "revision": 1,
+            "stable_tokens": 4,
+            "text": "alpha bravo charlie delta",
+            "tokens": [
+              {
+                "end_ms": 1000,
+                "start_ms": 0,
+                "text": "alpha"
+              },
+              {
+                "end_ms": 2000,
+                "start_ms": 1000,
+                "text": "bravo"
+              },
+              {
+                "end_ms": 3000,
+                "start_ms": 2000,
+                "text": "charlie"
+              },
+              {
+                "end_ms": 4000,
+                "start_ms": 3000,
+                "text": "delta"
+              }
+            ],
+            "transcript": "alpha bravo charlie delta",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "index": 4,
+            "removed": 0,
+            "revision": 2,
+            "stable_tokens": 6,
+            "text": "echo foxtrot",
+            "tokens": [
+              {
+                "end_ms": 3800,
+                "start_ms": 3200,
+                "text": "echo"
+              },
+              {
+                "end_ms": 4400,
+                "start_ms": 3800,
+                "text": "foxtrot"
+              }
+            ],
+            "transcript": "alpha bravo charlie delta echo foxtrot",
+            "type": "delta",
+            "utterance_id": 0
+          }
+        ],
+        [
+          {
+            "end_ms": 4400,
+            "revision": 3,
+            "start_ms": 0,
+            "text": "alpha bravo charlie delta echo foxtrot",
+            "tokens": [
+              {
+                "end_ms": 1000,
+                "start_ms": 0,
+                "text": "alpha"
+              },
+              {
+                "end_ms": 2000,
+                "start_ms": 1000,
+                "text": "bravo"
+              },
+              {
+                "end_ms": 3000,
+                "start_ms": 2000,
+                "text": "charlie"
+              },
+              {
+                "end_ms": 4000,
+                "start_ms": 3000,
+                "text": "delta"
+              },
+              {
+                "end_ms": 3800,
+                "start_ms": 3200,
+                "text": "echo"
+              },
+              {
+                "end_ms": 4400,
+                "start_ms": 3800,
+                "text": "foxtrot"
+              }
+            ],
+            "type": "final",
+            "utterance_id": 0
+          }
+        ]
+      ],
+      "name": "coarse_window_timestamps",
+      "steps": [
+        {
+          "op": "push_tokens",
+          "scope": "window",
+          "tokens": [
+            {
+              "end_ms": 4000,
+              "start_ms": 0,
+              "text": "alpha bravo charlie delta"
+            }
+          ]
+        },
+        {
+          "op": "push_tokens",
+          "scope": "window",
+          "tokens": [
+            {
+              "end_ms": 4400,
+              "start_ms": 2000,
+              "text": "charlie delta echo foxtrot"
+            }
+          ]
+        },
+        {
+          "op": "finalize"
+        }
+      ]
+    }
+  ]
+}

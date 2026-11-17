@@ -10,6 +10,9 @@ repository = "https://github.com/RemoteMedia-SDK/remotemedia-sdk"
 
 [dependencies]
 remotemedia-types = { path = "../types", version = "0.4.0" }
+# Shared transcript stabilizer behind the Whisper streaming state (`stt.rs`).
+# Leaf crate: it depends only on `remotemedia-types`.
+remotemedia-modality = { path = "../modality", version = "0.4.0", features = ["stt"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }

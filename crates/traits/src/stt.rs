@@ -7,15 +7,24 @@
 //! so every backend emits byte-for-byte identical streaming events — a
 //! downstream consumer cannot tell Candle from whisper.cpp apart.
 //!
-//! The algorithm is lifted from `candle-nodes/src/whisper/streaming.rs` and
-//! kept backend-agnostic: it depends only on `remotemedia_types::Error` and
-//! `std`. The only backend-specific piece is [`Whisper::decode_window`], which
+//! The audio windowing (resample, decode scheduling, window bound, trim) is
+//! Whisper-specific and lives here. Agreement, alignment and commit go
+//! through the model-agnostic [`TranscriptStabilizer`] in
+//! `remotemedia_modality::stt`, which every other transcription node uses
+//! too. The only backend-specific piece is [`Whisper::decode_window`], which
 //! runs one inference pass over a normalized 16 kHz mono decode window and
 //! returns the raw segments. [`Whisper::stream_audio`] / [`Whisper::finalize`]
-//! drive the shared state machine on top of it.
+//! drive the state on top of it. After each call, a node in a
+//! `transcript_updates` mode other than `off` drains
+//! [`WhisperStreamingState::take_updates`] for the shared `delta` /
+//! `correction` / `final` events.
 
 use std::collections::VecDeque;
 
+pub use remotemedia_modality::stt::{
+    HypothesisScope, TranscriptStabilizer, TranscriptStreamingConfig, TranscriptStreamingMode,
+    TranscriptToken, TranscriptUpdate,
+};
 use remotemedia_types::Error;
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +61,9 @@ pub struct StreamingOptions {
     pub agreement_updates: usize,
     /// Agreed trailing words kept revisable to avoid premature commitment.
     pub trailing_guard_words: usize,
+    /// Which shared updates [`WhisperStreamingState::take_updates`] yields.
+    #[serde(default)]
+    pub transcript_updates: TranscriptStreamingMode,
 }
 
 impl Default for StreamingOptions {
@@ -62,6 +74,7 @@ impl Default for StreamingOptions {
             max_window_ms: 30_000,
             agreement_updates: 2,
             trailing_guard_words: 2,
+            transcript_updates: TranscriptStreamingMode::Off,
         }
     }
 }
@@ -113,6 +126,9 @@ pub struct WhisperConfig {
     /// Agreed trailing words kept revisable.
     #[serde(default = "default_guard")]
     pub streaming_trailing_guard_words: usize,
+    /// Shared `delta` / `correction` / `final` updates (`off` by default).
+    #[serde(default)]
+    pub transcript_updates: TranscriptStreamingMode,
 }
 
 impl Default for WhisperConfig {
@@ -126,6 +142,7 @@ impl Default for WhisperConfig {
             streaming_max_window_ms: default_max_window(),
             streaming_agreement_updates: default_agreement(),
             streaming_trailing_guard_words: default_guard(),
+            transcript_updates: TranscriptStreamingMode::Off,
         }
     }
 }
@@ -176,6 +193,7 @@ impl WhisperConfig {
             max_window_ms: self.streaming_max_window_ms,
             agreement_updates: self.streaming_agreement_updates,
             trailing_guard_words: self.streaming_trailing_guard_words,
+            transcript_updates: self.transcript_updates,
         }
     }
 }
@@ -219,6 +237,15 @@ pub trait Whisper: Send + Sync {
 
     /// Run one inference pass over a normalized 16 kHz mono decode window and
     /// return the raw decoded segments. Backend-specific.
+    ///
+    /// Segment times must come from the model (timestamp tokens or word
+    /// alignment). The state trims audio and force-commits at the window
+    /// bound by these times. A single segment spanning the whole window is
+    /// not enough. A backend without timestamps should instead re-decode
+    /// the whole utterance and feed `TranscriptStabilizer` with
+    /// `HypothesisScope::Utterance`. Measured with LiteRT whisper-tiny on a
+    /// 29 s clip, that path stays within 0.04 WER of a one-shot decode; this
+    /// window path, given whole-window spans, does not.
     fn decode_window(&self, samples: &[f32]) -> Result<Vec<DecodedSegment>, Error>;
 
     /// Feed a chunk of (possibly non-16k / multi-channel) audio into the
@@ -331,21 +358,29 @@ impl StreamingNormalizer {
     }
 }
 
-/// Incremental partial-result accumulator for streaming Whisper.
+/// Streaming state for a Whisper-family backend.
 ///
-/// Mirrors `candle-nodes::whisper::WhisperStreamingState` exactly (same
-/// revision/stable/unstable/correction semantics) so every backend produces
-/// identical events.
+/// This type handles the audio side: normalising input to 16 kHz mono,
+/// scheduling decodes, bounding the window and trimming audio that has been
+/// committed. Agreement, alignment and commit go through the shared,
+/// model-agnostic [`TranscriptStabilizer`] from `remotemedia-modality`. That
+/// is the same code every other transcription node uses.
+///
+/// It produces two kinds of output:
+/// - the legacy [`TranscriptEvent`]s (`partial` / `correction` / `final`),
+///   returned by [`Self::apply_hypothesis`], [`Whisper::stream_audio`] and
+///   [`Whisper::finalize`];
+/// - the shared [`TranscriptUpdate`]s (`delta` / `correction` / `final`),
+///   collected for [`Self::take_updates`]. Which ones are produced follows
+///   [`StreamingOptions::transcript_updates`].
 pub struct WhisperStreamingState {
     normalizer: StreamingNormalizer,
     audio: VecDeque<f32>,
     buffer_start_sample: u64,
     total_samples: u64,
     new_samples_since_decode: usize,
-    hypotheses: VecDeque<Vec<DecodedSegment>>,
-    committed: Vec<DecodedSegment>,
-    unstable: Vec<DecodedSegment>,
-    committed_through_ms: u64,
+    stabilizer: TranscriptStabilizer,
+    updates: Vec<TranscriptUpdate>,
     revision: u64,
     last_emitted_text: Option<String>,
     finalized: bool,
@@ -359,14 +394,20 @@ impl Default for WhisperStreamingState {
             buffer_start_sample: 0,
             total_samples: 0,
             new_samples_since_decode: 0,
-            hypotheses: VecDeque::new(),
-            committed: Vec::new(),
-            unstable: Vec::new(),
-            committed_through_ms: 0,
+            stabilizer: TranscriptStabilizer::new(stabilizer_config(StreamingOptions::default())),
+            updates: Vec::new(),
             revision: 0,
             last_emitted_text: None,
             finalized: false,
         }
+    }
+}
+
+fn stabilizer_config(options: StreamingOptions) -> TranscriptStreamingConfig {
+    TranscriptStreamingConfig {
+        mode: options.transcript_updates,
+        agreement_updates: options.agreement_updates.max(1),
+        trailing_guard_tokens: options.trailing_guard_words,
     }
 }
 
@@ -399,6 +440,7 @@ impl WhisperStreamingState {
         if self.audio.is_empty() {
             return None;
         }
+        self.stabilizer.reconfigure(stabilizer_config(options));
         self.force_commit_for_bound(options);
         self.trim_audio(options, false);
         let interval_samples = ms_to_samples(options.decode_interval_ms as u64) as usize;
@@ -412,8 +454,9 @@ impl WhisperStreamingState {
         })
     }
 
-    /// Apply a decode hypothesis (segments already offset by `window_start_ms`)
-    /// and return the next event, if any.
+    /// Apply a decode hypothesis. Segment times are relative to the window,
+    /// which starts at `window_start_ms`. Returns the next legacy event, if
+    /// any. The shared updates are kept for [`Self::take_updates`].
     pub fn apply_hypothesis(
         &mut self,
         relative_segments: Vec<DecodedSegment>,
@@ -421,55 +464,42 @@ impl WhisperStreamingState {
         options: StreamingOptions,
         final_result: bool,
     ) -> Option<TranscriptEvent> {
-        let mut segments: Vec<DecodedSegment> = relative_segments
+        self.stabilizer.reconfigure(stabilizer_config(options));
+        let tokens: Vec<TranscriptToken> = relative_segments
             .into_iter()
-            .map(|mut segment| {
-                segment.text = normalize_text(&segment.text);
-                segment.start_ms += window_start_ms;
-                segment.end_ms += window_start_ms;
-                segment
-            })
-            .flat_map(split_segment_words)
-            .filter(|segment| {
-                segment.end_ms > self.committed_through_ms && !segment.text.is_empty()
+            .map(|segment| {
+                TranscriptToken::timed(
+                    normalize_text(&segment.text),
+                    segment.start_ms + window_start_ms,
+                    segment.end_ms + window_start_ms,
+                )
             })
             .collect();
-        segments.sort_by_key(|segment| (segment.start_ms, segment.end_ms));
-        let overlap = committed_prefix_overlap(&self.committed, &segments);
-        if overlap > 0 {
-            segments.drain(..overlap);
-        }
 
         if final_result {
-            self.commit_segments(segments);
-            self.unstable.clear();
-            self.hypotheses.clear();
+            let updates = self
+                .stabilizer
+                .finalize_tokens(tokens, HypothesisScope::Window);
+            let text = updates
+                .iter()
+                .find_map(|update| match update {
+                    TranscriptUpdate::Final(f) => Some(f.text.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            self.updates.extend(updates);
             self.finalized = true;
-            let event = self.make_event("final", true);
+            let event = self.make_event("final", text.clone(), text, String::new());
             self.trim_audio(options, true);
             return Some(event);
         }
 
-        self.hypotheses.push_back(segments.clone());
-        while self.hypotheses.len() > options.agreement_updates.max(2) {
-            self.hypotheses.pop_front();
-        }
-
-        if self.hypotheses.len() >= options.agreement_updates.max(2) {
-            let common_words = common_prefix_words(self.hypotheses.iter());
-            let eligible_words = common_words.saturating_sub(options.trailing_guard_words);
-            let commit_count = complete_segments_within_words(&segments, eligible_words);
-            if commit_count > 0 {
-                self.commit_segments(segments.drain(..commit_count).collect());
-                self.hypotheses.clear();
-            }
-        }
-
-        self.unstable = segments;
+        let updates = self.stabilizer.push_tokens(tokens, HypothesisScope::Window);
+        self.updates.extend(updates);
         self.force_commit_for_bound(options);
         self.trim_audio(options, false);
 
-        let text = self.full_text();
+        let text = self.stabilizer.transcript();
         if self.last_emitted_text.as_deref() == Some(text.as_str()) || text.is_empty() {
             return None;
         }
@@ -478,9 +508,26 @@ impl WhisperStreamingState {
         } else {
             "partial"
         };
-        Some(self.make_event(kind, false))
+        let stable = self.stabilizer.stable_text();
+        let unstable = self.stabilizer.unstable_text();
+        Some(self.make_event(kind, text, stable, unstable))
     }
 
+    /// Drain the shared `delta` / `correction` / `final` updates produced
+    /// since the last call. Empty when `transcript_updates` is `off`, except
+    /// for the `final`.
+    pub fn take_updates(&mut self) -> Vec<TranscriptUpdate> {
+        std::mem::take(&mut self.updates)
+    }
+
+    /// The shared stabilizer this state drives.
+    pub fn stabilizer(&self) -> &TranscriptStabilizer {
+        &self.stabilizer
+    }
+
+    /// When the audio exceeds `max_window_ms`, the window is about to slide
+    /// past tentative text. Commit it first: everything up to the new window
+    /// start plus `overlap_ms`, or at least the oldest token.
     fn force_commit_for_bound(&mut self, options: StreamingOptions) {
         let max_window_start_ms = samples_to_ms(
             self.total_samples
@@ -489,35 +536,22 @@ impl WhisperStreamingState {
         if max_window_start_ms <= samples_to_ms(self.buffer_start_sample) {
             return;
         }
-
         let required_commit_ms = max_window_start_ms + options.overlap_ms as u64;
-        let mut count = self
-            .unstable
-            .iter()
-            .take_while(|segment| segment.end_ms <= required_commit_ms)
-            .count();
-        if count == 0 && !self.unstable.is_empty() {
-            count = 1;
+        let before = self.stabilizer.unstable_len();
+        let mut updates = self.stabilizer.commit_until_ms(required_commit_ms);
+        if before > 0 && self.stabilizer.unstable_len() == before {
+            updates = self.stabilizer.commit_unstable_prefix(1);
         }
-        if count > 0 {
-            let forced: Vec<_> = self.unstable.drain(..count).collect();
-            self.commit_segments(forced);
-            self.hypotheses.clear();
-        }
-    }
-
-    fn commit_segments(&mut self, segments: Vec<DecodedSegment>) {
-        for segment in segments {
-            self.committed_through_ms = self.committed_through_ms.max(segment.end_ms);
-            self.committed.push(segment);
-        }
+        self.updates.extend(updates);
     }
 
     fn trim_audio(&mut self, options: StreamingOptions, final_result: bool) {
         let target_ms = if final_result {
             samples_to_ms(self.total_samples)
         } else {
-            self.committed_through_ms
+            self.stabilizer
+                .committed_through_ms()
+                .unwrap_or(0)
                 .saturating_sub(options.overlap_ms as u64)
         };
         let target_sample = ms_to_samples(target_ms).min(self.total_samples);
@@ -538,8 +572,14 @@ impl WhisperStreamingState {
         }
     }
 
-    fn make_event(&mut self, kind: &str, final_result: bool) -> TranscriptEvent {
-        let text = self.full_text();
+    fn make_event(
+        &mut self,
+        kind: &str,
+        text: String,
+        stable_text: String,
+        unstable_text: String,
+    ) -> TranscriptEvent {
+        let final_result = kind == "final";
         let changed = self.last_emitted_text.as_deref() != Some(text.as_str());
         let replaces = (changed && self.revision > 0).then_some(self.revision);
         if changed || self.revision == 0 {
@@ -556,22 +596,11 @@ impl WhisperStreamingState {
                 None
             },
             text,
-            stable_text: join_segments(&self.committed),
-            unstable_text: if final_result {
-                String::new()
-            } else {
-                join_segments(&self.unstable)
-            },
+            stable_text,
+            unstable_text,
             audio_start_ms: samples_to_ms(self.buffer_start_sample),
             audio_end_ms: samples_to_ms(self.total_samples),
         }
-    }
-
-    fn full_text(&self) -> String {
-        join_nonempty(
-            &join_segments(&self.committed),
-            &join_segments(&self.unstable),
-        )
     }
 }
 
@@ -579,96 +608,6 @@ impl WhisperStreamingState {
 pub struct DecodeWindow {
     pub samples: Vec<f32>,
     pub start_ms: u64,
-}
-
-fn common_prefix_words<'a>(hypotheses: impl Iterator<Item = &'a Vec<DecodedSegment>>) -> usize {
-    let words: Vec<Vec<&str>> = hypotheses
-        .map(|segments| {
-            segments
-                .iter()
-                .flat_map(|segment| segment.text.split_whitespace())
-                .collect()
-        })
-        .collect();
-    let Some(first) = words.first() else {
-        return 0;
-    };
-    (0..first.len())
-        .take_while(|&index| {
-            words
-                .iter()
-                .all(|candidate| candidate.get(index) == first.get(index))
-        })
-        .count()
-}
-
-fn complete_segments_within_words(segments: &[DecodedSegment], word_limit: usize) -> usize {
-    let mut words = 0;
-    segments
-        .iter()
-        .take_while(|segment| {
-            words += segment.text.split_whitespace().count();
-            words <= word_limit
-        })
-        .count()
-}
-
-fn committed_prefix_overlap(committed: &[DecodedSegment], candidate: &[DecodedSegment]) -> usize {
-    let limit = committed.len().min(candidate.len());
-    (1..=limit)
-        .rev()
-        .find(|&length| {
-            committed[committed.len() - length..]
-                .iter()
-                .zip(&candidate[..length])
-                .all(|(left, right)| comparison_word(&left.text) == comparison_word(&right.text))
-        })
-        .unwrap_or(0)
-}
-
-fn comparison_word(word: &str) -> String {
-    word.chars()
-        .filter(|character| character.is_alphanumeric() || *character == '\'')
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn join_segments(segments: &[DecodedSegment]) -> String {
-    segments
-        .iter()
-        .map(|segment| segment.text.as_str())
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Whisper timestamps delimit phrases rather than individual words. Local
-/// agreement operates at word boundaries, so distribute each word across its
-/// model-derived phrase interval.
-fn split_segment_words(segment: DecodedSegment) -> Vec<DecodedSegment> {
-    let words: Vec<_> = segment.text.split_whitespace().collect();
-    if words.len() <= 1 {
-        return vec![segment];
-    }
-    let word_count = words.len() as u64;
-    let duration = segment.end_ms.saturating_sub(segment.start_ms);
-    words
-        .into_iter()
-        .enumerate()
-        .map(|(index, word)| DecodedSegment {
-            text: word.to_string(),
-            start_ms: segment.start_ms + duration * index as u64 / word_count,
-            end_ms: segment.start_ms + duration * (index + 1) as u64 / word_count,
-        })
-        .collect()
-}
-
-fn join_nonempty(left: &str, right: &str) -> String {
-    match (left.is_empty(), right.is_empty()) {
-        (true, _) => right.to_string(),
-        (_, true) => left.to_string(),
-        _ => format!("{left} {right}"),
-    }
 }
 
 fn normalize_text(text: &str) -> String {
@@ -693,4 +632,148 @@ fn ms_to_samples(ms: u64) -> u64 {
 
 fn samples_to_ms(samples: u64) -> u64 {
     samples * 1000 / WHISPER_SAMPLE_RATE as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Decodes "words" from the window: one word per 500 ms of absolute
+    /// audio, named by its index. Word 3 is misheard as "tree" until the
+    /// window has heard 1 s past it.
+    struct FakeWhisper {
+        config: WhisperConfig,
+        decodes: Mutex<Vec<(usize, u64)>>,
+    }
+
+    impl FakeWhisper {
+        fn new(mode: TranscriptStreamingMode) -> (Self, WhisperStreamingState) {
+            let config = WhisperConfig {
+                streaming_decode_interval_ms: 1_000,
+                streaming_max_window_ms: 4_000,
+                streaming_overlap_ms: 500,
+                transcript_updates: mode,
+                ..WhisperConfig::default()
+            };
+            let fake = Self {
+                config,
+                decodes: Mutex::new(Vec::new()),
+            };
+            (fake, WhisperStreamingState::default())
+        }
+    }
+
+    impl Whisper for FakeWhisper {
+        fn config(&self) -> WhisperConfig {
+            self.config.clone()
+        }
+
+        fn decode_window(&self, samples: &[f32]) -> Result<Vec<DecodedSegment>, Error> {
+            // The window start is encoded in the first sample (see `chunk`).
+            let start_ms = samples[0] as u64;
+            let len_ms = samples_to_ms(samples.len() as u64);
+            self.decodes.lock().unwrap().push((samples.len(), start_ms));
+            let end_ms = start_ms + len_ms;
+            let mut out = Vec::new();
+            let mut t = start_ms.div_ceil(500) * 500;
+            while t + 500 <= end_ms {
+                let index = t / 500;
+                let word = if index == 3 && end_ms < 2_500 {
+                    "tree".to_string()
+                } else {
+                    format!("w{index}")
+                };
+                out.push(DecodedSegment {
+                    text: format!(" {word}"),
+                    start_ms: t - start_ms,
+                    end_ms: t + 500 - start_ms,
+                });
+                t += 500;
+            }
+            Ok(out)
+        }
+    }
+
+    /// One 500 ms chunk of 16 kHz audio whose samples hold their absolute
+    /// time in ms, so the fake decoder can see where its window starts.
+    fn chunk(index: u64) -> Vec<f32> {
+        (0..8_000u64)
+            .map(|i| (index * 500 + i * 1000 / 16_000) as f32)
+            .collect()
+    }
+
+    fn run(
+        mode: TranscriptStreamingMode,
+        chunks: u64,
+    ) -> (Vec<TranscriptEvent>, Vec<TranscriptUpdate>, usize) {
+        let (fake, mut state) = FakeWhisper::new(mode);
+        let mut events = Vec::new();
+        let mut updates = Vec::new();
+        for i in 0..chunks {
+            events.extend(fake.stream_audio(&mut state, &chunk(i), 16_000, 1).unwrap());
+            updates.extend(state.take_updates());
+        }
+        events.extend(fake.finalize(&mut state).unwrap());
+        updates.extend(state.take_updates());
+        let max_window = fake
+            .decodes
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| d.0)
+            .max()
+            .unwrap();
+        (events, updates, max_window)
+    }
+
+    #[test]
+    fn legacy_events_keep_their_shape() {
+        let (events, updates, _) = run(TranscriptStreamingMode::Off, 6);
+        assert_eq!(events.first().unwrap().kind, "partial");
+        assert!(events
+            .iter()
+            .any(|e| e.kind == "correction" && e.replaces.is_some()));
+        let last = events.last().unwrap();
+        assert_eq!(last.kind, "final");
+        assert_eq!(last.text, "w0 w1 w2 w3 w4 w5");
+        assert!(last.unstable_text.is_empty());
+        assert!(events.windows(2).all(|w| w[1].revision >= w[0].revision));
+        // `off`: only the shared final comes out.
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(&updates[0], TranscriptUpdate::Final(f) if f.text == last.text));
+    }
+
+    #[test]
+    fn shared_updates_replay_to_the_final() {
+        let (events, updates, _) = run(TranscriptStreamingMode::Full, 6);
+        let mut shown: Vec<String> = Vec::new();
+        let mut final_text = None;
+        for update in &updates {
+            match update {
+                TranscriptUpdate::Delta(e) | TranscriptUpdate::Correction(e) => {
+                    assert_eq!(e.index + e.removed, shown.len());
+                    shown.truncate(e.index);
+                    shown.extend(e.tokens.iter().map(|t| t.text.clone()));
+                }
+                TranscriptUpdate::Final(f) => final_text = Some(f.text.clone()),
+            }
+        }
+        assert!(updates
+            .iter()
+            .any(|u| matches!(u, TranscriptUpdate::Correction(_))));
+        assert_eq!(final_text.as_deref(), Some(shown.join(" ").as_str()));
+        assert_eq!(final_text.unwrap(), events.last().unwrap().text);
+    }
+
+    #[test]
+    fn long_stream_stays_within_the_window_bound() {
+        let (events, _, max_window) = run(TranscriptStreamingMode::Stable, 24);
+        assert!(
+            max_window <= ms_to_samples(4_000) as usize,
+            "window grew to {max_window}"
+        );
+        let expected: Vec<String> = (0..24).map(|i| format!("w{i}")).collect();
+        assert_eq!(events.last().unwrap().text, expected.join(" "));
+    }
 }
