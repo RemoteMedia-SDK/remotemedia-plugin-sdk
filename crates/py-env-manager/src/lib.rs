@@ -692,9 +692,10 @@ pub struct PythonEnvConfig {
     /// PEP 440 specs (`remotemedia-client==0.2.0`) and editable paths
     /// (`-e /path/to/clients/python`) both work.
     ///
-    /// Populated automatically by [`PythonEnvManager::new`] from the
-    /// `REMOTEMEDIA_PYTHON_SRC` env var when empty. Set explicitly to
-    /// override.
+    /// Populated automatically by [`PythonEnvManager::new`] when empty:
+    /// `REMOTEMEDIA_PYTHON_SRC`, then `REMOTEMEDIA_PYTHON_CLIENT`, then (debug
+    /// builds only) the build host's checkout, then the client version a
+    /// release build was made with. Set explicitly to override.
     #[serde(default)]
     pub base_deps: Vec<String>,
 
@@ -818,53 +819,32 @@ impl PythonEnvManager {
             }
         }
 
-        // Ensure every provisioned venv can `import remotemedia`. Resolution
-        // order when the caller didn't set `base_deps` explicitly:
-        //   1. `REMOTEMEDIA_PYTHON_SRC` env var (explicit override).
-        //   2. In-tree discovery: walk up from this crate's manifest dir to
-        //      find a sibling `clients/python` with a `setup.py`. Lets
-        //      workspace-builds (cargo run, examples, tests) work with zero
-        //      extra config.
-        // Without one of these, every multiprocess node crashes with
-        // `Node type '...' not registered` because the runner inside the
-        // venv can't import the package that defines them.
+        // Ensure every provisioned venv can `import remotemedia`. Without
+        // it every multiprocess node crashes with `Node type '...' not
+        // registered`. See `resolve_client_requirement` for the order.
         if config.base_deps.is_empty() {
-            let resolved = std::env::var("REMOTEMEDIA_PYTHON_SRC")
-                .ok()
-                .map(|s| (s.trim().to_string(), "REMOTEMEDIA_PYTHON_SRC"))
-                .filter(|(s, _)| !s.is_empty())
-                .or_else(|| {
+            let env_value = |name: &str| {
+                std::env::var(name)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            };
+            let (requirement, origin) = resolve_client_requirement(
+                env_value("REMOTEMEDIA_PYTHON_SRC"),
+                env_value("REMOTEMEDIA_PYTHON_CLIENT"),
+                if cfg!(debug_assertions) {
                     discover_in_tree_python_src()
-                        .map(|p| (p.to_string_lossy().into_owned(), "workspace auto-discovery"))
-                });
-
-            match resolved {
-                Some((src, origin)) => {
-                    // Single requirements.txt line — the `-e <path>` form
-                    // must not be split across lines or `pip` rejects it.
-                    // pip splits option lines shell-style, which eats the
-                    // backslashes of a Windows path (`D:\a\b` -> `D:ab`);
-                    // forward slashes work for pip and uv on every OS.
-                    let src = if cfg!(windows) {
-                        src.replace('\\', "/")
-                    } else {
-                        src
-                    };
-                    config.base_deps = vec![format!("-e {}", src)];
-                    tracing::info!(
-                        src = %src,
-                        origin = origin,
-                        "Managed venvs will editable-install remotemedia"
-                    );
-                }
-                None => {
-                    config.base_deps = vec!["remotemedia-client".to_string()];
-                    tracing::info!(
-                        "Could not locate local remotemedia Python client. \
-                         Managed venvs will install 'remotemedia-client' from PyPI by default."
-                    );
-                }
-            }
+                } else {
+                    None
+                },
+                BUILT_CLIENT_VERSION,
+            );
+            tracing::info!(
+                requirement = %requirement,
+                origin = origin,
+                "Managed venvs will install the remotemedia client"
+            );
+            config.base_deps = vec![requirement];
         }
 
         let cache_dir = config.cache_dir.clone().unwrap_or_else(default_cache_dir);
@@ -1058,6 +1038,68 @@ impl PythonEnvManager {
     }
 }
 
+/// The `remotemedia-client` version this build pairs with, set at build time
+/// by release builds (`REMOTEMEDIA_PYTHON_CLIENT_VERSION`, see the SDK's
+/// `scripts/release-clients.py`). Unset in development builds.
+const BUILT_CLIENT_VERSION: Option<&str> = option_env!("REMOTEMEDIA_PYTHON_CLIENT_VERSION");
+
+/// The requirement line every managed venv installs so its runner can
+/// `import remotemedia`, and where it came from (for the log).
+///
+/// In order:
+/// 1. `REMOTEMEDIA_PYTHON_SRC`: a source checkout, installed editable.
+/// 2. `REMOTEMEDIA_PYTHON_CLIENT`: a requirement used as given, e.g.
+///    `remotemedia-client==0.2.1`, a wheel path or a URL.
+/// 3. `in_tree`: the build host's checkout. Callers pass it only in debug
+///    builds: a release binary must not depend on where it was compiled,
+///    and on the build host itself it would silently replace the published
+///    client with the checkout.
+/// 4. `remotemedia-client==<built_version>`, the version a release build
+///    was made with, so the runtime and the Python client match.
+/// 5. Unpinned `remotemedia-client`.
+fn resolve_client_requirement(
+    python_src: Option<String>,
+    client: Option<String>,
+    in_tree: Option<PathBuf>,
+    built_version: Option<&str>,
+) -> (String, &'static str) {
+    // One requirements.txt line each. pip splits option lines (`-e ...`)
+    // shell-style, which eats the backslashes of a Windows path
+    // (`D:\a\b` -> `D:ab`); forward slashes work for pip and uv on every OS.
+    let slashes = |s: String| {
+        if cfg!(windows) {
+            s.replace('\\', "/")
+        } else {
+            s
+        }
+    };
+
+    if let Some(src) = python_src {
+        return (format!("-e {}", slashes(src)), "REMOTEMEDIA_PYTHON_SRC");
+    }
+    if let Some(client) = client {
+        let client = if Path::new(&client).exists() {
+            slashes(client)
+        } else {
+            client
+        };
+        return (client, "REMOTEMEDIA_PYTHON_CLIENT");
+    }
+    if let Some(src) = in_tree {
+        return (
+            format!("-e {}", slashes(src.to_string_lossy().into_owned())),
+            "workspace auto-discovery (debug build)",
+        );
+    }
+    match built_version.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(version) => (
+            format!("remotemedia-client=={version}"),
+            "the version this build was made with",
+        ),
+        None => ("remotemedia-client".to_string(), "default (unpinned)"),
+    }
+}
+
 /// Discover the in-tree `clients/python/` source if this crate is still
 /// sitting inside its original workspace.
 ///
@@ -1135,6 +1177,59 @@ pub(crate) fn hidden(mut cmd: tokio::process::Command) -> tokio::process::Comman
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_requirement_order() {
+        let src = || Some("/src/clients/python".to_string());
+        let client = || Some("remotemedia-client==9.9.9".to_string());
+        let tree = || Some(PathBuf::from("/build/clients/python"));
+
+        let (req, origin) = resolve_client_requirement(src(), client(), tree(), Some("1.0"));
+        assert_eq!(
+            (req.as_str(), origin),
+            ("-e /src/clients/python", "REMOTEMEDIA_PYTHON_SRC")
+        );
+
+        let (req, origin) = resolve_client_requirement(None, client(), tree(), Some("1.0"));
+        assert_eq!(
+            (req.as_str(), origin),
+            ("remotemedia-client==9.9.9", "REMOTEMEDIA_PYTHON_CLIENT")
+        );
+
+        let (req, _) = resolve_client_requirement(None, None, tree(), Some("1.0"));
+        assert_eq!(req, "-e /build/clients/python");
+
+        let (req, _) = resolve_client_requirement(None, None, None, Some(" 0.2.1 "));
+        assert_eq!(req, "remotemedia-client==0.2.1");
+
+        let (req, _) = resolve_client_requirement(None, None, None, None);
+        assert_eq!(req, "remotemedia-client");
+        let (req, _) = resolve_client_requirement(None, None, None, Some(""));
+        assert_eq!(req, "remotemedia-client");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn client_requirement_windows_paths_use_forward_slashes() {
+        let (req, _) =
+            resolve_client_requirement(Some(r"D:\rm\clients\python".into()), None, None, None);
+        assert_eq!(req, "-e D:/rm/clients/python");
+
+        // An existing wheel path is rewritten; a requirement spec is not.
+        let wheel = std::env::temp_dir().join("rm_client_req_test-0.0.0-py3-none-any.whl");
+        std::fs::write(&wheel, b"").unwrap();
+        let (req, _) = resolve_client_requirement(
+            None,
+            Some(wheel.to_string_lossy().into_owned()),
+            None,
+            None,
+        );
+        std::fs::remove_file(&wheel).ok();
+        assert!(!req.contains('\\'), "{req}");
+        let (req, _) =
+            resolve_client_requirement(None, Some(r"pkg @ file:///x\y".into()), None, None);
+        assert_eq!(req, r"pkg @ file:///x\y");
+    }
 
     #[test]
     fn test_normalize_package_name() {
