@@ -34,9 +34,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::cancel::{CancelContext, Cancellation, Disposition};
+use crate::capabilities::{MediaCapabilities, MediaConstraints, MediaType};
 use crate::rpc::CallContext;
 
-/// What a generator produces.
+/// What a generator produces: the [`MediaType`]s a node may generate. Its
+/// names are the media types' names, so `#[node(generates = "...")]` takes
+/// the same caps DSL as `output_caps`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GeneratedModality {
@@ -55,17 +58,51 @@ impl GeneratedModality {
         GeneratedModality::Image,
     ];
 
-    pub fn as_str(self) -> &'static str {
+    /// The media type this modality is.
+    pub const fn media_type(self) -> MediaType {
         match self {
-            GeneratedModality::Text => "text",
-            GeneratedModality::Audio => "audio",
-            GeneratedModality::Video => "video",
-            GeneratedModality::Image => "image",
+            GeneratedModality::Text => MediaType::Text,
+            GeneratedModality::Audio => MediaType::Audio,
+            GeneratedModality::Video => MediaType::Video,
+            GeneratedModality::Image => MediaType::Image,
         }
     }
 
+    /// The modality a generator of `media` has; `None` for media no node
+    /// generates (tensor, file, json, binary).
+    pub const fn from_media_type(media: MediaType) -> Option<Self> {
+        match media {
+            MediaType::Text => Some(GeneratedModality::Text),
+            MediaType::Audio => Some(GeneratedModality::Audio),
+            MediaType::Video => Some(GeneratedModality::Video),
+            MediaType::Image => Some(GeneratedModality::Image),
+            MediaType::Tensor | MediaType::File | MediaType::Json | MediaType::Binary => None,
+        }
+    }
+
+    /// [`Self::from_media_type`] for a constant: `#[node(generates = ...)]`
+    /// evaluates it at compile time, so a non-generative media type is a
+    /// compile error.
+    pub const fn expect_media_type(media: MediaType) -> Self {
+        match Self::from_media_type(media) {
+            Some(modality) => modality,
+            None => {
+                panic!("`generates` must name a generated media type: text, audio, video or image")
+            }
+        }
+    }
+
+    /// The modality of a generator whose output is `constraints`.
+    pub fn of(constraints: &MediaConstraints) -> Option<Self> {
+        Self::from_media_type(constraints.kind())
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        self.media_type().as_str()
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|m| m.as_str() == s)
+        MediaType::parse(s).and_then(Self::from_media_type)
     }
 }
 
@@ -259,6 +296,20 @@ impl GeneratorDeclaration {
         }
     }
 
+    /// Whether the declared outputs include the generated media type. True
+    /// when the node declares no role or no outputs. A host warns on a
+    /// mismatch rather than refusing the node: an animation node is a video
+    /// generator whose own output is JSON pose frames.
+    pub fn outputs_agree(&self, capabilities: &MediaCapabilities) -> bool {
+        match self.generates {
+            Some(modality) if !capabilities.outputs.is_empty() => capabilities
+                .outputs
+                .values()
+                .any(|output| output.kind() == modality.media_type()),
+            _ => true,
+        }
+    }
+
     /// A created node must declare what its factory declared, unless the
     /// factory declared nothing.
     pub fn check_instance(
@@ -398,6 +449,57 @@ mod tests {
         assert!(GeneratorDeclaration::NONE
             .check_instance("Tts", declared)
             .is_ok());
+    }
+
+    #[test]
+    fn modalities_are_the_generated_media_types() {
+        use crate::capabilities::{ImageConstraints, JsonConstraints};
+        for media in MediaType::ALL {
+            match GeneratedModality::from_media_type(media) {
+                Some(modality) => {
+                    assert_eq!(modality.media_type(), media);
+                    assert_eq!(modality.as_str(), media.as_str());
+                    assert_eq!(GeneratedModality::parse(media.as_str()), Some(modality));
+                }
+                None => assert_eq!(GeneratedModality::parse(media.as_str()), None),
+            }
+        }
+        assert_eq!(
+            GeneratedModality::ALL
+                .map(GeneratedModality::media_type)
+                .len(),
+            4
+        );
+        assert_eq!(
+            GeneratedModality::of(&MediaConstraints::Image(ImageConstraints::default())),
+            Some(GeneratedModality::Image)
+        );
+        assert_eq!(
+            GeneratedModality::of(&MediaConstraints::Json(JsonConstraints::default())),
+            None
+        );
+        const AUDIO: GeneratedModality = GeneratedModality::expect_media_type(MediaType::Audio);
+        assert_eq!(AUDIO, GeneratedModality::Audio);
+    }
+
+    #[test]
+    fn outputs_agree_with_the_role() {
+        use crate::capabilities::{AudioConstraints, JsonConstraints};
+        let tts = GeneratorDeclaration {
+            generates: Some(GeneratedModality::Audio),
+            cancel: Some(CancelStrategy::ObservesToken),
+        };
+        let audio =
+            MediaCapabilities::with_output(MediaConstraints::Audio(AudioConstraints::default()));
+        let json =
+            MediaCapabilities::with_output(MediaConstraints::Json(JsonConstraints::default()));
+        assert!(tts.outputs_agree(&audio));
+        assert!(!tts.outputs_agree(&json));
+        assert!(
+            tts.outputs_agree(&MediaCapabilities::default()),
+            "no declared outputs"
+        );
+        assert!(GeneratorDeclaration::NONE.outputs_agree(&json));
     }
 
     #[test]

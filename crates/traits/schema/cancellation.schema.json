@@ -178,7 +178,7 @@
       "type": "object"
     },
     "GeneratedModality": {
-      "description": "What a generator produces.",
+      "description": "What a generator produces: the [`MediaType`]s a node may generate. Its names are the media types' names, so `#[node(generates = \"...\")]` takes the same caps DSL as `output_caps`.",
       "oneOf": [
         {
           "enum": [

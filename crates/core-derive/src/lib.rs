@@ -103,41 +103,82 @@ struct NodeArgs {
     /// Instance scope: "shared" or "per_participant" (openspec:
     /// add-multi-participant-sessions).
     instance_scope: Option<String>,
-    /// Generator role: "text", "audio", "video" or "image" (openspec:
-    /// add-generator-cancellation). Requires `cancel` and an impl of the
-    /// matching generator trait (and so `Cancellable`) on the struct.
-    generates: Option<String>,
-    /// Cancel strategy: "drop_stops_work", "observes_token" or "on_cancel".
-    cancel: Option<String>,
+    /// Generator role (openspec: add-generator-cancellation), in the caps DSL
+    /// of `output_caps`: `"text"`, `"audio(sample_rate=24000)"`, ... Its media
+    /// type is the generated modality (`GeneratedModality::expect_media_type`
+    /// rejects tensor, file, json and binary at compile time), and it is the
+    /// node's output capability unless `output_caps` says otherwise. Requires
+    /// `cancel` and an impl of the matching generator trait (and so
+    /// `Cancellable`) on the struct.
+    generates: Option<syn::LitStr>,
+    /// Cancel strategy, a `CancelStrategy` variant in snake case:
+    /// "drop_stops_work", "observes_token" or "on_cancel".
+    cancel: Option<syn::LitStr>,
 }
 
-const GENERATED_MODALITIES: &[(&str, &str, &str)] = &[
-    ("text", "Text", "text"),
-    ("audio", "Audio", "audio"),
-    ("video", "Video", "video"),
-    ("image", "Image", "image"),
-];
-const CANCEL_STRATEGIES: &[(&str, &str)] = &[
-    ("drop_stops_work", "DropStopsWork"),
-    ("observes_token", "ObservesToken"),
-    ("on_cancel", "OnCancel"),
-];
+/// The media type a caps DSL string names: the text before `(`, lowercased.
+fn dsl_media_type(dsl: &str) -> String {
+    let dsl = dsl.trim();
+    dsl.split('(')
+        .next()
+        .unwrap_or(dsl)
+        .trim()
+        .to_ascii_lowercase()
+}
 
-/// `(GeneratedModality variant, GeneratorRole constructor, CancelStrategy variant)`
-/// for a node with `generates`.
-fn generator_idents(args: &NodeArgs) -> Option<(syn::Ident, syn::Ident, syn::Ident)> {
-    let generates = args.generates.as_deref()?;
-    let cancel = args.cancel.as_deref()?;
-    let (_, variant, ctor) = GENERATED_MODALITIES
-        .iter()
-        .find(|(k, _, _)| *k == generates)?;
-    let (_, strategy) = CANCEL_STRATEGIES.iter().find(|(k, _)| *k == cancel)?;
-    let span = proc_macro2::Span::call_site();
-    Some((
-        syn::Ident::new(variant, span),
-        syn::Ident::new(ctor, span),
-        syn::Ident::new(strategy, span),
-    ))
+fn is_snake_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.starts_with(|c: char| c.is_ascii_lowercase())
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// `drop_stops_work` -> `DropStopsWork`, `audio` -> `Audio`.
+fn upper_camel(snake: &str) -> String {
+    snake
+        .split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            chars
+                .next()
+                .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// What a node with `generates` expands to, named from the traits crate's own
+/// vocabulary: `MediaType::<Media>`, `GeneratorRole::<media>` and
+/// `CancelStrategy::<Strategy>`. A name that is not one of theirs fails to
+/// compile at the attribute.
+struct GeneratorTokens {
+    /// A `GeneratedModality`, evaluated at compile time.
+    modality: proc_macro2::TokenStream,
+    /// The `GeneratorRole` constructor, which only accepts a node
+    /// implementing the matching generator trait.
+    ctor: syn::Ident,
+    strategy: proc_macro2::TokenStream,
+}
+
+fn generator_tokens(args: &NodeArgs) -> Option<GeneratorTokens> {
+    let generates = args.generates.as_ref()?;
+    let cancel = args.cancel.as_ref()?;
+    let media = dsl_media_type(&generates.value());
+    let media_variant = syn::Ident::new(&upper_camel(&media), generates.span());
+    let strategy = syn::Ident::new(&upper_camel(&cancel.value()), cancel.span());
+    Some(GeneratorTokens {
+        modality: quote::quote_spanned! {generates.span()=> {
+            const MODALITY: ::remotemedia_traits::generator::GeneratedModality =
+                ::remotemedia_traits::generator::GeneratedModality::expect_media_type(
+                    ::remotemedia_traits::capabilities::MediaType::#media_variant,
+                );
+            MODALITY
+        }},
+        ctor: syn::Ident::new(&media, generates.span()),
+        strategy: quote::quote_spanned! {cancel.span()=>
+            ::remotemedia_traits::generator::CancelStrategy::#strategy
+        },
+    })
 }
 
 /// Classification of a field as either config or state
@@ -253,26 +294,26 @@ fn parse_node_args(args: &[NestedMeta]) -> Result<NodeArgs, syn::Error> {
                         }
                     },
                     "generates" => match &nv.lit {
-                        Lit::Str(s)
-                            if GENERATED_MODALITIES.iter().any(|(k, _, _)| *k == s.value()) =>
-                        {
-                            generates = Some(s.value());
+                        Lit::Str(s) if is_snake_ident(&dsl_media_type(&s.value())) => {
+                            generates = Some(s.clone());
                         }
                         _ => {
                             return Err(syn::Error::new_spanned(
                                 &nv.lit,
-                                "generates must be \"text\", \"audio\", \"video\" or \"image\"",
+                                "generates takes the caps DSL of the generated output, \
+                                 e.g. \"text\" or \"audio(sample_rate=24000, channels=1)\"",
                             ));
                         }
                     },
                     "cancel" => match &nv.lit {
-                        Lit::Str(s) if CANCEL_STRATEGIES.iter().any(|(k, _)| *k == s.value()) => {
-                            cancel = Some(s.value());
+                        Lit::Str(s) if is_snake_ident(&s.value()) => {
+                            cancel = Some(s.clone());
                         }
                         _ => {
                             return Err(syn::Error::new_spanned(
                                 &nv.lit,
-                                "cancel must be \"drop_stops_work\", \"observes_token\" or \"on_cancel\"",
+                                "cancel must be a CancelStrategy in snake case: \
+                                 \"drop_stops_work\", \"observes_token\" or \"on_cancel\"",
                             ));
                         }
                     },
@@ -319,7 +360,8 @@ fn parse_node_args(args: &[NestedMeta]) -> Result<NodeArgs, syn::Error> {
         (None, Some(_)) => {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
-                "#[node(cancel = ...)] is only for generators: add `generates = \"text\" | \"audio\" | \"video\" | \"image\"`",
+                "#[node(cancel = ...)] is only for generators: add `generates = \"...\"`, the caps DSL \
+                 of the generated output (text, audio, video or image)",
             ));
         }
         _ => {}
@@ -690,16 +732,15 @@ fn generate_schema_impl(struct_name: &syn::Ident, args: &NodeArgs) -> proc_macro
     let produces_tokens = parse_runtime_data_types(&args.produces);
     let multi_output = args.multi_output;
 
-    let generator_impl = match generator_idents(args) {
-        Some((modality, _, strategy)) => quote! {
+    let generator_impl = match generator_tokens(args) {
+        Some(GeneratorTokens {
+            modality, strategy, ..
+        }) => quote! {
             fn generator() -> Option<(
                 remotemedia_traits::generator::GeneratedModality,
                 remotemedia_traits::generator::CancelStrategy,
             )> {
-                Some((
-                    remotemedia_traits::generator::GeneratedModality::#modality,
-                    remotemedia_traits::generator::CancelStrategy::#strategy,
-                ))
+                Some((#modality, #strategy))
             }
         },
         None => quote! {},
@@ -799,8 +840,8 @@ fn generate_trait_impl(struct_name: &syn::Ident, args: &NodeArgs) -> proc_macro2
     // `GeneratorRole::<ctor>(self)` only accepts a type that implements the
     // matching generator trait, so a generator without `Cancellable` fails
     // to compile here.
-    let generator_impl = match generator_idents(args) {
-        Some((_, ctor, _)) => quote! {
+    let generator_impl = match generator_tokens(args) {
+        Some(GeneratorTokens { ctor, .. }) => quote! {
             fn generator(&self) -> Option<remotemedia_traits::generator::GeneratorRole<'_>> {
                 remotemedia_traits::generator::GeneratorRole::#ctor(self)
             }
@@ -1053,6 +1094,55 @@ fn parse_constraint_value_dsl(value: &str, field_type: &str) -> proc_macro2::Tok
     }
 }
 
+/// Split a caps DSL parameter list on the commas outside `[..]` sets.
+fn split_top_level_commas(params: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut start) = (0usize, 0);
+    for (i, c) in params.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&params[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&params[start..]);
+    parts
+}
+
+/// A capability enum value, `png`, or a set of them, `[png, jpeg]`, as
+/// `Some(ConstraintValue<ty>)`; `variant` names the enum variant. An unknown
+/// name fails to compile at the variant.
+fn parse_enum_constraint_dsl(
+    value: &str,
+    ty: proc_macro2::TokenStream,
+    variant: impl Fn(&str) -> String,
+) -> proc_macro2::TokenStream {
+    let value = value.trim();
+    let one = |name: &str| -> proc_macro2::TokenStream {
+        let name = name.trim().trim_matches('"').to_ascii_lowercase();
+        if !is_snake_ident(&name) {
+            return quote! { compile_error!(concat!("Not a capability value: ", #name)) };
+        }
+        let ident = syn::Ident::new(&variant(&name), proc_macro2::Span::call_site());
+        quote! { #ty::#ident }
+    };
+    if let Some(inner) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
+        let values: Vec<_> = inner
+            .split(',')
+            .filter(|v| !v.trim().is_empty())
+            .map(one)
+            .collect();
+        quote! { Some(remotemedia_traits::capabilities::ConstraintValue::Set(vec![#(#values),*])) }
+    } else {
+        let value = one(value);
+        quote! { Some(remotemedia_traits::capabilities::ConstraintValue::Exact(#value)) }
+    }
+}
+
 /// Parse audio sample format string to enum variant.
 fn parse_audio_format_dsl(format: &str) -> proc_macro2::TokenStream {
     match format.to_uppercase().as_str() {
@@ -1101,6 +1191,9 @@ fn parse_media_constraints_dsl(dsl: &str) -> proc_macro2::TokenStream {
                 "video" => {
                     quote! { remotemedia_traits::capabilities::MediaConstraints::Video(Default::default()) }
                 }
+                "image" => {
+                    quote! { remotemedia_traits::capabilities::MediaConstraints::Image(Default::default()) }
+                }
                 "tensor" => {
                     quote! { remotemedia_traits::capabilities::MediaConstraints::Tensor(Default::default()) }
                 }
@@ -1115,10 +1208,10 @@ fn parse_media_constraints_dsl(dsl: &str) -> proc_macro2::TokenStream {
     let media_type = &trimmed[..paren_start].trim().to_lowercase();
     let params_str = &trimmed[paren_start + 1..trimmed.len() - 1]; // Strip ( and )
 
-    // Parse parameters
-    let params: Vec<(&str, &str)> = params_str
-        .split(',')
-        .filter(|s| !s.is_empty())
+    // Parse parameters (commas inside a `[..]` set belong to the set)
+    let params: Vec<(&str, &str)> = split_top_level_commas(params_str)
+        .into_iter()
+        .filter(|s| !s.trim().is_empty())
         .filter_map(|param| {
             let parts: Vec<&str> = param.splitn(2, '=').collect();
             if parts.len() == 2 {
@@ -1195,6 +1288,45 @@ fn parse_media_constraints_dsl(dsl: &str) -> proc_macro2::TokenStream {
                 )
             }
         }
+        "image" => {
+            let mut width = quote! { None };
+            let mut height = quote! { None };
+            let mut format = quote! { None };
+            let mut pixel_format = quote! { None };
+
+            for (key, value) in params {
+                match key {
+                    "width" => width = parse_constraint_value_dsl(value, "width"),
+                    "height" => height = parse_constraint_value_dsl(value, "height"),
+                    "format" | "encoding" => {
+                        format = parse_enum_constraint_dsl(
+                            value,
+                            quote! { remotemedia_traits::capabilities::ImageEncoding },
+                            upper_camel,
+                        )
+                    }
+                    "pixel_format" => {
+                        pixel_format = parse_enum_constraint_dsl(
+                            value,
+                            quote! { remotemedia_traits::capabilities::PixelFormat },
+                            |s| s.to_ascii_uppercase(),
+                        )
+                    }
+                    _ => {}
+                }
+            }
+
+            quote! {
+                remotemedia_traits::capabilities::MediaConstraints::Image(
+                    remotemedia_traits::capabilities::ImageConstraints {
+                        width: #width,
+                        height: #height,
+                        format: #format,
+                        pixel_format: #pixel_format,
+                    }
+                )
+            }
+        }
         "text" => {
             let mut encoding = quote! { None };
             let mut text_format = quote! { None };
@@ -1259,8 +1391,14 @@ fn generate_media_capabilities_impl(
     struct_name: &syn::Ident,
     args: &NodeArgs,
 ) -> proc_macro2::TokenStream {
+    // A generator's `generates` is its output unless `output_caps` says
+    // otherwise (an animation node generates video and emits JSON frames).
+    let output_caps = args
+        .output_caps
+        .clone()
+        .or_else(|| args.generates.as_ref().map(|g| g.value()));
     // Only generate if at least one of input_caps or output_caps is specified
-    if args.input_caps.is_none() && args.output_caps.is_none() {
+    if args.input_caps.is_none() && output_caps.is_none() {
         return quote! {};
     }
 
@@ -1276,7 +1414,7 @@ fn generate_media_capabilities_impl(
         None => quote! {},
     };
 
-    let outputs_code = match &args.output_caps {
+    let outputs_code = match &output_caps {
         Some(dsl) => {
             let constraints = parse_media_constraints_dsl(dsl);
             quote! {
@@ -1374,10 +1512,12 @@ fn generate_loadable_export(struct_name: &syn::Ident, args: &NodeArgs) -> proc_m
 
     // A generator declares its role to the host before a node exists
     // (openspec: add-generator-cancellation).
-    let generator_fields = match generator_idents(args) {
-        Some((modality, _, strategy)) => quote! {
-            generates: Some(::remotemedia_traits::generator::GeneratedModality::#modality),
-            cancel: Some(::remotemedia_traits::generator::CancelStrategy::#strategy),
+    let generator_fields = match generator_tokens(args) {
+        Some(GeneratorTokens {
+            modality, strategy, ..
+        }) => quote! {
+            generates: Some(#modality),
+            cancel: Some(#strategy),
         },
         None => quote! {},
     };
@@ -1404,6 +1544,7 @@ fn generate_loadable_export(struct_name: &syn::Ident, args: &NodeArgs) -> proc_m
             fn describe(&self, _params: RString) -> RResult<RString, RString> {
                 ROk(RString::from(
                     ::remotemedia_traits::NodeDescription {
+                        media_capabilities: Some(#struct_name::media_capabilities_static()),
                         #generator_fields
                         ..Default::default()
                     }
@@ -1975,5 +2116,90 @@ mod source_tests {
             .to_string()
             .contains("has_background"));
         assert!(generate_source_factory(&name, &plain).is_empty());
+    }
+
+    fn squash(tokens: proc_macro2::TokenStream) -> String {
+        tokens.to_string().replace(' ', "")
+    }
+
+    /// `generates` is caps DSL; its media type and `cancel` name the traits
+    /// crate's own `MediaType`, `GeneratorRole` and `CancelStrategy` items
+    /// (openspec: add-generator-cancellation).
+    #[test]
+    fn generates_takes_the_caps_dsl() {
+        let name = syn::Ident::new("TtsNode", proc_macro2::Span::call_site());
+        let parsed = args(quote! {
+            generates = "audio(sample_rate=24000, channels=1)", cancel = "observes_token"
+        })
+        .unwrap();
+        let node = squash(generate_trait_impl(&name, &parsed));
+        assert!(node.contains("GeneratorRole::audio(self)"), "{node}");
+        let tokens = generator_tokens(&parsed).unwrap();
+        assert!(squash(tokens.modality)
+            .contains("expect_media_type(::remotemedia_traits::capabilities::MediaType::Audio"));
+        assert_eq!(
+            squash(tokens.strategy),
+            "::remotemedia_traits::generator::CancelStrategy::ObservesToken"
+        );
+        // It is the node's output capability.
+        let caps = squash(generate_media_capabilities_impl(&name, &parsed));
+        assert!(caps.contains("outputs.insert(\"default\".to_string(),remotemedia_traits::capabilities::MediaConstraints::Audio"), "{caps}");
+        assert!(caps.contains("sample_rate:Some(remotemedia_traits::capabilities::ConstraintValue::Exact(24000u32))"), "{caps}");
+        // output_caps wins: an animation node generates video and emits JSON.
+        let animation = args(quote! {
+            generates = "video", cancel = "observes_token", output_caps = "json"
+        })
+        .unwrap();
+        let caps = squash(generate_media_capabilities_impl(&name, &animation));
+        assert!(caps.contains("MediaConstraints::Json"), "{caps}");
+        assert!(
+            squash(generate_trait_impl(&name, &animation)).contains("GeneratorRole::video(self)")
+        );
+    }
+
+    #[test]
+    fn generates_and_cancel_come_together_and_are_names() {
+        for bad in [
+            quote! { generates = "text" },
+            quote! { cancel = "on_cancel" },
+            quote! { generates = "", cancel = "on_cancel" },
+            quote! { generates = "Audio Stream", cancel = "on_cancel" },
+            quote! { generates = "text", cancel = "Observes Token" },
+        ] {
+            assert!(args(bad.clone()).is_err(), "{bad}");
+        }
+        assert!(
+            args(quote! { generates = "image(format=png)", cancel = "drop_stops_work" }).is_ok()
+        );
+    }
+
+    #[test]
+    fn image_caps() {
+        let caps = squash(parse_media_constraints_dsl(
+            "image(width=512, height=512, format=[png, jpeg], pixel_format=rgba)",
+        ));
+        assert!(
+            caps.starts_with("remotemedia_traits::capabilities::MediaConstraints::Image("),
+            "{caps}"
+        );
+        assert!(
+            caps.contains(
+                "width:Some(remotemedia_traits::capabilities::ConstraintValue::Exact(512u32))"
+            ),
+            "{caps}"
+        );
+        assert!(caps.contains("ConstraintValue::Set(vec![remotemedia_traits::capabilities::ImageEncoding::Png,remotemedia_traits::capabilities::ImageEncoding::Jpeg])"), "{caps}");
+        assert!(
+            caps.contains(
+                "ConstraintValue::Exact(remotemedia_traits::capabilities::PixelFormat::RGBA)"
+            ),
+            "{caps}"
+        );
+        assert!(squash(parse_media_constraints_dsl("image"))
+            .contains("MediaConstraints::Image(Default::default())"));
+        assert_eq!(
+            split_top_level_commas("a=1, b=[x, y], c=2"),
+            vec!["a=1", " b=[x, y]", " c=2"]
+        );
     }
 }

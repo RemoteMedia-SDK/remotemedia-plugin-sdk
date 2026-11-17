@@ -148,6 +148,18 @@ pub enum PixelFormat {
 /// both the capability and wire pixel format types in one scope.
 pub type CapabilityPixelFormat = PixelFormat;
 
+/// Still-image encoding (capability-side), the container of a
+/// `RuntimeData::Image`: encoded bytes or raw pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageEncoding {
+    Jpeg,
+    Png,
+    Webp,
+    /// Uncompressed pixels; `ImageConstraints::pixel_format` narrows them.
+    Raw,
+}
+
 /// Tensor element data type enumeration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
@@ -206,6 +218,26 @@ pub struct VideoConstraints {
     pub pixel_format: Option<ConstraintValue<PixelFormat>>,
 }
 
+/// Still-image constraints (`RuntimeData::Image`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ImageConstraints {
+    /// Image width constraint in pixels. `None` = any width accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub width: Option<ConstraintValue<u32>>,
+
+    /// Image height constraint in pixels. `None` = any height accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub height: Option<ConstraintValue<u32>>,
+
+    /// Encoding constraint. `None` = any encoding accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<ConstraintValue<ImageEncoding>>,
+
+    /// Pixel format of a `raw` image. `None` = any pixel format accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_format: Option<ConstraintValue<PixelFormat>>,
+}
+
 /// Tensor/Numpy data constraints.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TensorConstraints {
@@ -255,6 +287,52 @@ pub struct JsonConstraints {
 // Media Constraints Union
 // =============================================================================
 
+/// The kind of media a port carries: the tag of [`MediaConstraints`], and
+/// the vocabulary the `#[node]` caps DSL and the generator role share
+/// (`GeneratedModality` is the subset a generator may produce).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaType {
+    Audio,
+    Video,
+    Image,
+    Tensor,
+    Text,
+    File,
+    Json,
+    Binary,
+}
+
+impl MediaType {
+    pub const ALL: [MediaType; 8] = [
+        MediaType::Audio,
+        MediaType::Video,
+        MediaType::Image,
+        MediaType::Tensor,
+        MediaType::Text,
+        MediaType::File,
+        MediaType::Json,
+        MediaType::Binary,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            MediaType::Audio => "audio",
+            MediaType::Video => "video",
+            MediaType::Image => "image",
+            MediaType::Tensor => "tensor",
+            MediaType::Text => "text",
+            MediaType::File => "file",
+            MediaType::Json => "json",
+            MediaType::Binary => "binary",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|t| t.as_str() == s)
+    }
+}
+
 /// Union type for constraints on different media types.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -263,6 +341,8 @@ pub enum MediaConstraints {
     Audio(AudioConstraints),
     /// Video data constraints
     Video(VideoConstraints),
+    /// Still-image constraints
+    Image(ImageConstraints),
     /// Tensor/Numpy data constraints
     Tensor(TensorConstraints),
     /// Text data constraints
@@ -276,17 +356,23 @@ pub enum MediaConstraints {
 }
 
 impl MediaConstraints {
+    /// The media type these constraints apply to.
+    pub fn kind(&self) -> MediaType {
+        match self {
+            MediaConstraints::Audio(_) => MediaType::Audio,
+            MediaConstraints::Video(_) => MediaType::Video,
+            MediaConstraints::Image(_) => MediaType::Image,
+            MediaConstraints::Tensor(_) => MediaType::Tensor,
+            MediaConstraints::Text(_) => MediaType::Text,
+            MediaConstraints::File(_) => MediaType::File,
+            MediaConstraints::Json(_) => MediaType::Json,
+            MediaConstraints::Binary => MediaType::Binary,
+        }
+    }
+
     /// Get the media type name as a string.
     pub fn media_type(&self) -> &'static str {
-        match self {
-            MediaConstraints::Audio(_) => "audio",
-            MediaConstraints::Video(_) => "video",
-            MediaConstraints::Tensor(_) => "tensor",
-            MediaConstraints::Text(_) => "text",
-            MediaConstraints::File(_) => "file",
-            MediaConstraints::Json(_) => "json",
-            MediaConstraints::Binary => "binary",
-        }
+        self.kind().as_str()
     }
 
     /// Check if this constraint is flexible (has Range or Set constraints).
@@ -314,6 +400,12 @@ impl MediaConstraints {
                         .as_ref()
                         .map(|v| v.is_flexible())
                         .unwrap_or(false)
+            }
+            MediaConstraints::Image(c) => {
+                c.width.as_ref().is_some_and(|v| v.is_flexible())
+                    || c.height.as_ref().is_some_and(|v| v.is_flexible())
+                    || c.format.as_ref().is_some_and(|v| v.is_flexible())
+                    || c.pixel_format.as_ref().is_some_and(|v| v.is_flexible())
             }
             MediaConstraints::Tensor(c) => {
                 c.shape.as_ref().map(|v| v.is_flexible()).unwrap_or(false)
