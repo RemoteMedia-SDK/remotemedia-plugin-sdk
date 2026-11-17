@@ -127,10 +127,78 @@ fn to_camel_case(s: &str) -> String {
     out
 }
 
+/// `${NAME}` in `value` → that environment variable's value (empty when it
+/// is unset). An unterminated `${` is kept as it is.
+///
+/// ```
+/// std::env::set_var("RM_DOC_MODELS", "/models");
+/// let path = remotemedia_plugin_sdk::params::expand_env("${RM_DOC_MODELS}/gemma.litertlm");
+/// assert_eq!(path, "/models/gemma.litertlm");
+/// ```
+pub fn expand_env(value: &str) -> String {
+    let mut out = String::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        match rest[start + 2..].find('}') {
+            Some(end) => {
+                let name = &rest[start + 2..start + 2 + end];
+                out.push_str(&std::env::var(name).unwrap_or_default());
+                rest = &rest[start + 3 + end..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A copy of `params` with [`expand_env`] applied to each top-level string
+/// value. Nested values (arrays, objects) are kept as they are.
+pub fn expand_env_params(params: &serde_json::Value) -> serde_json::Value {
+    match params {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let value = match value {
+                        serde_json::Value::String(s) => serde_json::Value::String(expand_env(s)),
+                        other => other.clone(),
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde::Deserialize;
+
+    #[test]
+    fn env_expansion() {
+        std::env::set_var("RM_PARAMS_TEST_DIR", "/m");
+        std::env::remove_var("RM_PARAMS_TEST_UNSET");
+        assert_eq!(expand_env("${RM_PARAMS_TEST_DIR}/a"), "/m/a");
+        assert_eq!(expand_env("x${RM_PARAMS_TEST_UNSET}y"), "xy");
+        assert_eq!(
+            expand_env("open ${RM_PARAMS_TEST_DIR"),
+            "open ${RM_PARAMS_TEST_DIR"
+        );
+        let params = serde_json::json!({
+            "model_path": "${RM_PARAMS_TEST_DIR}/g", "threads": 2,
+            "wake_words": ["${RM_PARAMS_TEST_DIR}"],
+        });
+        let expanded = expand_env_params(&params);
+        assert_eq!(expanded["model_path"], "/m/g");
+        assert_eq!(expanded["threads"], 2);
+        assert_eq!(expanded["wake_words"][0], "${RM_PARAMS_TEST_DIR}");
+    }
 
     #[test]
     fn snake_case_conversion() {

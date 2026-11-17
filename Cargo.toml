@@ -5,6 +5,7 @@ members = [
     "crates/traits",
     "crates/py-env-manager",
     "crates/plugin-sdk",
+    "crates/room-agent",
     "crates/modality",
     "crates/core-derive",
     "crates/shared-memory",
@@ -20,6 +21,7 @@ default-members = [
     "crates/traits",
     "crates/py-env-manager",
     "crates/plugin-sdk",
+    "crates/room-agent",
     "crates/modality",
     "crates/core-derive",
 ]

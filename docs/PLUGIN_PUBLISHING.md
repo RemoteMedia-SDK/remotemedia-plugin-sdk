@@ -212,6 +212,8 @@ the release is intentionally targeting an older host line.
 
 ## Reference
 
+- [Writing a room agent](ROOM_AGENT.md) — `remotemedia-room-agent`, for a
+  plugin whose node answers people in a room
 - [Reusable workflow source](../.github/workflows/build-plugin.yml)
 - [Resolver source](../crates/core/src/loadable/resolver.rs) — what
   consumes the published artifacts
