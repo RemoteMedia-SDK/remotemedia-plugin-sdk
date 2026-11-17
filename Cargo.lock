@@ -2058,6 +2058,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "inventory",
+ "remotemedia-modality",
  "remotemedia-types",
  "schemars",
  "serde",

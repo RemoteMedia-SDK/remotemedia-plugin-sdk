@@ -20,7 +20,7 @@
 //! | Feature      | Module        | What it covers                                                                          |
 //! |--------------|---------------|------------------------------------------------------------------------------------------|
 //! | `llm`        | [`llm`]       | Chat history, OpenAI-shaped tool specs, streaming tool-call dispatch.                    |
-//! | `stt`        | [`stt`]       | TranscriptionSegment, streaming partial+final accumulator, common STT config.            |
+//! | `stt`        | [`stt`]       | Model-agnostic transcript stabilizer: streaming delta / correction / final events.       |
 //! | `tts`        | [`tts`]       | VoiceSpec, AudioFormat, streaming chunk emit helpers, common TTS config.                 |
 //! | `t2i`        | [`t2i`]       | GenerationParams, scheduler enum, common text-to-image config.                           |
 //! | `vision`     | [`vision`]    | Classification, preprocessing knobs, vision config.                                      |
