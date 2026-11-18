@@ -50,6 +50,10 @@ CI uses Python 3.12 with NumPy for tests embedding Python. Configure a compatibl
 
 Plugin packaging conventions are in [PLUGIN_PUBLISHING.md](docs/PLUGIN_PUBLISHING.md), `templates/`, and `.github/workflows/build-plugin.yml`. Preparing a plugin or updating guidance does not itself request a release.
 
+## Committing progress
+
+Commit development progress while implementing a task or an OpenSpec change; do not leave the whole result uncommitted until the end. Commit on the working feature branch, not the default branch, at each verified checkpoint: a completed task or coherent group of tasks that builds and passes its focused checks. Include the matching `tasks.md` checkbox updates in the same commit, and name the change ID and task numbers in the message when an OpenSpec change applies. Stage only the files the task touched; leave unrelated or pre-existing changes out. If partial or failing work must be saved, mark it as work in progress in the message and keep its tasks unchecked.
+
 ## Specifications
 
 Check local `openspec/changes/` before changing ABI, wire formats, lifecycle or authoring APIs. Link the corresponding host/transport work and specify the compatibility and validation consequences. Use [the SDK OpenSpec workflow](../remotemedia-sdk/openspec/AGENTS.md) when that checkout is available, running commands from the repository containing the change. Implement an already-approved scope without requesting the same approval again. Documentation corrections and fixes restoring intended behavior do not need a new proposal.
