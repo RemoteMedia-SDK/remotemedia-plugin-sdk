@@ -478,7 +478,10 @@ impl WhisperStreamingState {
         let tokens: Vec<TranscriptToken> = relative_segments
             .into_iter()
             .map(|segment| {
-                let (mut start, mut end) = (segment.start_ms + window_start_ms, segment.end_ms + window_start_ms);
+                let (mut start, mut end) = (
+                    segment.start_ms + window_start_ms,
+                    segment.end_ms + window_start_ms,
+                );
                 // A segment without a span (a decoder clamps a timestamp that
                 // falls past the window to its end, so start == end) still
                 // lies inside the window: give it the honest bound, from the
