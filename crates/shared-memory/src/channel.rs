@@ -2,6 +2,8 @@
 //! these bounded control frames. Session/lease validation belongs to the typed
 //! worker protocol above this layer; endpoint possession identifies the child.
 #![deny(unsafe_op_in_unsafe_fn)]
+use crate::process_capture::{self, CapturedProcess};
+pub use crate::process_capture::{CapturedOutput, ProcessResources};
 use std::{
     fs::File,
     io,
@@ -256,35 +258,6 @@ fn finish_spawn(
     }
 }
 
-/// Host resources required by a worker, such as an environment-cache lease.
-/// Once a child exists, release requires confirmed termination. If termination
-/// fails, quarantine resources until host exit rather than invalidating a live
-/// worker. Resource destructors must not reenter the worker's host handle.
-#[derive(Default)]
-pub struct ProcessResources {
-    owners: Vec<Box<dyn Send>>,
-    live: bool,
-}
-impl ProcessResources {
-    pub fn new(owner: impl Send + 'static) -> Self {
-        Self {
-            owners: vec![Box::new(owner)],
-            live: false,
-        }
-    }
-    fn release(&mut self) {
-        self.live = false;
-        self.owners.clear();
-    }
-}
-impl Drop for ProcessResources {
-    fn drop(&mut self) {
-        if self.live {
-            std::mem::forget(std::mem::take(&mut self.owners));
-        }
-    }
-}
-
 /// Owns the original OS child handle. Windows also assigns a private kill-on-close
 /// job before returning the channel; trusted workers must wait for their first
 /// host message before spawning descendants. This is not atomic spawn containment.
@@ -308,7 +281,7 @@ impl WorkerProcess {
     /// launch; unknown termination quarantines those resources rather than
     /// authorizing their reuse. Output capture itself does not impose a timeout.
     pub fn capture_output(self) -> io::Result<CapturedOutput> {
-        capture::begin(self)
+        process_capture::begin(self)
     }
     /// Launch a noninteractive command with captured stdout/stderr and no worker
     /// protocol. Windows assigns a job before resuming its primary thread.
@@ -519,8 +492,24 @@ pub mod test_faults {
     }
 }
 
-mod capture;
-pub use capture::CapturedOutput;
+impl CapturedProcess for WorkerProcess {
+    fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        self.take_stdout()
+    }
+
+    fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        self.take_stderr()
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.try_wait()
+    }
+
+    fn terminate(&mut self) -> io::Result<ExitStatus> {
+        self.terminate()
+    }
+}
+
 impl Drop for WorkerProcess {
     fn drop(&mut self) {
         let _ = self.terminate();

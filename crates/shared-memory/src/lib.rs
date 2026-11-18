@@ -11,8 +11,15 @@ mod remote;
 
 #[cfg(all(feature = "worker-channel", any(windows, target_os = "linux")))]
 pub mod channel;
+#[cfg(all(feature = "worker-channel", target_os = "macos"))]
+pub mod macos_process;
 #[cfg(all(feature = "worker-protocol", any(windows, target_os = "linux")))]
 pub mod peer;
+#[cfg(all(
+    feature = "worker-channel",
+    any(windows, target_os = "linux", target_os = "macos")
+))]
+mod process_capture;
 
 pub use descriptor::WriteDescriptor;
 pub use descriptor::{

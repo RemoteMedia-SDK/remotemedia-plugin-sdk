@@ -1,9 +1,8 @@
-use super::WorkerProcess;
 use std::{
     future::Future,
     io::{self, Read},
     pin::Pin,
-    process::Output,
+    process::{ChildStderr, ChildStdout, ExitStatus, Output},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -12,6 +11,43 @@ use std::{
     thread::{self, JoinHandle},
     time::Duration,
 };
+
+pub(crate) trait CapturedProcess: Send + 'static {
+    fn take_stdout(&mut self) -> Option<ChildStdout>;
+    fn take_stderr(&mut self) -> Option<ChildStderr>;
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
+    fn terminate(&mut self) -> io::Result<ExitStatus>;
+}
+
+/// Retained environment leases or other resources needed by an owned process.
+/// An unconfirmed shutdown keeps the resources quarantined until host exit.
+#[derive(Default)]
+pub struct ProcessResources {
+    owners: Vec<Box<dyn Send>>,
+    pub(crate) live: bool,
+}
+
+impl ProcessResources {
+    pub fn new(owner: impl Send + 'static) -> Self {
+        Self {
+            owners: vec![Box::new(owner)],
+            live: false,
+        }
+    }
+
+    pub(crate) fn release(&mut self) {
+        self.live = false;
+        self.owners.clear();
+    }
+}
+
+impl Drop for ProcessResources {
+    fn drop(&mut self) {
+        if self.live {
+            std::mem::forget(std::mem::take(&mut self.owners));
+        }
+    }
+}
 
 #[derive(Default)]
 struct Completion {
@@ -61,7 +97,7 @@ impl Drop for CapturedOutput {
     }
 }
 
-pub(super) fn begin(mut process: WorkerProcess) -> io::Result<CapturedOutput> {
+pub(crate) fn begin(mut process: impl CapturedProcess) -> io::Result<CapturedOutput> {
     let stdout = process
         .take_stdout()
         .ok_or_else(|| io::Error::other("command stdout was not captured"))?;
@@ -110,7 +146,7 @@ fn read_result(reader: JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
 }
 
 fn run(
-    mut process: WorkerProcess,
+    mut process: impl CapturedProcess,
     stdout: impl Read + Send + 'static,
     stderr: impl Read + Send + 'static,
     cancel: &AtomicBool,
