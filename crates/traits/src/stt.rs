@@ -420,7 +420,13 @@ impl WhisperStreamingState {
         channels: u32,
     ) -> Result<usize, Error> {
         if self.finalized {
-            return Err(invalid_input("audio pushed after final flush".to_string()));
+            // The last utterance was finalized (a flush at a pause): this
+            // audio starts the next one. The stabilizer already moved on to
+            // the next `utterance_id`; times keep counting from the start
+            // of the stream.
+            self.finalized = false;
+            self.last_emitted_text = None;
+            self.new_samples_since_decode = 0;
         }
         let normalized = self.normalizer.push(samples, sample_rate, channels)?;
         let count = normalized.len();
@@ -465,14 +471,25 @@ impl WhisperStreamingState {
         final_result: bool,
     ) -> Option<TranscriptEvent> {
         self.stabilizer.reconfigure(stabilizer_config(options));
+        // The window ends where the audio does: no audio is pushed while a
+        // window is decoded.
+        let window_end_ms = samples_to_ms(self.total_samples).max(window_start_ms);
+        let mut previous_end = window_start_ms;
         let tokens: Vec<TranscriptToken> = relative_segments
             .into_iter()
             .map(|segment| {
-                TranscriptToken::timed(
-                    normalize_text(&segment.text),
-                    segment.start_ms + window_start_ms,
-                    segment.end_ms + window_start_ms,
-                )
+                let (mut start, mut end) = (segment.start_ms + window_start_ms, segment.end_ms + window_start_ms);
+                // A segment without a span (a decoder clamps a timestamp that
+                // falls past the window to its end, so start == end) still
+                // lies inside the window: give it the honest bound, from the
+                // previous segment's end to the window's end, instead of an
+                // instant.
+                if end <= start {
+                    start = previous_end.min(window_end_ms);
+                    end = window_end_ms;
+                }
+                previous_end = end;
+                TranscriptToken::timed(normalize_text(&segment.text), start, end)
             })
             .collect();
 
@@ -764,6 +781,75 @@ mod tests {
             .any(|u| matches!(u, TranscriptUpdate::Correction(_))));
         assert_eq!(final_text.as_deref(), Some(shown.join(" ").as_str()));
         assert_eq!(final_text.unwrap(), events.last().unwrap().text);
+    }
+
+    #[test]
+    fn audio_after_a_final_starts_the_next_utterance() {
+        let (fake, mut state) = FakeWhisper::new(TranscriptStreamingMode::Full);
+        let mut updates = Vec::new();
+        for i in 0..4 {
+            fake.stream_audio(&mut state, &chunk(i), 16_000, 1).unwrap();
+            updates.extend(state.take_updates());
+        }
+        fake.finalize(&mut state).unwrap();
+        updates.extend(state.take_updates());
+        // A pause closed the first utterance; speech goes on.
+        for i in 4..8 {
+            fake.stream_audio(&mut state, &chunk(i), 16_000, 1).unwrap();
+            updates.extend(state.take_updates());
+        }
+        fake.finalize(&mut state).unwrap();
+        updates.extend(state.take_updates());
+
+        let finals: Vec<_> = updates
+            .iter()
+            .filter_map(|u| match u {
+                TranscriptUpdate::Final(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finals.len(), 2, "{finals:?}");
+        assert_eq!(finals[0].utterance_id, 0);
+        assert_eq!(finals[1].utterance_id, 1);
+        // The fake mishears word 3 until it has heard 1 s past it.
+        assert_eq!(finals[0].text, "w0 w1 w2 tree");
+        assert_eq!(finals[1].text, "w4 w5 w6 w7");
+        // Times count from the start of the stream.
+        assert!(finals[1].start_ms.unwrap() >= finals[0].end_ms.unwrap());
+    }
+
+    #[test]
+    fn a_segment_without_a_span_gets_the_window_bounds() {
+        let mut state = WhisperStreamingState::default();
+        let options = StreamingOptions {
+            transcript_updates: TranscriptStreamingMode::Full,
+            ..StreamingOptions::default()
+        };
+        // 2 s of audio, decoded as one window starting at 0.
+        state.push_audio(&vec![0.0; 32_000], 16_000, 1).unwrap();
+        let window = state.decode_window(options, true).unwrap();
+        // The decoder clamped both timestamps to the window end.
+        state.apply_hypothesis(
+            vec![DecodedSegment {
+                text: " hello there".into(),
+                start_ms: 2_000,
+                end_ms: 2_000,
+            }],
+            window.start_ms,
+            options,
+            true,
+        );
+        let finals: Vec<_> = state
+            .take_updates()
+            .into_iter()
+            .filter_map(|u| match u {
+                TranscriptUpdate::Final(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finals.len(), 1);
+        assert_eq!(finals[0].start_ms, Some(0));
+        assert_eq!(finals[0].end_ms, Some(2_000));
     }
 
     #[test]
