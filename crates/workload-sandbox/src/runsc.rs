@@ -414,6 +414,16 @@ impl RunscProvider {
 
     fn command(&self) -> Command {
         let mut command = Command::new(&self.0.config.executable);
+        // gVisor creates guest mount points during startup. Give the runtime
+        // a stable umask so the non-root guest can traverse those directories.
+        // The host's state and bundle roots are created separately as 0700.
+        // SAFETY: umask is async-signal-safe and runs only in the forked child.
+        unsafe {
+            command.pre_exec(|| {
+                libc::umask(0o022);
+                Ok(())
+            });
+        }
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

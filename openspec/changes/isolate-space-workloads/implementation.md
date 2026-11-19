@@ -10,6 +10,8 @@ Build `remotemedia-workload-relay` for the guest image and set its guest path as
 
 The provider writes and reads back the CPU, memory, zero-swap, and host-task caps before it invokes `runsc`. The foreground runtime owns the guest exit status. For serving, the provider waits for the running state and verifies cgroup membership before it exposes the relay. Startup reconciliation removes any leftover sandbox and validates cgroup teardown before clearing the bundle record. A cleanup failure leaves the record for recovery and returns `CleanupPending` to the host.
 
+The provider sets `umask 022` in the runtime child so gVisor can create traversable guest mount points. The provider creates its host state and reservation roots with private permissions. The pinned gVisor fixture with the production relay passed while the worker used `umask 077`.
+
 ## Verified locally
 
 The focused `runsc_cpu` integration test passed with gVisor `release-20261116.0` on Ubuntu 24.04.3 under WSL2, kernel `5.15.167.4-microsoft-standard-WSL2+`. The downloaded release archive matched the published SHA-512 checksum. The test ran a synthetic static program as a non-root user with zero effective capabilities and no new privileges. It checked read-only input, a 16 MiB scratch filesystem, loopback-only networking, and absence of host paths, host cgroup controls, the Docker socket, and NVIDIA devices. It read back the 500 milli-CPU, 128 MiB memory, zero-swap and 64 host-task limits from the active cgroup. It checked fast command exit, a private relay round trip, stream closure on stop, deadline and dropped-handle cleanup, and cleanup after the worker exited before teardown. The Windows package check compiled the portable provider contract.

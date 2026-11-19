@@ -17,6 +17,7 @@ fn fixture() -> (tempfile::TempDir, RunscConfig) {
     let root = tempfile::tempdir().unwrap();
     let rootfs = root.path().join("rootfs");
     fs::create_dir(&rootfs).unwrap();
+    fs::set_permissions(&rootfs, fs::Permissions::from_mode(0o755)).unwrap();
     let program = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cpu.c");
     assert!(Command::new("cc")
         .arg("-static")
@@ -26,6 +27,7 @@ fn fixture() -> (tempfile::TempDir, RunscConfig) {
         .status()
         .unwrap()
         .success());
+    fs::set_permissions(rootfs.join("probe"), fs::Permissions::from_mode(0o755)).unwrap();
     if let Some(relay) = std::env::var_os("RM_SPACE_TEST_RELAY") {
         let destination = rootfs.join("relay");
         fs::copy(relay, &destination).unwrap();
