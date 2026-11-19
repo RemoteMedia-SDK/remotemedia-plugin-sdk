@@ -18,4 +18,10 @@ The focused `runsc_cpu` integration test passed with gVisor `release-20261116.0`
 
 Run the focused fixture from the Plugin SDK repository on Linux with an installed static C toolchain. Set `RM_SPACE_TEST_RUNSC` to the absolute path of the pinned runtime and `RM_SPACE_TEST_CGROUP` to an exclusively reserved test subtree with the controllers enabled. Set `RM_SPACE_TEST_RELAY` to a statically linked build of the release relay to exercise it in the guest. Use `cargo test --locked -p remotemedia-workload-sandbox --features test-runsc --test runsc_cpu`.
 
-The SDK Base bridge stages verified artifacts and starts a run through this provider. Scaling Runner and the Spaces gateway still need to call the bridge. The fixture uses synthetic commands and a byte echo service. Wheel installation, a real Gradio upload and streamed response, deployment-host evidence, and physical CUDA acceptance remain release gates. The provider reports CUDA as unsupported.
+## Offline Python guest
+
+Install the executable `guest/remotemedia-space-launch` and the Spaces `guest_bootstrap.py` and `static_space.py` under `/opt/remotemedia` in the trusted image. Provide trusted CPython at `/usr/bin/python3`, uv at `/usr/local/bin/uv`, and the production loopback relay. The launcher verifies the ABI and exact wheel inventory mounted by SDK Base. It creates the venv and installer scratch under `/work`, then runs uv with explicit environment and arguments, no indexes, and required hashes for direct local wheel paths. The guest uses a fresh environment for each run. [uv sync options](https://docs.astral.sh/uv/reference/cli/#uv-pip-sync)
+
+The Linux CPU fixture on WSL2 installed 49 locked wheels using CPython 3.12.3 and uv 0.11.7 in gVisor. Real Gradio 6.14.0 accepted a file upload and streamed an intermediate and final result through the production relay. A separate gVisor probe changed only the ZIP comment of a verified wheel and uv rejected the resulting hash mismatch before bootstrap. Five focused launcher tests passed, including missing and extra inputs, incompatible ABI, static mode inventory, and rejection of ambient installer and app environment inputs.
+
+Scaling Runner and the Spaces gateway still need to call the SDK Base bridge for production launches. Deployment-host evidence and physical CUDA acceptance remain release gates.
