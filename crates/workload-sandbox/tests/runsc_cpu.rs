@@ -26,11 +26,22 @@ fn fixture() -> (tempfile::TempDir, RunscConfig) {
         .status()
         .unwrap()
         .success());
+    if let Some(relay) = std::env::var_os("RM_SPACE_TEST_RELAY") {
+        let destination = rootfs.join("relay");
+        fs::copy(relay, &destination).unwrap();
+        fs::set_permissions(destination, fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let config = fixture_config(root.path());
     (root, config)
 }
 
 fn fixture_config(root: &Path) -> RunscConfig {
+    let rootfs = root.join("rootfs");
+    let relay = if rootfs.join("relay").is_file() {
+        "/relay"
+    } else {
+        "/probe"
+    };
     let executable =
         PathBuf::from(std::env::var_os("RM_SPACE_TEST_RUNSC").expect("set the pinned runsc path"));
     let delegated_cgroup = PathBuf::from(
@@ -41,10 +52,10 @@ fn fixture_config(root: &Path) -> RunscConfig {
     RunscConfig {
         executable,
         executable_sha256,
-        rootfs: root.join("rootfs"),
+        rootfs,
         state: root.join("state"),
         delegated_cgroup,
-        relay_program: "/probe".into(),
+        relay_program: relay.into(),
     }
 }
 
