@@ -1,6 +1,5 @@
 //! Provider contract for workload commands planned by the trusted host.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
@@ -31,22 +30,13 @@ pub struct WorkloadLimits {
     pub lifetime: Duration,
 }
 
-/// Individual read-only input trees selected by the trusted host.
-#[derive(Clone, Debug, Default)]
-pub struct WorkloadInputs {
-    pub source: Option<PathBuf>,
-    pub wheels: Option<PathBuf>,
-    pub models: Option<PathBuf>,
-}
-
-/// Launch inputs are supplied by the trusted host after verifying its grant
-/// and acquiring the artifact lease. The program runs inside the guest.
+/// The trusted host plans the command after approving the grant and staging
+/// the artifact in a provider reservation. The program runs inside the guest.
 #[derive(Clone, Debug)]
 pub struct WorkloadRequest {
     pub target: WorkloadTarget,
     pub phase: WorkloadPhase,
     pub limits: WorkloadLimits,
-    pub inputs: WorkloadInputs,
     pub argv: Vec<String>,
 }
 

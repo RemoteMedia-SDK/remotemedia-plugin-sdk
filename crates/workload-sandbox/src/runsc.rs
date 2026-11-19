@@ -43,6 +43,13 @@ pub struct RunscConfig {
 #[derive(Clone)]
 pub struct RunscProvider(Arc<HostState>);
 
+/// Host-only staging for one launch. Dropping an unstarted reservation
+/// discards it. Starting transfers its inputs to the provider's recovery state.
+pub struct RunscReservation {
+    provider: RunscProvider,
+    bundle: tempfile::TempDir,
+}
+
 struct HostState {
     config: RunscConfig,
     _state_lock: File,
@@ -154,11 +161,25 @@ impl RunscProvider {
             .ok_or(SandboxError::Runtime("version reporting"))
     }
 
-    pub async fn start(&self, request: WorkloadRequest) -> Result<RunscSandbox, SandboxError> {
-        validate_request(&request)?;
-        let pending = tempfile::Builder::new()
+    pub fn reserve(&self) -> Result<RunscReservation, SandboxError> {
+        let bundle = tempfile::Builder::new()
             .prefix(PREFIX)
             .tempdir_in(self.0.config.state.join("bundles"))?;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(bundle.path().join("inputs"))?;
+        Ok(RunscReservation {
+            provider: self.clone(),
+            bundle,
+        })
+    }
+
+    async fn start_reserved(
+        &self,
+        pending: tempfile::TempDir,
+        request: WorkloadRequest,
+    ) -> Result<RunscSandbox, SandboxError> {
+        validate_request(&request)?;
         let id = pending
             .path()
             .file_name()
@@ -166,7 +187,7 @@ impl RunscProvider {
             .filter(|id| valid_id(id))
             .ok_or(SandboxError::Invalid("could not assign sandbox identity"))?
             .to_owned();
-        let spec = self.spec(&id, &request)?;
+        let spec = self.spec(&id, &pending.path().join("inputs"), &request)?;
         fs::write(
             pending.path().join("config.json"),
             serde_json::to_vec(&spec)?,
@@ -182,8 +203,8 @@ impl RunscProvider {
                 serde_json::to_vec(&relay)?,
             )?;
         }
+        File::open(pending.path().parent().unwrap())?.sync_all()?;
         let bundle = pending.keep();
-        File::open(bundle.parent().unwrap())?.sync_all()?;
         let (cancel, cancellation) = oneshot::channel();
         let (started, ready) = oneshot::channel();
         let (done, result) = oneshot::channel();
@@ -245,6 +266,7 @@ impl RunscProvider {
         started: oneshot::Sender<Result<(), SandboxError>>,
     ) -> Result<WorkloadExit, SandboxError> {
         let pid_file = bundle.join("sandbox.pid");
+        let deadline = tokio::time::Instant::now() + request.limits.lifetime;
         let launch = (|| {
             self.configure_cgroup(id, request.limits)?;
             // Owning the attached process preserves the exit status even when
@@ -278,6 +300,7 @@ impl RunscProvider {
         };
         let start = tokio::select! {
             _ = &mut cancel => Err(SandboxError::Runtime("cancelled startup")),
+            () = tokio::time::sleep_until(deadline) => Err(SandboxError::Timeout("workload lifetime")),
             result = tokio::time::timeout(CONTROL_TIMEOUT, ready) => {
                 result.unwrap_or(Err(SandboxError::Timeout("create")))
             }
@@ -286,7 +309,7 @@ impl RunscProvider {
         let observer = started.send(start).is_ok();
         let result = if active && observer {
             tokio::select! {
-                () = tokio::time::sleep(request.limits.lifetime) => Ok(WorkloadExit::Deadline),
+                () = tokio::time::sleep_until(deadline) => Ok(WorkloadExit::Deadline),
                 _ = &mut cancel => Ok(WorkloadExit::Stopped),
                 status = child.wait() => status.map(workload_exit).map_err(SandboxError::from),
             }
@@ -370,10 +393,7 @@ impl RunscProvider {
             .map_err(|_| pending())?
             .map_err(|_| pending())?;
         let bundle = self.0.config.state.join("bundles").join(id);
-        for name in ["config.json", "relay.json", "sandbox.pid"] {
-            remove_if_missing_ok(fs::remove_file(bundle.join(name))).map_err(|_| pending())?;
-        }
-        remove_if_missing_ok(fs::remove_dir(bundle)).map_err(|_| pending())
+        remove_if_missing_ok(tokio::fs::remove_dir_all(bundle).await).map_err(|_| pending())
     }
 
     async fn list(&self) -> Result<BTreeSet<String>, SandboxError> {
@@ -437,27 +457,31 @@ impl RunscProvider {
         Ok(output)
     }
 
-    fn spec(&self, id: &str, request: &WorkloadRequest) -> Result<Value, SandboxError> {
+    fn spec(
+        &self,
+        id: &str,
+        input_root: &Path,
+        request: &WorkloadRequest,
+    ) -> Result<Value, SandboxError> {
         let mut mounts = vec![
             json!({"destination":"/proc", "type":"proc", "source":"proc", "options":["nosuid","nodev","noexec"]}),
             json!({"destination":"/work", "type":"tmpfs", "source":"tmpfs",
                 "options":["nosuid","nodev",format!("size={}",request.limits.scratch_bytes),"mode=1777".to_owned()]}),
         ];
-        for (mount, destination) in [
-            (&request.inputs.source, "/inputs/source"),
-            (&request.inputs.wheels, "/inputs/wheels"),
-            (&request.inputs.models, "/inputs/models"),
-        ] {
-            if let Some(mount) = mount {
-                if !mount.is_absolute() || !fs::symlink_metadata(mount)?.is_dir() {
-                    return Err(SandboxError::Invalid(
-                        "expected an absolute private artifact directory",
-                    ));
-                }
-                mounts.push(
-                    json!({"destination":destination,"type":"bind","source":mount,
+        for name in ["source", "wheels", "models"] {
+            let mount = input_root.join(name);
+            match fs::symlink_metadata(&mount) {
+                Ok(metadata) if metadata.is_dir() => mounts.push(
+                    json!({"destination":format!("/inputs/{name}"),"type":"bind","source":mount,
                     "options":["bind","ro","nosuid","nodev","noexec"]}),
-                );
+                ),
+                Ok(_) => {
+                    return Err(SandboxError::Invalid(
+                        "expected a staged artifact directory",
+                    ))
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
             }
         }
         let scope = self
@@ -474,6 +498,17 @@ impl RunscProvider {
                 "resources":{"memory":{"limit":request.limits.memory_bytes,"swap":request.limits.memory_bytes},
                     "pids":{"limit":request.limits.processes},"cpu":{"period":100000,"quota":u64::from(request.limits.cpu_millis)*100}}}}),
         )
+    }
+}
+
+impl RunscReservation {
+    /// An empty private directory for the host's verified input trees.
+    pub fn input_root(&self) -> PathBuf {
+        self.bundle.path().join("inputs")
+    }
+
+    pub async fn start(self, request: WorkloadRequest) -> Result<RunscSandbox, SandboxError> {
+        self.provider.start_reserved(self.bundle, request).await
     }
 }
 
@@ -600,6 +635,9 @@ fn validate_request(request: &WorkloadRequest) -> Result<(), SandboxError> {
         || limits.scratch_bytes > limits.memory_bytes
         || limits.processes == 0
         || limits.lifetime.is_zero()
+        || tokio::time::Instant::now()
+            .checked_add(limits.lifetime)
+            .is_none()
     {
         return Err(SandboxError::Invalid(
             "finite CPU, memory, scratch, process and lifetime limits are required",

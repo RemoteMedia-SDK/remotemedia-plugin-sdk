@@ -6,22 +6,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use remotemedia_workload_sandbox::runsc::{RunscConfig, RunscProvider};
+use remotemedia_workload_sandbox::runsc::{RunscConfig, RunscProvider, RunscReservation};
 use remotemedia_workload_sandbox::{
-    SandboxError, WorkloadExit, WorkloadInputs, WorkloadLimits, WorkloadPhase, WorkloadRequest,
-    WorkloadTarget,
+    SandboxError, WorkloadExit, WorkloadLimits, WorkloadPhase, WorkloadRequest, WorkloadTarget,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-fn fixture() -> (tempfile::TempDir, RunscConfig, PathBuf) {
+fn fixture() -> (tempfile::TempDir, RunscConfig) {
     let root = tempfile::tempdir().unwrap();
     let rootfs = root.path().join("rootfs");
-    let source = root.path().join("inputs");
     fs::create_dir(&rootfs).unwrap();
-    fs::create_dir(&source).unwrap();
-    fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
-    fs::write(source.join("evidence"), b"trusted test bytes").unwrap();
     let program = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cpu.c");
     assert!(Command::new("cc")
         .arg("-static")
@@ -32,7 +27,7 @@ fn fixture() -> (tempfile::TempDir, RunscConfig, PathBuf) {
         .unwrap()
         .success());
     let config = fixture_config(root.path());
-    (root, config, source)
+    (root, config)
 }
 
 fn fixture_config(root: &Path) -> RunscConfig {
@@ -53,7 +48,19 @@ fn fixture_config(root: &Path) -> RunscConfig {
     }
 }
 
-fn request(source: &Path, phase: WorkloadPhase, mode: &str, lifetime: Duration) -> WorkloadRequest {
+const SOURCE_BYTES: &[u8] = b"trusted test bytes";
+
+fn staged(provider: &RunscProvider) -> RunscReservation {
+    let reservation = provider.reserve().unwrap();
+    let source = reservation.input_root().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(source.join("evidence"), SOURCE_BYTES).unwrap();
+    fs::set_permissions(source.join("evidence"), fs::Permissions::from_mode(0o444)).unwrap();
+    reservation
+}
+
+fn request(phase: WorkloadPhase, mode: &str, lifetime: Duration) -> WorkloadRequest {
     WorkloadRequest {
         target: WorkloadTarget::LinuxCpu,
         phase,
@@ -64,10 +71,6 @@ fn request(source: &Path, phase: WorkloadPhase, mode: &str, lifetime: Duration) 
             processes: 64,
             lifetime,
         },
-        inputs: WorkloadInputs {
-            source: Some(source.to_owned()),
-            ..Default::default()
-        },
         argv: vec!["/probe".into(), mode.into()],
     }
 }
@@ -77,9 +80,8 @@ async fn real_cpu_provider_checks_isolation_and_owns_relay_and_cleanup() {
     const CRASH_ROOT: &str = "RM_SPACE_TEST_CRASH_ROOT";
     if let Some(root) = std::env::var_os(CRASH_ROOT).map(PathBuf::from) {
         let provider = RunscProvider::open(fixture_config(&root)).await.unwrap();
-        let running = provider
+        let running = staged(&provider)
             .start(request(
-                &root.join("inputs"),
                 WorkloadPhase::Serve {
                     loopback_port: 24566,
                 },
@@ -92,7 +94,7 @@ async fn real_cpu_provider_checks_isolation_and_owns_relay_and_cleanup() {
         // Exit without dropping the active run or executing the provider's actor.
         std::process::exit(0);
     }
-    let (_root, config, source) = fixture();
+    let (_root, config) = fixture();
     let provider = RunscProvider::open(config.clone()).await.unwrap();
     assert!(provider
         .probe(WorkloadTarget::LinuxCpu)
@@ -110,9 +112,13 @@ async fn real_cpu_provider_checks_isolation_and_owns_relay_and_cleanup() {
         RunscProvider::open(conflicting).await,
         Err(SandboxError::Runtime("exclusive provider cgroup lock"))
     ));
-    let install = provider
+    let abandoned = staged(&provider);
+    let abandoned_inputs = abandoned.input_root();
+    drop(abandoned);
+    assert!(!abandoned_inputs.exists());
+
+    let install = staged(&provider)
         .start(request(
-            &source,
             WorkloadPhase::Install,
             "check",
             Duration::from_secs(15),
@@ -121,11 +127,9 @@ async fn real_cpu_provider_checks_isolation_and_owns_relay_and_cleanup() {
         .unwrap();
     assert!(install.open_stream().is_err());
     assert_eq!(install.wait().await.unwrap(), WorkloadExit::Exited(0));
-    assert!(!source.join("write").exists());
 
-    let serve = provider
+    let serve = staged(&provider)
         .start(request(
-            &source,
             WorkloadPhase::Serve {
                 loopback_port: 24566,
             },
@@ -176,19 +180,17 @@ async fn real_cpu_provider_checks_isolation_and_owns_relay_and_cleanup() {
     assert!(!config.delegated_cgroup.join(&id).exists());
     assert!(!config.state.join("bundles").join(&id).exists());
 
-    let expired = provider
+    let expired = staged(&provider)
         .start(request(
-            &source,
             WorkloadPhase::Build,
             "block",
-            Duration::from_millis(400),
+            Duration::from_secs(1),
         ))
         .await
         .unwrap();
     assert_eq!(expired.wait().await.unwrap(), WorkloadExit::Deadline);
-    let dropped = provider
+    let dropped = staged(&provider)
         .start(request(
-            &source,
             WorkloadPhase::Build,
             "block",
             Duration::from_secs(15),
@@ -225,7 +227,10 @@ async fn real_cpu_provider_checks_isolation_and_owns_relay_and_cleanup() {
     let interrupted = fs::read_to_string(_root.path().join("interrupted-run")).unwrap();
     let bundle = config.state.join("bundles").join(&interrupted);
     let cgroup = config.delegated_cgroup.join(interrupted);
-    assert!(bundle.is_dir());
+    assert_eq!(
+        fs::read(bundle.join("inputs/source/evidence")).unwrap(),
+        SOURCE_BYTES
+    );
     assert!(cgroup.is_dir());
     let _reopened = RunscProvider::open(config).await.unwrap();
     assert!(!bundle.exists());
