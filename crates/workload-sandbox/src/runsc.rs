@@ -527,9 +527,14 @@ impl RunscSandbox {
         &self.id
     }
 
-    pub async fn wait(self) -> Result<WorkloadExit, SandboxError> {
-        let _cancel = self.cancel;
-        self.result
+    pub async fn wait(mut self) -> Result<WorkloadExit, SandboxError> {
+        self.wait_for_exit().await
+    }
+
+    /// Wait without consuming the owner. The caller may cancel this wait and
+    /// still request a stop. Call only until the terminal result is observed.
+    pub async fn wait_for_exit(&mut self) -> Result<WorkloadExit, SandboxError> {
+        (&mut self.result)
             .await
             .map_err(|_| SandboxError::CleanupPending(self.id.clone()))?
     }
