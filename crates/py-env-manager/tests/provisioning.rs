@@ -7,7 +7,11 @@ use remotemedia_py_env::{
 use remotemedia_py_env::{uv_backend::UvBackend, LockedWheelPlan};
 #[cfg(feature = "bundled-uv")]
 use sha2::{Digest, Sha256};
-use std::{path::PathBuf, process::Command};
+use std::{
+    path::PathBuf,
+    process::Command,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 fn process_namespace() -> Option<ProcessNamespace> {
     #[cfg(target_os = "linux")]
@@ -28,13 +32,15 @@ fn context() -> ProvisioningContext {
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
+        static NEXT_SCRATCH: AtomicUsize = AtomicUsize::new(0);
         let name = format!(
-            "rm-provisioning-{}-{}",
+            "rm-provisioning-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed),
         );
         let path = std::env::temp_dir().join(name);
         std::fs::create_dir(&path).unwrap();

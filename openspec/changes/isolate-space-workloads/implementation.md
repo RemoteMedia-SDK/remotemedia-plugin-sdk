@@ -56,7 +56,7 @@ Each install owns a fresh venv and scratch directory. Its identity binds the whe
 
 The uv-enabled library suite passed 42 tests on WSL2 and 45 on Windows. The locked-wheel integration test passed on both platforms with synthetic ambient uv settings. Concurrent installs of the same lock used independent directories, and removing one left the other usable. uv rejected a same-size modification to a valid wheel archive and the failed installation left no environment behind. The packaged Windows launcher passed signed preparation and reviewed Gradio serving over direct and paired routes, including upload, streaming, and private environment removal after stop or revocation. On WSL2, the actual Linux Runner served the locked Gradio fixture and removed its environment on stop. All six reviewed transport tests also passed there.
 
-The four real provisioning fixtures passed with pinned uv on Windows, including the trusted system and uv backends. The native macOS Rust CI job runs the same provisioning fixtures and the Darwin process-group tests. Native macOS results are pending. [Rust CI workflow](../../../.github/workflows/rust.yml)
+The four real provisioning fixtures passed on Windows and on an Apple M1 Pro running macOS 26.3.1 with native Python 3.12.13 and uv 0.11.7. The macOS job opts its provisioning fixtures into trusted process-group ownership. The independent Darwin tests passed for explicit opt-in, child pipe closure and process-group cleanup, and lease release after cancellation. Parallel provisioning fixtures use distinct scratch directories even when the system clock reports identical timestamps. [Rust CI workflow](../../../.github/workflows/rust.yml)
 
 ## Live CPU readiness
 

@@ -49,5 +49,6 @@ jobs:
       - name: Test managed Python and Darwin process ownership
         run: |
           cargo test --locked -p remotemedia-py-env --features bundled-uv
-          UV_BINARY_PATH="$(command -v uv)" cargo test --locked -p remotemedia-py-env --features bundled-uv --test provisioning -- --ignored
+          REMOTEMEDIA_PYTHON_DARWIN_TRUSTED_PROVISIONING=1 UV_BINARY_PATH="$(command -v uv)" \
+            cargo test --locked -p remotemedia-py-env --features bundled-uv --test provisioning -- --ignored
           cargo test --locked -p remotemedia-shared-memory --features worker-channel --lib macos_process::tests
