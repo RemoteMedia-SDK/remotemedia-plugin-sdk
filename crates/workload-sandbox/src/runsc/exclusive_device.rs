@@ -189,7 +189,7 @@ fn read_binding(path: &Path) -> Result<Option<Binding>, SandboxError> {
         .map_err(|_| SandboxError::DeviceRecoveryRequired)
 }
 
-fn canonical_gpu_uuid(uuid: &str) -> bool {
+pub(super) fn canonical_gpu_uuid(uuid: &str) -> bool {
     uuid.strip_prefix("GPU-").is_some_and(canonical_uuid)
 }
 

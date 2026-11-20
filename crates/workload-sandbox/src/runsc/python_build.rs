@@ -64,7 +64,7 @@ impl RunscProvider {
                 plan.output.identity.size.to_string(),
             ],
         };
-        validate_request(&request)?;
+        validate_request(&request, WorkloadTarget::LinuxCpu)?;
         let output = plan.validate(limits.scratch_bytes)?;
         self.check_ready(Path::new(LAUNCHER)).await?;
         let reservation = self.reserve()?;

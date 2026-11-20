@@ -1,4 +1,4 @@
-//! Dedicated Linux CPU sandboxes managed through standalone gVisor.
+//! Dedicated Linux sandboxes managed through standalone gVisor.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
@@ -22,9 +22,12 @@ use crate::{
 };
 
 mod build;
+mod cuda;
 mod exclusive_device;
 mod python_build;
 pub use build::BuildOutput;
+use cuda::CudaDevice;
+pub use cuda::RunscCudaConfig;
 use exclusive_device::ExclusiveDevice;
 pub use python_build::{ApprovedWheelBuild, BuildFile, BuildFileIdentity};
 
@@ -62,6 +65,7 @@ struct HostState {
     _state_lock: File,
     _cgroup_lock: File,
     device: Option<ExclusiveDevice>,
+    cuda: Option<CudaDevice>,
 }
 
 /// Owns one workload. Dropping it requests termination. Explicitly wait or
@@ -96,7 +100,7 @@ struct ContainerState {
 
 impl RunscProvider {
     pub async fn open(config: RunscConfig) -> Result<Self, SandboxError> {
-        Self::open_inner(config, None).await
+        Self::open_inner(config, None, None).await
     }
 
     /// Bind this provider's private state and cgroup to one host device.
@@ -108,12 +112,26 @@ impl RunscProvider {
         registry: &Path,
         uuid: &str,
     ) -> Result<Self, SandboxError> {
-        Self::open_inner(config, Some((registry, uuid))).await
+        Self::open_inner(config, Some((registry, uuid)), None).await
+    }
+
+    /// Open an exclusive native Linux CUDA provider with a trusted guest image.
+    pub async fn open_cuda(
+        config: RunscConfig,
+        cuda: &RunscCudaConfig,
+    ) -> Result<Self, SandboxError> {
+        Self::open_inner(
+            config,
+            Some((&cuda.registry, &cuda.device_uuid)),
+            Some(cuda),
+        )
+        .await
     }
 
     async fn open_inner(
         mut config: RunscConfig,
         device: Option<(&Path, &str)>,
+        cuda: Option<&RunscCudaConfig>,
     ) -> Result<Self, SandboxError> {
         if !config.executable.is_absolute() || !absolute_guest_program(&config.relay_program) {
             return Err(SandboxError::Invalid(
@@ -142,6 +160,18 @@ impl RunscProvider {
         fs::create_dir_all(config.state.join("bundles"))?;
         fs::create_dir_all(config.state.join("runtime"))?;
         verify_runtime(&config.executable, &config.executable_sha256)?;
+        let cuda = cuda
+            .map(|profile| {
+                CudaDevice::discover(
+                    &profile.device_uuid,
+                    &profile.driver_version,
+                    &config.rootfs,
+                )
+            })
+            .transpose()?;
+        if let Some(cuda) = &cuda {
+            cuda.require_supported_driver(&config.executable).await?;
+        }
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
@@ -162,6 +192,7 @@ impl RunscProvider {
             _state_lock: lock,
             _cgroup_lock: cgroup_lock,
             device,
+            cuda,
         }));
         provider.reconcile().await?;
         if provider.0.device.is_some() && provider.has_device_workload()? {
@@ -210,8 +241,11 @@ impl RunscProvider {
     /// Report the pinned runtime version for the requested profile after local
     /// prerequisites pass. A worker still needs deployment acceptance evidence.
     pub async fn probe(&self, target: WorkloadTarget) -> Result<String, SandboxError> {
-        if target != WorkloadTarget::LinuxCpu {
+        if target != self.target() {
             return Err(SandboxError::UnsupportedTarget(target));
+        }
+        if let Some(cuda) = &self.0.cuda {
+            cuda.recheck(&self.0.config.rootfs)?;
         }
         let output = self.output("version", &["--version"]).await?;
         std::str::from_utf8(&output.stdout)
@@ -220,6 +254,14 @@ impl RunscProvider {
             .filter(|line| line.starts_with("runsc version ") && line.len() <= 128)
             .map(str::to_owned)
             .ok_or(SandboxError::Runtime("version reporting"))
+    }
+
+    fn target(&self) -> WorkloadTarget {
+        if self.0.cuda.is_some() {
+            WorkloadTarget::LinuxCuda
+        } else {
+            WorkloadTarget::LinuxCpu
+        }
     }
 
     /// Check the provider prerequisites and private runtime state without
@@ -246,6 +288,9 @@ impl RunscProvider {
                         "guest controller executable is unavailable",
                     ));
                 }
+            }
+            if let Some(cuda) = &host.cuda {
+                cuda.recheck(&config.rootfs)?;
             }
             verify_runtime(&config.executable, &config.executable_sha256)
         })
@@ -287,7 +332,7 @@ impl RunscProvider {
         request: WorkloadRequest,
         capture: Option<oneshot::Sender<ChildStdout>>,
     ) -> Result<RunscSandbox, SandboxError> {
-        validate_request(&request)?;
+        validate_request(&request, self.target())?;
         if let Some(device) = &self.0.device {
             device.verify_scope()?;
         }
@@ -382,6 +427,10 @@ impl RunscProvider {
         let launch = (|| {
             if let Some(device) = &self.0.device {
                 device.verify_scope()?;
+            }
+            if let Some(cuda) = &self.0.cuda {
+                verify_runtime(&self.0.config.executable, &self.0.config.executable_sha256)?;
+                cuda.recheck(&self.0.config.rootfs)?;
             }
             self.configure_cgroup(id, request.limits)?;
             // Owning the attached process preserves the exit status even when
@@ -564,6 +613,12 @@ impl RunscProvider {
                 "--overlay2=none",
                 "--sidecar-release-enforcement-policy=ALWAYS",
             ]);
+        if self.0.cuda.is_some() {
+            command.args([
+                "--nvproxy",
+                "--nvproxy-allowed-driver-capabilities=compute,utility",
+            ]);
+        }
         command
     }
 
@@ -626,14 +681,20 @@ impl RunscProvider {
             .delegated_cgroup
             .strip_prefix(CGROUP_FS)
             .expect("validated cgroup subtree");
-        Ok(
-            json!({"ociVersion":"1.1.0","root":{"path":self.0.config.rootfs,"readonly":true},
-            "process":process_spec(&request.argv),"mounts":mounts,
+        let process = match &self.0.cuda {
+            Some(cuda) => process_spec(&cuda.launch_argv(&request.argv)),
+            None => process_spec(&request.argv),
+        };
+        let mut spec = json!({"ociVersion":"1.1.0","root":{"path":self.0.config.rootfs,"readonly":true},
+            "process":process,"mounts":mounts,
             "linux":{"cgroupsPath":Path::new("/").join(scope).join(id),
                 "namespaces":[{"type":"pid"},{"type":"ipc"},{"type":"uts"},{"type":"mount"},{"type":"network"},{"type":"cgroup"}],
                 "resources":{"memory":{"limit":request.limits.memory_bytes,"swap":request.limits.memory_bytes},
-                    "pids":{"limit":request.limits.processes},"cpu":{"period":100000,"quota":u64::from(request.limits.cpu_millis)*100}}}}),
-        )
+                    "pids":{"limit":request.limits.processes},"cpu":{"period":100000,"quota":u64::from(request.limits.cpu_millis)*100}}}});
+        if let Some(cuda) = &self.0.cuda {
+            cuda.configure_spec(&mut spec["linux"]);
+        }
+        Ok(spec)
     }
 }
 
@@ -766,9 +827,15 @@ fn workload_exit(status: ExitStatus) -> WorkloadExit {
     WorkloadExit::Exited(code)
 }
 
-fn validate_request(request: &WorkloadRequest) -> Result<(), SandboxError> {
-    if request.target != WorkloadTarget::LinuxCpu {
+fn validate_request(request: &WorkloadRequest, target: WorkloadTarget) -> Result<(), SandboxError> {
+    if request.target != target {
         return Err(SandboxError::UnsupportedTarget(request.target));
+    }
+    if target == WorkloadTarget::LinuxCuda && !matches!(request.phase, WorkloadPhase::Serve { .. })
+    {
+        return Err(SandboxError::Invalid(
+            "CUDA device access is limited to serving",
+        ));
     }
     let limits = request.limits;
     if limits.cpu_millis == 0

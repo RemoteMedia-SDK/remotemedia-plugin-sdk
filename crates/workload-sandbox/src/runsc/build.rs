@@ -35,7 +35,7 @@ impl RunscReservation {
         expected: BuildOutput,
         cancelled: impl Future<Output = ()>,
     ) -> Result<File, SandboxError> {
-        validate_request(&request)?;
+        validate_request(&request, crate::WorkloadTarget::LinuxCpu)?;
         if request.phase != WorkloadPhase::Build
             || expected.size == 0
             || expected.size > request.limits.scratch_bytes

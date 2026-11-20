@@ -8,7 +8,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use remotemedia_workload_sandbox::runsc::{
-    BuildOutput, RunscConfig, RunscProvider, RunscReservation,
+    BuildOutput, RunscConfig, RunscCudaConfig, RunscProvider, RunscReservation,
 };
 use remotemedia_workload_sandbox::{
     SandboxError, WorkloadExit, WorkloadLimits, WorkloadPhase, WorkloadRequest, WorkloadTarget,
@@ -121,6 +121,22 @@ async fn real_cpu_provider_checks_isolation_and_owns_relay_and_cleanup() {
         std::process::exit(0);
     }
     let (_root, config) = fixture();
+    if !Path::new("/sys/module/nvidia/version").exists() {
+        let registry = _root.path().join("unavailable-cuda-registry");
+        fs::DirBuilder::new().mode(0o700).create(&registry).unwrap();
+        let cuda = RunscCudaConfig {
+            registry: registry.clone(),
+            device_uuid: FIRST_DEVICE.into(),
+            driver_version: "580.126.20".into(),
+        };
+        assert!(matches!(
+            RunscProvider::open_cuda(config.clone(), &cuda).await,
+            Err(SandboxError::Invalid(
+                "native NVIDIA kernel driver is unavailable"
+            ))
+        ));
+        assert!(fs::read_dir(registry).unwrap().next().is_none());
+    }
     let provider = RunscProvider::open(config.clone()).await.unwrap();
     assert!(provider
         .probe(WorkloadTarget::LinuxCpu)
