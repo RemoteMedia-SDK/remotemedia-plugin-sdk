@@ -22,8 +22,10 @@ use crate::{
 };
 
 mod build;
+mod exclusive_device;
 mod python_build;
 pub use build::BuildOutput;
+use exclusive_device::ExclusiveDevice;
 pub use python_build::{ApprovedWheelBuild, BuildFile, BuildFileIdentity};
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -59,6 +61,7 @@ struct HostState {
     config: RunscConfig,
     _state_lock: File,
     _cgroup_lock: File,
+    device: Option<ExclusiveDevice>,
 }
 
 /// Owns one workload. Dropping it requests termination. Explicitly wait or
@@ -92,7 +95,26 @@ struct ContainerState {
 }
 
 impl RunscProvider {
-    pub async fn open(mut config: RunscConfig) -> Result<Self, SandboxError> {
+    pub async fn open(config: RunscConfig) -> Result<Self, SandboxError> {
+        Self::open_inner(config, None).await
+    }
+
+    /// Bind this provider's private state and cgroup to one host device.
+    /// All providers on the host must use the same persistent private registry.
+    /// The binding survives process exit and guarantees one outstanding bundle.
+    /// Device visibility and support for a workload target are separate checks.
+    pub async fn open_for_exclusive_device(
+        config: RunscConfig,
+        registry: &Path,
+        uuid: &str,
+    ) -> Result<Self, SandboxError> {
+        Self::open_inner(config, Some((registry, uuid))).await
+    }
+
+    async fn open_inner(
+        mut config: RunscConfig,
+        device: Option<(&Path, &str)>,
+    ) -> Result<Self, SandboxError> {
         if !config.executable.is_absolute() || !absolute_guest_program(&config.relay_program) {
             return Err(SandboxError::Invalid(
                 "absolute runtime and relay paths are required",
@@ -132,13 +154,57 @@ impl RunscProvider {
         cgroup_lock
             .try_lock_exclusive()
             .map_err(|_| SandboxError::Runtime("exclusive provider cgroup lock"))?;
+        let device = device
+            .map(|(registry, uuid)| ExclusiveDevice::open(registry, uuid, &config))
+            .transpose()?;
         let provider = Self(Arc::new(HostState {
             config,
             _state_lock: lock,
             _cgroup_lock: cgroup_lock,
+            device,
         }));
         provider.reconcile().await?;
+        if provider.0.device.is_some() && provider.has_device_workload()? {
+            return Err(SandboxError::DeviceRecoveryRequired);
+        }
         Ok(provider)
+    }
+
+    /// Allow a different provider to acquire the device after recovery.
+    /// All reservations, sandboxes, and other provider handles must be gone.
+    pub async fn release_exclusive_device(mut self) -> Result<(), SandboxError> {
+        let owner = Arc::get_mut(&mut self.0).ok_or(SandboxError::DeviceBusy)?;
+        owner
+            .device
+            .as_ref()
+            .ok_or(SandboxError::Invalid("provider has no exclusive device"))?
+            .verify_scope()?;
+        verify_runtime(&owner.config.executable, &owner.config.executable_sha256)?;
+        self.reconcile().await?;
+        if self.has_device_workload()? {
+            return Err(SandboxError::DeviceRecoveryRequired);
+        }
+        self.0
+            .device
+            .as_ref()
+            .expect("exclusive device checked")
+            .release()
+    }
+
+    fn has_device_workload(&self) -> Result<bool, SandboxError> {
+        if fs::read_dir(self.0.config.state.join("bundles"))?
+            .next()
+            .transpose()?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        for child in fs::read_dir(&self.0.config.delegated_cgroup)? {
+            if child?.file_type()?.is_dir() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Report the pinned runtime version for the requested profile after local
@@ -190,6 +256,19 @@ impl RunscProvider {
     }
 
     pub fn reserve(&self) -> Result<RunscReservation, SandboxError> {
+        let _device_reservation = if let Some(device) = &self.0.device {
+            let reservation = device
+                .reservations
+                .lock()
+                .map_err(|_| SandboxError::DeviceRecoveryRequired)?;
+            device.verify_scope()?;
+            if self.has_device_workload()? {
+                return Err(SandboxError::DeviceBusy);
+            }
+            Some(reservation)
+        } else {
+            None
+        };
         let bundle = tempfile::Builder::new()
             .prefix(PREFIX)
             .tempdir_in(self.0.config.state.join("bundles"))?;
@@ -209,6 +288,9 @@ impl RunscProvider {
         capture: Option<oneshot::Sender<ChildStdout>>,
     ) -> Result<RunscSandbox, SandboxError> {
         validate_request(&request)?;
+        if let Some(device) = &self.0.device {
+            device.verify_scope()?;
+        }
         let id = pending
             .path()
             .file_name()
@@ -298,6 +380,9 @@ impl RunscProvider {
         let pid_file = bundle.join("sandbox.pid");
         let deadline = tokio::time::Instant::now() + request.limits.lifetime;
         let launch = (|| {
+            if let Some(device) = &self.0.device {
+                device.verify_scope()?;
+            }
             self.configure_cgroup(id, request.limits)?;
             // Owning the attached process preserves the exit status even when
             // the guest finishes before a separate wait command could attach.
@@ -418,10 +503,13 @@ impl RunscProvider {
     }
 
     async fn cleanup(&self, id: &str) -> Result<(), SandboxError> {
+        let pending = || SandboxError::CleanupPending(id.to_owned());
+        if let Some(device) = &self.0.device {
+            device.verify_scope().map_err(|_| pending())?;
+        }
         // A run may already have disappeared during a failed create. Prove
         // absence independently of the delete command's exit status.
         let _ = self.run("delete", &["delete", "--force", id]).await;
-        let pending = || SandboxError::CleanupPending(id.to_owned());
         if self.list().await.map_err(|_| pending())?.contains(id) {
             return Err(pending());
         }

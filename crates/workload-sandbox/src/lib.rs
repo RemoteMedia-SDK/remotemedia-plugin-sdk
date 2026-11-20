@@ -51,6 +51,10 @@ pub enum WorkloadExit {
 pub enum SandboxError {
     #[error("unsupported workload target {0:?}")]
     UnsupportedTarget(WorkloadTarget),
+    #[error("exclusive device capacity is reserved")]
+    DeviceBusy,
+    #[error("exclusive device requires reconciliation by its bound provider")]
+    DeviceRecoveryRequired,
     #[error("invalid workload configuration: {0}")]
     Invalid(&'static str),
     #[error("sandbox runtime failed during {0}")]

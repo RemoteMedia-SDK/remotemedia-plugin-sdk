@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -65,6 +65,10 @@ fn fixture_config(root: &Path) -> RunscConfig {
 }
 
 const SOURCE_BYTES: &[u8] = b"trusted test bytes";
+const FIRST_DEVICE: &str = "GPU-11111111-1111-1111-1111-111111111111";
+const SECOND_DEVICE: &str = "GPU-22222222-2222-2222-2222-222222222222";
+const CRASH_ROOT: &str = "RM_SPACE_TEST_CRASH_ROOT";
+const CRASH_DEVICE: &str = "RM_SPACE_TEST_CRASH_DEVICE";
 
 fn staged(provider: &RunscProvider) -> RunscReservation {
     let reservation = provider.reserve().unwrap();
@@ -93,9 +97,15 @@ fn request(phase: WorkloadPhase, mode: &str, lifetime: Duration) -> WorkloadRequ
 
 #[tokio::test]
 async fn real_cpu_provider_checks_isolation_and_owns_relay_and_cleanup() {
-    const CRASH_ROOT: &str = "RM_SPACE_TEST_CRASH_ROOT";
     if let Some(root) = std::env::var_os(CRASH_ROOT).map(PathBuf::from) {
-        let provider = RunscProvider::open(fixture_config(&root)).await.unwrap();
+        let config = fixture_config(&root);
+        let provider = if std::env::var_os(CRASH_DEVICE).is_some() {
+            RunscProvider::open_for_exclusive_device(config, &root.join("devices"), FIRST_DEVICE)
+                .await
+                .unwrap()
+        } else {
+            RunscProvider::open(config).await.unwrap()
+        };
         let running = staged(&provider)
             .start(request(
                 WorkloadPhase::Serve {
@@ -287,7 +297,110 @@ async fn real_cpu_provider_checks_isolation_and_owns_relay_and_cleanup() {
         SOURCE_BYTES
     );
     assert!(cgroup.is_dir());
-    let _reopened = RunscProvider::open(config).await.unwrap();
+    let reopened = RunscProvider::open(config.clone()).await.unwrap();
     assert!(!bundle.exists());
     assert!(!cgroup.exists());
+    drop(reopened);
+    verify_exclusive_device_lifecycle(_root.path(), config).await;
+}
+
+async fn verify_exclusive_device_lifecycle(root: &Path, mut primary: RunscConfig) {
+    let registry = root.join("devices");
+    fs::DirBuilder::new().mode(0o700).create(&registry).unwrap();
+    let mut alternate = primary.clone();
+    alternate.state = root.join("alternate-state");
+    alternate.delegated_cgroup = primary.delegated_cgroup.join("alternate-device");
+    primary.delegated_cgroup = primary.delegated_cgroup.join("primary-device");
+    for group in [&primary.delegated_cgroup, &alternate.delegated_cgroup] {
+        fs::create_dir(group).unwrap();
+        fs::write(group.join("cgroup.subtree_control"), "+cpu +memory +pids").unwrap();
+    }
+
+    let provider =
+        RunscProvider::open_for_exclusive_device(primary.clone(), &registry, FIRST_DEVICE)
+            .await
+            .unwrap();
+    let reserved = staged(&provider);
+    assert!(matches!(provider.reserve(), Err(SandboxError::DeviceBusy)));
+    assert!(matches!(
+        provider.clone().release_exclusive_device().await,
+        Err(SandboxError::DeviceBusy)
+    ));
+    assert!(matches!(
+        RunscProvider::open_for_exclusive_device(alternate.clone(), &registry, FIRST_DEVICE).await,
+        Err(SandboxError::DeviceBusy)
+    ));
+    let independent =
+        RunscProvider::open_for_exclusive_device(alternate.clone(), &registry, SECOND_DEVICE)
+            .await
+            .unwrap();
+    drop(independent);
+    let original_state = root.join("bound-alternate-state");
+    fs::rename(&alternate.state, &original_state).unwrap();
+    assert!(matches!(
+        RunscProvider::open_for_exclusive_device(alternate.clone(), &registry, SECOND_DEVICE).await,
+        Err(SandboxError::DeviceRecoveryRequired)
+    ));
+    fs::rename(&alternate.state, root.join("replacement-alternate-state")).unwrap();
+    fs::rename(original_state, &alternate.state).unwrap();
+    RunscProvider::open_for_exclusive_device(alternate.clone(), &registry, SECOND_DEVICE)
+        .await
+        .unwrap()
+        .release_exclusive_device()
+        .await
+        .unwrap();
+    let running = reserved
+        .start(request(
+            WorkloadPhase::Serve {
+                loopback_port: 24566,
+            },
+            "serve",
+            Duration::from_secs(15),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(provider.reserve(), Err(SandboxError::DeviceBusy)));
+    assert_eq!(running.stop().await.unwrap(), WorkloadExit::Stopped);
+    assert!(provider.reserve().is_ok());
+    drop(provider);
+
+    let mut worker = tokio::process::Command::new(std::env::current_exe().unwrap());
+    worker
+        .args([
+            "--exact",
+            "real_cpu_provider_checks_isolation_and_owns_relay_and_cleanup",
+        ])
+        .env(CRASH_ROOT, root)
+        .env(CRASH_DEVICE, FIRST_DEVICE)
+        .env("RM_SPACE_TEST_CGROUP", &primary.delegated_cgroup)
+        .kill_on_drop(true);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(20), worker.status())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    let interrupted = fs::read_to_string(root.join("interrupted-run")).unwrap();
+    let bundle = primary.state.join("bundles").join(&interrupted);
+    let cgroup = primary.delegated_cgroup.join(interrupted);
+    assert!(bundle.is_dir() && cgroup.is_dir());
+    assert!(matches!(
+        RunscProvider::open_for_exclusive_device(alternate.clone(), &registry, FIRST_DEVICE).await,
+        Err(SandboxError::DeviceRecoveryRequired)
+    ));
+    let recovered =
+        RunscProvider::open_for_exclusive_device(primary.clone(), &registry, FIRST_DEVICE)
+            .await
+            .unwrap();
+    assert!(!bundle.exists() && !cgroup.exists());
+    recovered.release_exclusive_device().await.unwrap();
+    let transferred =
+        RunscProvider::open_for_exclusive_device(alternate.clone(), &registry, FIRST_DEVICE)
+            .await
+            .unwrap();
+    transferred.release_exclusive_device().await.unwrap();
+    for group in [&primary.delegated_cgroup, &alternate.delegated_cgroup] {
+        fs::remove_dir(group).unwrap();
+    }
 }
