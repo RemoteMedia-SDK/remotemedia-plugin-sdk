@@ -24,4 +24,8 @@ Install the executable `guest/remotemedia-space-launch` and the Spaces `guest_bo
 
 The Linux CPU fixture on WSL2 installed 49 locked wheels using CPython 3.12.3 and uv 0.11.7 in gVisor. Real Gradio 6.14.0 accepted a file upload and streamed an intermediate and final result through the production relay. A separate gVisor probe changed only the ZIP comment of a verified wheel and uv rejected the resulting hash mismatch before bootstrap. Five focused launcher tests passed, including missing and extra inputs, incompatible ABI, static mode inventory, and rejection of ambient installer and app environment inputs.
 
-Scaling Runner and the Spaces gateway still need to call the SDK Base bridge for production launches. Deployment-host evidence and physical CUDA acceptance remain release gates.
+Scaling Runner calls the SDK Base bridge for opt-in Linux CPU launches. Deployment-host evidence and physical CUDA acceptance remain release gates. [Scaling verification](../../../../remotemedia-scaling/openspec/changes/isolate-space-workloads/implementation.md)
+
+## Live CPU readiness
+
+`RunscProvider::check_ready` reads the delegated controller set, checks the dedicated provider state and trusted guest launcher and relay, verifies the pinned runtime digest, and queries the runtime's container registry. The probe creates no reservation or workload. Runner uses the result for placement and rechecks it before staging a fresh protected run.

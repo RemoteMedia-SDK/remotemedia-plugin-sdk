@@ -101,17 +101,7 @@ impl RunscProvider {
                 "expected a runtime file and dedicated host directories",
             ));
         }
-        if config.delegated_cgroup == Path::new(CGROUP_FS)
-            || !config.delegated_cgroup.starts_with(CGROUP_FS)
-            || !["memory", "cpu", "pids"].iter().all(|controller| {
-                fs::read_to_string(config.delegated_cgroup.join("cgroup.subtree_control"))
-                    .is_ok_and(|enabled| enabled.split_whitespace().any(|name| name == *controller))
-            })
-        {
-            return Err(SandboxError::Invalid(
-                "a dedicated cgroup v2 subtree with memory, cpu and pids is required",
-            ));
-        }
+        require_delegation(&config.delegated_cgroup)?;
         fs::DirBuilder::new()
             .mode(0o700)
             .recursive(true)
@@ -159,6 +149,39 @@ impl RunscProvider {
             .filter(|line| line.starts_with("runsc version ") && line.len() <= 128)
             .map(str::to_owned)
             .ok_or(SandboxError::Runtime("version reporting"))
+    }
+
+    /// Check the provider prerequisites and private runtime state without
+    /// creating a reservation or starting a workload.
+    pub async fn check_ready(&self, launcher: &Path) -> Result<(), SandboxError> {
+        let host = self.0.clone();
+        let launcher = launcher.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let config = &host.config;
+            require_delegation(&config.delegated_cgroup)?;
+            if !config.state.join("bundles").is_dir() || !config.state.join("runtime").is_dir() {
+                return Err(SandboxError::Invalid("provider state is unavailable"));
+            }
+            for program in [&config.relay_program, &launcher] {
+                let relative = program
+                    .strip_prefix("/")
+                    .map_err(|_| SandboxError::Invalid("invalid guest program"))?;
+                if !absolute_guest_program(program)
+                    || !fs::metadata(config.rootfs.join(relative)).is_ok_and(|metadata| {
+                        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                    })
+                {
+                    return Err(SandboxError::Invalid(
+                        "guest controller executable is unavailable",
+                    ));
+                }
+            }
+            verify_runtime(&config.executable, &config.executable_sha256)
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+        self.list().await?;
+        Ok(())
     }
 
     pub fn reserve(&self) -> Result<RunscReservation, SandboxError> {
@@ -686,6 +709,22 @@ fn verify_runtime(path: &Path, expected: &str) -> Result<(), SandboxError> {
     if hex::encode(digest.finalize()) != expected {
         return Err(SandboxError::Invalid(
             "runtime binary digest does not match its approved release",
+        ));
+    }
+    Ok(())
+}
+
+fn require_delegation(path: &Path) -> Result<(), SandboxError> {
+    if path == Path::new(CGROUP_FS)
+        || !path.starts_with(CGROUP_FS)
+        || !fs::read_to_string(path.join("cgroup.subtree_control")).is_ok_and(|enabled| {
+            ["memory", "cpu", "pids"]
+                .iter()
+                .all(|controller| enabled.split_whitespace().any(|name| name == *controller))
+        })
+    {
+        return Err(SandboxError::Invalid(
+            "a dedicated cgroup v2 subtree with memory, cpu and pids is required",
         ));
     }
     Ok(())
