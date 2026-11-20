@@ -13,11 +13,31 @@ pub enum WorkloadTarget {
     LinuxCuda,
 }
 
+impl WorkloadTarget {
+    /// Check phase support independently of request details such as limits and port.
+    pub const fn supports_phase(self, phase: WorkloadPhase) -> bool {
+        match self {
+            Self::LinuxCpu => true,
+            Self::LinuxCuda => matches!(phase, WorkloadPhase::Serve { .. }),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkloadPhase {
     Build,
     Install,
     Serve { loopback_port: u16 },
+}
+
+/// The policy and runtime that passed the provider's local prerequisite probe.
+/// Contract version 1 uses private mounts, loopback-only networking, explicit
+/// device access, and finite CPU, memory, scratch, process and lifetime limits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkloadCapabilities {
+    pub contract_version: u32,
+    pub target: WorkloadTarget,
+    pub runtime_version: String,
 }
 
 /// Per-workload limits. All values must be nonzero.

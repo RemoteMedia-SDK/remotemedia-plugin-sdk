@@ -18,7 +18,8 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
 
 use crate::{
-    SandboxError, WorkloadExit, WorkloadLimits, WorkloadPhase, WorkloadRequest, WorkloadTarget,
+    SandboxError, WorkloadCapabilities, WorkloadExit, WorkloadLimits, WorkloadPhase,
+    WorkloadRequest, WorkloadTarget, PROVIDER_CONTRACT_VERSION,
 };
 
 mod build;
@@ -254,6 +255,18 @@ impl RunscProvider {
             .filter(|line| line.starts_with("runsc version ") && line.len() <= 128)
             .map(str::to_owned)
             .ok_or(SandboxError::Runtime("version reporting"))
+    }
+
+    /// Probe the requested profile and report the matching provider contract.
+    pub async fn capabilities(
+        &self,
+        target: WorkloadTarget,
+    ) -> Result<WorkloadCapabilities, SandboxError> {
+        Ok(WorkloadCapabilities {
+            contract_version: PROVIDER_CONTRACT_VERSION,
+            target,
+            runtime_version: self.probe(target).await?,
+        })
     }
 
     fn target(&self) -> WorkloadTarget {
@@ -831,8 +844,7 @@ fn validate_request(request: &WorkloadRequest, target: WorkloadTarget) -> Result
     if request.target != target {
         return Err(SandboxError::UnsupportedTarget(request.target));
     }
-    if target == WorkloadTarget::LinuxCuda && !matches!(request.phase, WorkloadPhase::Serve { .. })
-    {
+    if !target.supports_phase(request.phase) {
         return Err(SandboxError::Invalid(
             "CUDA device access is limited to serving",
         ));

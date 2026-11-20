@@ -138,13 +138,22 @@ async fn real_cpu_provider_checks_isolation_and_owns_relay_and_cleanup() {
         assert!(fs::read_dir(registry).unwrap().next().is_none());
     }
     let provider = RunscProvider::open(config.clone()).await.unwrap();
-    assert!(provider
-        .probe(WorkloadTarget::LinuxCpu)
+    let capabilities = provider
+        .capabilities(WorkloadTarget::LinuxCpu)
         .await
-        .unwrap()
-        .starts_with("runsc version "));
+        .unwrap();
+    assert_eq!(capabilities.contract_version, 1);
+    assert_eq!(capabilities.target, WorkloadTarget::LinuxCpu);
+    assert!(capabilities.runtime_version.starts_with("runsc version "));
+    assert!(capabilities.target.supports_phase(WorkloadPhase::Build));
+    assert!(capabilities.target.supports_phase(WorkloadPhase::Install));
+    let serve = WorkloadPhase::Serve { loopback_port: 1 };
+    assert!(capabilities.target.supports_phase(serve));
+    assert!(WorkloadTarget::LinuxCuda.supports_phase(serve));
+    assert!(!WorkloadTarget::LinuxCuda.supports_phase(WorkloadPhase::Build));
+    assert!(!WorkloadTarget::LinuxCuda.supports_phase(WorkloadPhase::Install));
     assert!(matches!(
-        provider.probe(WorkloadTarget::LinuxCuda).await,
+        provider.capabilities(WorkloadTarget::LinuxCuda).await,
         Err(SandboxError::UnsupportedTarget(_))
     ));
     assert!(RunscProvider::open(config.clone()).await.is_err());

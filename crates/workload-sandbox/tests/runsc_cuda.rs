@@ -68,6 +68,19 @@ async fn two_physical_cuda_devices_stay_exclusive_and_serve_independently() {
     let b = RunscProvider::open_cuda(second.clone(), &second_cuda)
         .await
         .unwrap();
+    for provider in [&a, &b] {
+        let capabilities = provider
+            .capabilities(WorkloadTarget::LinuxCuda)
+            .await
+            .unwrap();
+        assert_eq!(capabilities.contract_version, 1);
+        assert_eq!(capabilities.target, WorkloadTarget::LinuxCuda);
+        assert!(capabilities.runtime_version.starts_with("runsc version "));
+        assert!(matches!(
+            provider.capabilities(WorkloadTarget::LinuxCpu).await,
+            Err(SandboxError::UnsupportedTarget(_))
+        ));
+    }
     let (a_run, b_run) = tokio::try_join!(
         a.reserve().unwrap().start(request(&first_cuda.device_uuid)),
         b.reserve()
