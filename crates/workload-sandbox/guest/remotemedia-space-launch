@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -16,7 +17,9 @@ SCRATCH = Path("/work")
 UV = "/usr/local/bin/uv"
 BOOTSTRAP = "/opt/remotemedia/guest_bootstrap.py"
 WHEEL_NAME = re.compile(r"[A-Za-z0-9+_.-]{1,220}\.whl")
+SDIST_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,212}\.tar\.gz")
 SHA256 = re.compile(r"[0-9a-f]{64}")
+UV_OFFLINE = [UV, "--offline", "--no-config", "--no-cache"]
 
 
 def verified_requirements(wheel_dir, sdk, abi):
@@ -32,7 +35,8 @@ def verified_requirements(wheel_dir, sdk, abi):
             or record.get("python_abi") != abi):
         raise ValueError("approved wheel inventory does not match guest Python ABI")
     wheels = record.get("wheels")
-    if not isinstance(wheels, dict) or len(wheels) > 2048 or bool(wheels) != (sdk == "gradio"):
+    if (not isinstance(wheels, dict) or len(wheels) > 2048
+            or (sdk != "build" and bool(wheels) != (sdk == "gradio"))):
         raise ValueError("approved wheel inventory does not match Space SDK")
     for name, digest in wheels.items():
         if not WHEEL_NAME.fullmatch(name) or not isinstance(digest, str) or not SHA256.fullmatch(digest):
@@ -46,40 +50,85 @@ def verified_requirements(wheel_dir, sdk, abi):
     return [f"{(wheel_dir / name).as_uri()} --hash=sha256:{wheels[name]}" for name in sorted(wheels)]
 
 
+def python_abi():
+    if sys.implementation.name != "cpython" or getattr(sys, "abiflags", ""):
+        raise ValueError("expected trusted CPython with the standard ABI in the guest image")
+    return f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+
+def scratch_environment():
+    home = SCRATCH / "home"
+    temp = SCRATCH / "tmp"
+    for directory in (home, temp):
+        directory.mkdir(mode=0o700)
+    return {"HOME": str(home), "TMPDIR": str(temp), "PATH": "/usr/local/bin:/usr/bin:/bin"}
+
+
+def provision_python(requirements, env, *, build=False):
+    if not requirements and not build:
+        return sys.executable
+    venv = SCRATCH / "venv"
+    python = str(venv / "bin/python")
+    commands = [
+        ["venv", "--no-project", "--no-python-downloads", "--python", sys.executable, str(venv)]
+    ]
+    if requirements:
+        lock = SCRATCH / "approved-wheels.txt"
+        lock.write_text("\n".join(requirements) + "\n", encoding="ascii")
+        commands.extend((
+            ["pip", "sync", "--no-index", "--only-binary", ":all:", "--require-hashes", "--link-mode", "copy",
+             "--python", python, str(lock)],
+            ["pip", "check", "--python", python],
+        ))
+    for command in commands:
+        subprocess.run(UV_OFFLINE + command, cwd=SCRATCH, env=env, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL if build else None, check=True)
+    env["PATH"] = f"{venv / 'bin'}:{env['PATH']}"
+    return python
+
+
+def build_wheel(source_name, output_name, size_arg):
+    size = int(size_arg)
+    if not SDIST_NAME.fullmatch(source_name) or not WHEEL_NAME.fullmatch(output_name) or size <= 0:
+        raise ValueError("invalid approved source build arguments")
+    source = SOURCE / source_name
+    if not stat.S_ISREG(source.lstat().st_mode):
+        raise ValueError("expected a regular approved source distribution")
+    requirements = verified_requirements(WHEELS, "build", python_abi())
+    env = scratch_environment()
+    python = provision_python(requirements, env, build=True)
+    output_dir = SCRATCH / "dist"
+    output_dir.mkdir(mode=0o700)
+    subprocess.run(
+        UV_OFFLINE + ["build", "--wheel", "--force-pep517", "--no-build-isolation", "--no-index",
+                      "--no-sources", "--no-python-downloads", "--no-create-gitignore",
+                      "--python", python, "--out-dir", str(output_dir), str(source)],
+        cwd=SCRATCH, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, check=True,
+    )
+    if {path.name for path in output_dir.iterdir()} != {output_name}:
+        raise ValueError("build output differs from its approved wheel inventory")
+    fd = os.open(output_dir / output_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as wheel:
+        info = os.fstat(wheel.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+            raise ValueError("build output differs from its approved wheel size")
+        shutil.copyfileobj(wheel, sys.stdout.buffer)
+
+
 def main():
+    if sys.argv[1:2] == ["build"]:
+        build_wheel(*sys.argv[2:])
+        return
     sdk, entry_arg, port_arg = sys.argv[1:]
     entry = Path(entry_arg).resolve(strict=True)
     port = int(port_arg)
     if (sdk not in {"static", "gradio"} or not entry.is_relative_to(SOURCE)
             or not entry.is_file() or not 1 <= port <= 65535):
         raise ValueError("invalid approved Space launch arguments")
-    if sys.implementation.name != "cpython" or getattr(sys, "abiflags", ""):
-        raise ValueError("expected trusted CPython with the standard ABI in the guest image")
-    abi = f"cp{sys.version_info.major}{sys.version_info.minor}"
-    requirements = verified_requirements(WHEELS, sdk, abi)
-
-    home = SCRATCH / "home"
-    temp = SCRATCH / "tmp"
-    for directory in (home, temp):
-        directory.mkdir(mode=0o700)
-    env = {"HOME": str(home), "TMPDIR": str(temp), "PATH": "/usr/local/bin:/usr/bin:/bin"}
-    python = sys.executable
-    if requirements:
-        venv = SCRATCH / "venv"
-        lock = SCRATCH / "approved-wheels.txt"
-        lock.write_text("\n".join(requirements) + "\n", encoding="ascii")
-        prefix = [UV, "--offline", "--no-config", "--no-cache"]
-        commands = (
-            ["venv", "--no-project", "--no-python-downloads", "--python", python, str(venv)],
-            ["pip", "sync", "--no-index", "--only-binary", ":all:", "--require-hashes", "--link-mode", "copy",
-             "--python", str(venv / "bin/python"), str(lock)],
-            ["pip", "check", "--python", str(venv / "bin/python")],
-        )
-        for command in commands:
-            subprocess.run(prefix + command, cwd=SCRATCH, env=env, stdin=subprocess.DEVNULL, check=True)
-        python = str(venv / "bin/python")
-        env["PATH"] = f"{venv / 'bin'}:{env['PATH']}"
-
+    requirements = verified_requirements(WHEELS, sdk, python_abi())
+    env = scratch_environment()
+    python = provision_python(requirements, env)
+    temp = env["TMPDIR"]
     env.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", GRADIO_ANALYTICS_ENABLED="False",
                GRADIO_TEMP_DIR=str(temp), XDG_CACHE_HOME=str(SCRATCH / "cache"))
     os.chdir(SOURCE)

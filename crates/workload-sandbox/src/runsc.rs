@@ -21,6 +21,11 @@ use crate::{
     SandboxError, WorkloadExit, WorkloadLimits, WorkloadPhase, WorkloadRequest, WorkloadTarget,
 };
 
+mod build;
+mod python_build;
+pub use build::BuildOutput;
+pub use python_build::{ApprovedWheelBuild, BuildFile, BuildFileIdentity};
+
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(15);
 const PREFIX: &str = "rm-space-";
 const GUEST_UID: u32 = 65532;
@@ -201,6 +206,7 @@ impl RunscProvider {
         &self,
         pending: tempfile::TempDir,
         request: WorkloadRequest,
+        capture: Option<oneshot::Sender<ChildStdout>>,
     ) -> Result<RunscSandbox, SandboxError> {
         validate_request(&request)?;
         let id = pending
@@ -241,7 +247,7 @@ impl RunscProvider {
         let provider = self.clone();
         tokio::spawn(async move {
             let terminal = provider
-                .own_run(&id, &bundle, &request, cancellation, started)
+                .own_run(&id, &bundle, &request, cancellation, started, capture)
                 .await;
             drop(provider);
             let _ = done.send(terminal);
@@ -287,6 +293,7 @@ impl RunscProvider {
         request: &WorkloadRequest,
         mut cancel: oneshot::Receiver<()>,
         started: oneshot::Sender<Result<(), SandboxError>>,
+        capture: Option<oneshot::Sender<ChildStdout>>,
     ) -> Result<WorkloadExit, SandboxError> {
         let pid_file = bundle.join("sandbox.pid");
         let deadline = tokio::time::Instant::now() + request.limits.lifetime;
@@ -301,7 +308,11 @@ impl RunscProvider {
                 .arg(&pid_file)
                 .arg(id)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
+                .stdout(if capture.is_some() {
+                    Stdio::piped()
+                } else {
+                    Stdio::null()
+                })
                 .stderr(Stdio::null())
                 .spawn()
                 .map_err(SandboxError::from)
@@ -314,6 +325,10 @@ impl RunscProvider {
                 return Ok(WorkloadExit::Stopped);
             }
         };
+        if let Some(capture) = capture {
+            let output = child.stdout.take().expect("piped build stdout");
+            let _ = capture.send(output);
+        }
         let ready = async {
             wait_for_creation(&mut child, &pid_file).await?;
             if matches!(request.phase, WorkloadPhase::Serve { .. }) {
@@ -541,7 +556,9 @@ impl RunscReservation {
     }
 
     pub async fn start(self, request: WorkloadRequest) -> Result<RunscSandbox, SandboxError> {
-        self.provider.start_reserved(self.bundle, request).await
+        self.provider
+            .start_reserved(self.bundle, request, None)
+            .await
     }
 }
 

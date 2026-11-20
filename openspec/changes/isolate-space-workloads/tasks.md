@@ -2,7 +2,7 @@
 
 - [ ] 1.1 Define the provider profile, bounded lifecycle operations, and supported-policy reporting at the SDK Base boundary. Implement and document the first Linux provider and capability probing for CPU and CUDA separately.
 - [ ] 1.2 Extend `crates/py-env-manager/src/uv_backend.rs`, `process.rs`, and cache handling with verified offline wheel installation, explicit child inputs, and immutable or run-private environment ownership. Include lock digest, target, interpreter and policy identity in cache selection.
-- [ ] 1.3 Provide a separate disposable build context for approved source distributions. Verify build outputs before publication and clean up build state on failure or cancellation.
+- [x] 1.3 Provide a separate disposable build context for approved source distributions. Verify build outputs before publication and clean up build state on failure or cancellation.
 
 ## 2. Validation
 

@@ -1,12 +1,15 @@
 #![cfg(all(target_os = "linux", feature = "test-runsc"))]
 
 use std::fs;
+use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use remotemedia_workload_sandbox::runsc::{RunscConfig, RunscProvider, RunscReservation};
+use remotemedia_workload_sandbox::runsc::{
+    BuildOutput, RunscConfig, RunscProvider, RunscReservation,
+};
 use remotemedia_workload_sandbox::{
     SandboxError, WorkloadExit, WorkloadLimits, WorkloadPhase, WorkloadRequest, WorkloadTarget,
 };
@@ -140,6 +143,45 @@ async fn real_cpu_provider_checks_isolation_and_owns_relay_and_cleanup() {
         .unwrap();
     assert!(install.open_stream().is_err());
     assert_eq!(install.wait().await.unwrap(), WorkloadExit::Exited(0));
+
+    let payload = vec![b'w'; 12 * 8192];
+    let build = |mode| request(WorkloadPhase::Build, mode, Duration::from_secs(10));
+    let identity = |bytes: &[u8]| BuildOutput {
+        size: bytes.len() as u64,
+        sha256: Sha256::digest(bytes).into(),
+    };
+    let mut output = staged(&provider)
+        .build(build("build"), identity(&payload))
+        .await
+        .unwrap();
+    let mut observed = Vec::new();
+    output.read_to_end(&mut observed).unwrap();
+    assert_eq!(observed, payload);
+    for (mode, expected) in [
+        ("build", identity(&payload[..1024])),
+        ("build", identity(&vec![b'X'; payload.len()])),
+        ("build-fail", identity(&payload)),
+    ] {
+        assert!(staged(&provider)
+            .build(build(mode), expected)
+            .await
+            .is_err());
+        assert_eq!(
+            fs::read_dir(config.state.join("bundles")).unwrap().count(),
+            0
+        );
+    }
+    assert!(staged(&provider)
+        .build(
+            request(WorkloadPhase::Build, "block", Duration::from_secs(1)),
+            identity(&payload),
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        fs::read_dir(config.state.join("bundles")).unwrap().count(),
+        0
+    );
 
     let serve = staged(&provider)
         .start(request(

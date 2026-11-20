@@ -29,3 +29,11 @@ Scaling Runner calls the SDK Base bridge for opt-in Linux CPU launches. Deployme
 ## Live CPU readiness
 
 `RunscProvider::check_ready` reads the delegated controller set, checks the dedicated provider state and trusted guest launcher and relay, verifies the pinned runtime digest, and queries the runtime's container registry. The probe creates no reservation or workload. Runner uses the result for placement and rechecks it before staging a fresh protected run.
+
+## Disposable source builds
+
+`RunscProvider::build_python_wheel` verifies the worker-approved source distribution and build dependency wheels while staging them into read-only guest mounts. The guest makes a fresh venv, syncs the pinned wheel closure with hashes, and uses offline uv to build the approved wheel from the archive through PEP 517. The gVisor build has private scratch and loopback, with the configured CPU, memory, process, scratch, and lifetime limits. [uv build options](https://docs.astral.sh/uv/reference/cli/#uv-build)
+
+The host collects stdout into an anonymous bounded file. It releases that file only when the byte count and SHA-256 match the worker's approved output and gVisor confirms a successful exit and teardown. Input or output changes, build failure, and cancellation leave no wheel for the publisher. [Operator build command](../../../../remotemedia-scaling/openspec/changes/isolate-space-workloads/implementation.md)
+
+The WSL2 gVisor fixture verified exact output, wrong digest, oversized output, failed exit, and timeout. The native Runner built a synthetic PEP 517 wheel with a pinned build dependency. It rejected altered source or dependency bytes and a mismatched Python ABI. SIGTERM and live policy revocation returned no wheel and removed the build bundles and workload cgroups. The guest launcher tests passed for the existing serving path.

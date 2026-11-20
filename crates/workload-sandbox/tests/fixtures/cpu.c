@@ -84,5 +84,18 @@ int main(int argc, char **argv) {
     if (result) return result;
     if (!strcmp(argv[1], "serve")) return serve();
     if (!strcmp(argv[1], "block")) sleep(30);
+    if (!strcmp(argv[1], "build") || !strcmp(argv[1], "build-fail")) {
+        char output[8192];
+        memset(output, 'w', sizeof(output));
+        for (int i = 0; i < 12; i++) {
+            size_t sent = 0;
+            while (sent < sizeof(output)) {
+                ssize_t size = write(STDOUT_FILENO, output + sent, sizeof(output) - sent);
+                if (size <= 0) return 23;
+                sent += size;
+            }
+        }
+        if (!strcmp(argv[1], "build-fail")) return 24;
+    }
     return 0;
 }
