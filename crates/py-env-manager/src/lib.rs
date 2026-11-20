@@ -16,6 +16,10 @@
 pub mod uv_backend;
 
 mod interpreter;
+#[cfg(feature = "bundled-uv")]
+mod locked;
+#[cfg(feature = "bundled-uv")]
+pub use locked::{LockedWheelPlan, RunPrivateVenv};
 mod process;
 pub use process::{ProcessNamespace, ProvisioningCommand, ProvisioningContext};
 pub mod system_backend;

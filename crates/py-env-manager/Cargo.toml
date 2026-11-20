@@ -25,7 +25,7 @@ test-linux-namespace = []
 test-probe = []
 # Use `uv` for venv provisioning instead of system `python -m venv` + `pip`.
 # Activates reqwest (blocking + rustls-tls), flate2, tar, and zip (Windows) as optional deps.
-bundled-uv = ["dep:reqwest", "dep:flate2", "dep:tar", "dep:zip"]
+bundled-uv = ["dep:reqwest", "dep:flate2", "dep:tar", "dep:zip", "dep:tempfile", "dep:url"]
 # Embed a uv binary at build time (used when no system uv is available).
 # Implies `bundled-uv` (download fallback if embedded extraction fails).
 bundled-uv-embedded = ["bundled-uv"]
@@ -43,6 +43,8 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 tracing = { workspace = true }
 fs2 = "0.4.3"
+tempfile = { version = "3", optional = true }
+url = { version = "2", optional = true }
 
 # HTTP download for uv binary (blocking client, rustls for no-OpenSSL manylinux CI).
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }

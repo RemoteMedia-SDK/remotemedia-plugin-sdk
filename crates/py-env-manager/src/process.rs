@@ -48,6 +48,50 @@ impl ProvisioningContext {
         self
     }
 
+    /// Locked installers use only standard system tools and run-owned state.
+    #[cfg(feature = "bundled-uv")]
+    pub(crate) fn locked_command(
+        &self,
+        program: &std::path::Path,
+        root: &std::path::Path,
+    ) -> io::Result<ProvisioningCommand> {
+        let mut launch = self.command(program)?;
+        let home = root.join("home");
+        let temp = root.join("tmp");
+        let command = launch.command_mut();
+        command
+            .env_clear()
+            .current_dir(root)
+            .env("HOME", &home)
+            .env("TMPDIR", &temp);
+        #[cfg(windows)]
+        {
+            let windows = std::env::var_os("SystemRoot")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "Windows system directory is unavailable",
+                    )
+                })?;
+            command
+                .env("SystemRoot", &windows)
+                .env("PATH", windows.join("System32"))
+                .env("USERPROFILE", &home)
+                .env("APPDATA", &home)
+                .env("LOCALAPPDATA", &home)
+                .env("TEMP", &temp)
+                .env("TMP", &temp);
+        }
+        #[cfg(not(windows))]
+        command
+            .env("PATH", "/usr/bin:/bin")
+            .env("XDG_CONFIG_HOME", &home)
+            .env("XDG_CACHE_HOME", &home);
+        Ok(launch)
+    }
+
     pub fn command(&self, program: impl AsRef<OsStr>) -> io::Result<ProvisioningCommand> {
         #[cfg(windows)]
         let command = {

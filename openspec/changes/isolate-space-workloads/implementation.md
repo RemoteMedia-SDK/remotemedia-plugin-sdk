@@ -44,6 +44,14 @@ The WSL2 fixture installed the exact CPython 3.12.3 lock with 49 wheels in two c
 
 Scaling Runner calls the SDK Base bridge for opt-in Linux CPU launches. Deployment-host evidence and physical CUDA acceptance remain release gates. [Scaling verification](../../../../remotemedia-scaling/openspec/changes/isolate-space-workloads/implementation.md)
 
+### Reviewed managed Python
+
+The Spaces controller stages the worker-approved wheel inventory before invoking `remotemedia-scaling-runner provision-space-python`. Runner reads the versioned plan from stdin and calls `remotemedia-py-env` with the trusted Python and uv executables. The manager checks the exact wheel directory and probes the interpreter's platform, architecture, version, and ABI. uv consumes only local wheel URLs with required SHA-256 hashes, and the manager checks the installed closure before returning its Python executable.
+
+Each install owns a fresh venv and scratch directory. Its identity binds the wheel inventory, artifact digest, target, exact interpreter, and policy revision. There is no shared-cache entry for the run. The process owner retains installation resources until its children exit, and Spaces owns cleanup after the successful handoff. The installer uses explicit system inputs and clears ambient Python and uv configuration. Deploy the matching Runner with the Spaces controller.
+
+The uv-enabled library suite passed 42 tests. The locked-wheel integration test passed on Windows and WSL2 with synthetic ambient uv settings. Concurrent installs of the same lock used independent directories, and removing one left the other usable. uv rejected a same-size modification to a valid wheel archive and the failed installation left no environment behind. The packaged Windows launcher passed signed preparation and reviewed Gradio serving over direct and paired routes, including upload, streaming, and private environment removal after stop or revocation. On WSL2, the actual Linux Runner served the locked Gradio fixture and removed its environment on stop. All six reviewed transport tests also passed there.
+
 ## Live CPU readiness
 
 `RunscProvider::check_ready` reads the delegated controller set, checks the dedicated provider state and trusted guest launcher and relay, verifies the pinned runtime digest, and queries the runtime's container registry. The probe creates no reservation or workload. Runner uses the result for placement and rechecks it before staging a fresh protected run.

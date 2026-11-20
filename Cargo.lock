@@ -2004,8 +2004,10 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
+ "tempfile",
  "tokio",
  "tracing",
+ "url",
  "windows-sys 0.61.2",
  "zip",
 ]
