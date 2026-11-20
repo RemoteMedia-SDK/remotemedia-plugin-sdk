@@ -22,7 +22,7 @@ SHA256 = re.compile(r"[0-9a-f]{64}")
 UV_OFFLINE = [UV, "--offline", "--no-config", "--no-cache"]
 
 
-def verified_requirements(wheel_dir, sdk, abi):
+def verified_requirements(wheel_dir, sdk, abi, version):
     inventory = wheel_dir / "approved-wheels.json"
     if not stat.S_ISREG(inventory.lstat().st_mode):
         raise ValueError("expected a regular approved wheel inventory")
@@ -31,9 +31,17 @@ def verified_requirements(wheel_dir, sdk, abi):
     if len(content) > 1024 * 1024:
         raise ValueError("approved wheel inventory is too large")
     record = json.loads(content)
-    if (not isinstance(record, dict) or record.get("version") != 1
-            or record.get("python_abi") != abi):
+    inventory_version = 1 if sdk == "build" else 2
+    if (not isinstance(record, dict) or type(record.get("version")) is not int
+            or record["version"] != inventory_version):
+        raise ValueError("unsupported approved wheel inventory version")
+    if record.get("python_abi") != abi:
         raise ValueError("approved wheel inventory does not match guest Python ABI")
+    if sdk != "build":
+        minor = ".".join(map(str, version[:2]))
+        patch = f"{minor}.{version[2]}"
+        if record.get("python_version") not in (minor, patch):
+            raise ValueError("approved wheel inventory does not match guest Python version")
     wheels = record.get("wheels")
     if (not isinstance(wheels, dict) or len(wheels) > 2048
             or (sdk != "build" and bool(wheels) != (sdk == "gradio"))):
@@ -50,10 +58,11 @@ def verified_requirements(wheel_dir, sdk, abi):
     return [f"{(wheel_dir / name).as_uri()} --hash=sha256:{wheels[name]}" for name in sorted(wheels)]
 
 
-def python_abi():
+def python_target():
     if sys.implementation.name != "cpython" or getattr(sys, "abiflags", ""):
         raise ValueError("expected trusted CPython with the standard ABI in the guest image")
-    return f"cp{sys.version_info.major}{sys.version_info.minor}"
+    version = sys.version_info[:3]
+    return f"cp{version[0]}{version[1]}", version
 
 
 def scratch_environment():
@@ -94,7 +103,7 @@ def build_wheel(source_name, output_name, size_arg):
     source = SOURCE / source_name
     if not stat.S_ISREG(source.lstat().st_mode):
         raise ValueError("expected a regular approved source distribution")
-    requirements = verified_requirements(WHEELS, "build", python_abi())
+    requirements = verified_requirements(WHEELS, "build", *python_target())
     env = scratch_environment()
     python = provision_python(requirements, env, build=True)
     output_dir = SCRATCH / "dist"
@@ -125,7 +134,7 @@ def main():
     if (sdk not in {"static", "gradio"} or not entry.is_relative_to(SOURCE)
             or not entry.is_file() or not 1 <= port <= 65535):
         raise ValueError("invalid approved Space launch arguments")
-    requirements = verified_requirements(WHEELS, sdk, python_abi())
+    requirements = verified_requirements(WHEELS, sdk, *python_target())
     env = scratch_environment()
     python = provision_python(requirements, env)
     temp = env["TMPDIR"]

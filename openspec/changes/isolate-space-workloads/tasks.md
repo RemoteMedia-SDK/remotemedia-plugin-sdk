@@ -6,6 +6,6 @@
 
 ## 2. Validation
 
-- [ ] 2.1 Run lock and cache tests for wrong targets, altered bytes, missing wheels, concurrent reuse, and no ambient installer config or network access.
+- [x] 2.1 Run lock and cache tests for wrong targets, altered bytes, missing wheels, concurrent reuse, and no ambient installer config or network access.
 - [ ] 2.2 Exercise the real Linux provider in installation and serving with synthetic access-denial fixtures, limits, cancellation, and crash teardown. Verify device visibility and scheduling constraints on physical CUDA for the CUDA profile.
 - [ ] 2.3 Run the existing managed Python and lifecycle tests on supported trusted paths, including trusted Darwin and Windows process ownership.
