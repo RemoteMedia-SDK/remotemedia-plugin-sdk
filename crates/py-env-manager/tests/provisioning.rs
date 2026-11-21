@@ -3,7 +3,15 @@ use remotemedia_py_env::{
     system_backend::SystemBackend, EnvBackend, ProcessNamespace, ProvisioningContext,
     PythonEnvConfig, PythonEnvManager, PythonEnvMode,
 };
-use std::{path::PathBuf, process::Command};
+#[cfg(feature = "bundled-uv")]
+use remotemedia_py_env::{uv_backend::UvBackend, LockedWheelPlan};
+#[cfg(feature = "bundled-uv")]
+use sha2::{Digest, Sha256};
+use std::{
+    path::PathBuf,
+    process::Command,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 fn process_namespace() -> Option<ProcessNamespace> {
     #[cfg(target_os = "linux")]
@@ -24,13 +32,15 @@ fn context() -> ProvisioningContext {
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Self {
+        static NEXT_SCRATCH: AtomicUsize = AtomicUsize::new(0);
         let name = format!(
-            "rm-provisioning-{}-{}",
+            "rm-provisioning-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            NEXT_SCRATCH.fetch_add(1, Ordering::Relaxed),
         );
         let path = std::env::temp_dir().join(name);
         std::fs::create_dir(&path).unwrap();
@@ -75,6 +85,7 @@ files = {
  'rm_provisioning_fixture-1.0.dist-info/METADATA': b'Metadata-Version: 2.1\nName: rm-provisioning-fixture\nVersion: 1.0\n',
  'rm_provisioning_fixture-1.0.dist-info/WHEEL': b'Wheel-Version: 1.0\nGenerator: remotemedia-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n',
 }
+
 record = io.StringIO(newline='')
 writer = csv.writer(record)
 for name,data in files.items():
@@ -90,6 +101,73 @@ with zipfile.ZipFile(Path(sys.argv[1])/'rm_provisioning_fixture-1.0-py3-none-any
         String::from_utf8_lossy(&output.stderr)
     );
     path
+}
+
+#[cfg(feature = "bundled-uv")]
+#[tokio::test]
+#[ignore = "requires absolute UV_BINARY_PATH, trusted Python, and platform process ownership"]
+async fn locked_wheels_use_run_private_environments_and_reject_changed_bytes() {
+    let scratch = Scratch::new();
+    let wheels = wheelhouse(&scratch);
+    let wheel = std::fs::read_dir(&wheels).unwrap().next().unwrap().unwrap();
+    let target = Command::new(python()).args(["-I", "-c", r#"
+import json, platform, sys, sysconfig, zipfile
+with zipfile.ZipFile(sys.argv[1], 'a') as wheel:
+    wheel.comment = b'a'
+arch = platform.machine().lower()
+if sys.platform == 'win32':
+    tag = sysconfig.get_platform().lower()
+    arch = 'x86' if tag == 'win32' else tag.removeprefix('win-')
+arch = {'amd64': 'x86_64', 'aarch64': 'arm64'}.get(arch, arch)
+print(json.dumps([sys.executable, {'platform': sys.platform, 'arch': arch, 'python': '.'.join(map(str, sys.version_info[:3])),
+    'abi': 'cp%d%d' % sys.version_info[:2], 'backend': 'cpu'}]))
+"#]).arg(wheel.path()).output().unwrap();
+    assert!(target.status.success());
+    let mut bytes = std::fs::read(wheel.path()).unwrap();
+    let (python, target): (PathBuf, serde_json::Value) =
+        serde_json::from_slice(&target.stdout).unwrap();
+    let plan = serde_json::json!({"version": 1, "artifact_sha256": "a".repeat(64),
+        "policy_revision": "b".repeat(64), "target": target, "wheels": {
+            (wheel.file_name().to_str().unwrap()): {"size": bytes.len(), "sha256": hex::encode(Sha256::digest(&bytes))},
+        },
+    });
+    let plan = LockedWheelPlan::read(serde_json::to_vec(&plan).unwrap().as_slice()).unwrap();
+    let uv = PathBuf::from(std::env::var_os("UV_BINARY_PATH").expect("set UV_BINARY_PATH"));
+    let context = context();
+    let install =
+        || UvBackend::provision_locked(&uv, &python, &wheels, &scratch.0, &plan, &context);
+    let (first, second) = tokio::try_join!(install(), install()).unwrap();
+    assert_ne!(first.info().path, second.info().path);
+    assert_eq!(first.info().cache_key, second.info().cache_key);
+    let first_path = first.info().path.clone();
+    drop(first);
+    assert!(!first_path.exists());
+    let output = Command::new(&second.info().python_executable)
+        .args([
+            "-I",
+            "-c",
+            "import rm_provisioning_fixture as m; assert m.VALUE == 42",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    *bytes.last_mut().unwrap() = b'b';
+    std::fs::write(wheel.path(), bytes).unwrap();
+    let before = std::fs::read_dir(&scratch.0).unwrap().count();
+    let error = install().await.err().expect("reject changed wheel bytes");
+    assert!(
+        error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("hash mismatch"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), before);
 }
 
 #[tokio::test]

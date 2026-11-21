@@ -34,3 +34,21 @@ jobs:
         run: cargo test -p remotemedia-plugin-sdk --features python-plugin
       - name: cargo test bundled uv feature
         run: cargo test -p remotemedia-py-env --features bundled-uv
+
+  managed-python-macos:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install uv==0.11.7
+      - uses: Swatinem/rust-cache@v2
+      - name: Test managed Python and Darwin process ownership
+        run: |
+          cargo test --locked -p remotemedia-py-env --features bundled-uv
+          REMOTEMEDIA_PYTHON_DARWIN_TRUSTED_PROVISIONING=1 UV_BINARY_PATH="$(command -v uv)" \
+            cargo test --locked -p remotemedia-py-env --features bundled-uv --test provisioning -- --ignored
+          cargo test --locked -p remotemedia-shared-memory --features worker-channel --lib macos_process::tests

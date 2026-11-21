@@ -1,0 +1,88 @@
+#!/usr/bin/python3 -I
+"""Verify the assigned device before handing control to the Space launcher."""
+
+import ctypes as c
+import os
+import stat
+import sys
+from uuid import UUID
+
+
+def check_nodes(minor):
+    # gVisor allocates the guest UVM major. The GPU and control majors are fixed.
+    expected = {f"nvidia{minor}": (195, minor), "nvidiactl": (195, 255), "nvidia-uvm": (None, 0)}
+    nodes = {name for name in os.listdir("/dev") if name.startswith("nvidia")}
+    if nodes != expected.keys():
+        raise RuntimeError("unexpected NVIDIA device nodes in guest")
+    for name, (expected_major, expected_minor) in expected.items():
+        metadata = os.stat(f"/dev/{name}", follow_symlinks=False)
+        if not stat.S_ISCHR(metadata.st_mode):
+            raise RuntimeError("expected a character device for CUDA")
+        if (os.minor(metadata.st_rdev) != expected_minor
+                or (expected_major is not None and os.major(metadata.st_rdev) != expected_major)):
+            raise RuntimeError("assigned NVIDIA device number differs from the guest")
+
+
+def check_cuda(expected_uuid):
+    driver = c.CDLL("libcuda.so.1")
+
+    def call(name, argtypes, *args):
+        function = getattr(driver, name)
+        function.argtypes = argtypes
+        function.restype = c.c_int
+        if function(*args) != 0:
+            raise RuntimeError(f"CUDA verification failed at {name}")
+
+    int_p = c.POINTER(c.c_int)
+    call("cuInit", [c.c_uint], 0)
+    count = c.c_int()
+    call("cuDeviceGetCount", [int_p], c.byref(count))
+    if count.value != 1:
+        raise RuntimeError("CUDA must enumerate exactly one device")
+    device = c.c_int()
+    call("cuDeviceGet", [int_p, c.c_int], c.byref(device), 0)
+    uuid = (c.c_ubyte * 16)()
+    call("cuDeviceGetUuid_v2", [c.POINTER(type(uuid)), c.c_int], c.byref(uuid), device)
+    if f"GPU-{UUID(bytes=bytes(uuid))}" != expected_uuid:
+        raise RuntimeError("CUDA UUID differs from the assigned GPU")
+
+    context = c.c_void_p()
+    call("cuDevicePrimaryCtxRetain", [c.POINTER(c.c_void_p), c.c_int], c.byref(context), device)
+    try:
+        call("cuCtxSetCurrent", [c.c_void_p], context)
+        memory = c.c_uint64()
+        sent = c.c_uint32(0x524D4355)
+        received = c.c_uint32()
+        size = c.sizeof(sent)
+        call("cuMemAlloc_v2", [c.POINTER(c.c_uint64), c.c_size_t], c.byref(memory), size)
+        try:
+            call("cuMemcpyHtoD_v2", [c.c_uint64, c.c_void_p, c.c_size_t], memory, c.byref(sent), size)
+            call("cuMemcpyDtoH_v2", [c.c_void_p, c.c_uint64, c.c_size_t], c.byref(received), memory, size)
+            if sent.value != received.value:
+                raise RuntimeError("assigned CUDA device did not round trip memory")
+        finally:
+            call("cuMemFree_v2", [c.c_uint64], memory)
+    finally:
+        try:
+            call("cuCtxSetCurrent", [c.c_void_p], None)
+        finally:
+            call("cuDevicePrimaryCtxRelease_v2", [c.c_int], device)
+
+
+def main():
+    expected = sys.argv[1]
+    minor = int(sys.argv[2])
+    launcher = sys.argv[3:]
+    # Device selectors could mask an unexpected device during enumeration.
+    for name in ("NVIDIA_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        os.environ.pop(name, None)
+    check_nodes(minor)
+    check_cuda(expected)
+    os.execv(launcher[0], launcher)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (IndexError, OSError, ValueError, AttributeError, RuntimeError) as exc:
+        raise SystemExit(f"CUDA verification denied startup: {exc}") from None

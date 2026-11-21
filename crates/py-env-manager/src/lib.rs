@@ -16,6 +16,10 @@
 pub mod uv_backend;
 
 mod interpreter;
+#[cfg(feature = "bundled-uv")]
+mod locked;
+#[cfg(feature = "bundled-uv")]
+pub use locked::{LockedWheelPlan, RunPrivateVenv};
 mod process;
 pub use process::{ProcessNamespace, ProvisioningCommand, ProvisioningContext};
 pub mod system_backend;
@@ -718,7 +722,8 @@ pub struct PythonEnvConfig {
     pub require_python_version: bool,
 
     /// Linux provisioning requires trusted supervisor/unshare paths. Windows
-    /// uses a private job by default; other platforms reject contained launches.
+    /// uses a private job by default. macOS supports explicitly enabled trusted
+    /// process-group provisioning without a Linux namespace.
     #[serde(default)]
     pub process_namespace: Option<ProcessNamespace>,
 }

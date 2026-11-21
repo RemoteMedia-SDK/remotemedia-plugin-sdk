@@ -5,10 +5,15 @@
 //! or provisioning the `uv` binary.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::time::Instant;
 
+use super::locked::{absolute_regular_program, invalid, probe_python};
 use super::{EnvBackend, ProvisioningContext, VenvInfo};
+use super::{LockedWheelPlan, RunPrivateVenv};
 use remotemedia_types::{Error, Result};
 
 /// Backend that uses `uv` for environment management.
@@ -28,6 +33,89 @@ pub struct UvBackend {
 }
 
 impl UvBackend {
+    /// Install a verified wheel closure from a caller-owned staging directory.
+    /// Both paths must be private to the trusted caller throughout installation.
+    /// This uses the supplied interpreter and uv directly and publishes no cache entry.
+    pub async fn provision_locked(
+        uv: &Path,
+        python: &Path,
+        wheels: &Path,
+        parent: &Path,
+        plan: &LockedWheelPlan,
+        context: &ProvisioningContext,
+    ) -> Result<RunPrivateVenv> {
+        absolute_regular_program(uv)?;
+        absolute_regular_program(python)?;
+        if !wheels.is_absolute() || !parent.is_absolute() {
+            return Err(invalid(
+                "Locked provisioning requires absolute input and output paths",
+            ));
+        }
+        let requirements = plan.requirements(wheels)?;
+        let directory = Arc::new(
+            tempfile::Builder::new()
+                .prefix("locked-python-")
+                .tempdir_in(parent)
+                .map_err(crate::process::error)?,
+        );
+        let root = directory.path();
+        for leaf in ["home", "tmp"] {
+            std::fs::create_dir(root.join(leaf)).map_err(crate::process::error)?;
+        }
+        let context = context.clone().with_resource(directory.clone());
+        let actual = probe_python(python, root, &context).await?;
+        let cache_key = plan.bind_interpreter(python, &actual)?;
+        let path = root.join("venv");
+        let python_executable = resolve_venv_python(&path);
+        let lock = root.join("approved-wheels.txt");
+        std::fs::write(&lock, requirements).map_err(crate::process::error)?;
+        let deadline = Instant::now() + Duration::from_secs(570);
+        run_locked_uv(uv, root, &context, deadline, "venv", |command| {
+            command
+                .args(["venv", "--no-project", "--no-python-downloads", "--python"])
+                .arg(python)
+                .arg(&path);
+        })
+        .await?;
+        if actual != probe_python(&python_executable, root, &context).await? {
+            return Err(invalid(
+                "Locked venv did not retain the approved Python target",
+            ));
+        }
+        run_locked_uv(uv, root, &context, deadline, "sync", |command| {
+            command
+                .args([
+                    "pip",
+                    "sync",
+                    "--no-index",
+                    "--no-sources",
+                    "--only-binary",
+                    ":all:",
+                    "--require-hashes",
+                    "--link-mode",
+                    "copy",
+                    "--python",
+                ])
+                .arg(&python_executable)
+                .arg(&lock);
+        })
+        .await?;
+        run_locked_uv(uv, root, &context, deadline, "check", |command| {
+            command
+                .args(["pip", "check", "--python"])
+                .arg(&python_executable);
+        })
+        .await?;
+        Ok(RunPrivateVenv {
+            directory,
+            info: VenvInfo {
+                path,
+                python_executable,
+                cache_key,
+            },
+        })
+    }
+
     /// Construct a backend for an already-located `uv` binary.
     fn from_uv_path(uv_path: PathBuf) -> Self {
         Self {
@@ -176,6 +264,34 @@ impl UvBackend {
 
         Ok(stdout.to_string())
     }
+}
+
+async fn run_locked_uv(
+    uv: &Path,
+    root: &Path,
+    context: &ProvisioningContext,
+    deadline: Instant,
+    step: &str,
+    configure: impl FnOnce(&mut std::process::Command),
+) -> Result<()> {
+    let mut launch = context
+        .locked_command(uv, root)
+        .map_err(crate::process::error)?;
+    let command = launch.command_mut();
+    command.args(["--offline", "--no-config", "--no-cache"]);
+    configure(command);
+    let output = tokio::time::timeout_at(deadline, launch.output())
+        .await
+        .map_err(|_| Error::Execution(format!("Locked uv {step} timed out")))?
+        .map_err(crate::process::error)?;
+    if !output.status.success() {
+        return Err(Error::Execution(format!(
+            "Locked uv {step} failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
 }
 
 #[async_trait]
